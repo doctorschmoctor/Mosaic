@@ -60,10 +60,6 @@ struct WorkspaceView: View {
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 16).padding(.top, 36)
-            HStack {
-                Text("CONVERSATIONS").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(.secondary)
-                Spacer(); Text("\(store.conversations.count)").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
-            }.padding(.horizontal, 22).padding(.top, 24).padding(.bottom, 10)
             ScrollView {
                 LazyVStack(spacing: 3) {
                     ForEach(store.filteredConversations) { conversation in
@@ -74,18 +70,12 @@ struct WorkspaceView: View {
                             .font(.callout).foregroundStyle(.secondary).padding(20)
                     }
                 }.padding(.horizontal, 10)
-            }
+            }.padding(.top, 12)
             Divider().padding(.horizontal, 16)
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 8) {
-                    Circle().fill(store.isLive && store.connectionError == nil ? Color.green : Color.orange).frame(width: 6, height: 6)
-                    Text(store.isLive ? "Messages on this Mac" : "Demo workspace").font(.system(size: 12, weight: .medium))
-                }
-                Button { store.showSetup = true } label: {
-                    HStack { Text(store.isLive ? "Connection settings" : "Connect your Messages"); Spacer(); Image(systemName: "arrow.up.right") }
-                        .font(.system(size: 12)).foregroundStyle(Palette.accent)
-                }.buttonStyle(.plain)
-            }.padding(20)
+            Button { store.showSetup = true } label: {
+                HStack { Text(store.isLive ? "Connection settings" : "Connect your Messages"); Spacer(); Image(systemName: "arrow.up.right") }
+                    .font(.system(size: 12)).foregroundStyle(Palette.accent)
+            }.buttonStyle(.plain).padding(20)
         }.background(.regularMaterial)
     }
     private var emptyWorkspace: some View {
@@ -149,27 +139,25 @@ struct TileWorkspace: View {
             case .grid:
                 let rows = stride(from: 0, to: store.tiles.count, by: 2).map { Array(store.tiles[$0..<min($0 + 2, store.tiles.count)]) }
                 ScrollView(.vertical) {
-                    VSplitView {
-                        ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                            HSplitView {
-                                ForEach(row) { chat in
-                                    ConversationTile(conversation: chat)
-                                        .padding(4)
-                                        .frame(minWidth: 275, idealWidth: geometry.size.width / CGFloat(row.count), maxWidth: .infinity,
-                                               minHeight: 235, idealHeight: geometry.size.height / CGFloat(rows.count), maxHeight: .infinity)
-                                }
-                            }
-                        }
-                    }.frame(width: geometry.size.width, height: max(geometry.size.height, CGFloat(rows.count) * 250))
+                    TileSplitView(axis: .vertical, minimumPaneSize: 235, panes: rows.enumerated().map { index, row in
+                        TileSplitView.Pane(id: "row-\(index)", content: AnyView(
+                            TileSplitView(axis: .horizontal, minimumPaneSize: 275, panes: row.map { chat in
+                                TileSplitView.Pane(id: chat.id, content: AnyView(
+                                    ConversationTile(conversation: chat).environmentObject(store)
+                                        .padding(4).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.canvas)
+                                ))
+                            }).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.canvas)
+                        ))
+                    }).frame(width: geometry.size.width, height: max(geometry.size.height, CGFloat(rows.count) * 250))
                 }
             case .columns:
                 ScrollView(.horizontal) {
-                    HSplitView {
-                        ForEach(store.tiles) { chat in
-                            ConversationTile(conversation: chat)
-                                .frame(minWidth: 300, idealWidth: max(300, geometry.size.width / CGFloat(store.tiles.count)), maxWidth: .infinity)
-                        }
-                    }.frame(minWidth: max(geometry.size.width, CGFloat(store.tiles.count) * 300), minHeight: geometry.size.height - 12)
+                    TileSplitView(axis: .horizontal, minimumPaneSize: 300, panes: store.tiles.map { chat in
+                        TileSplitView.Pane(id: chat.id, content: AnyView(
+                            ConversationTile(conversation: chat).environmentObject(store)
+                                .padding(4).frame(maxWidth: .infinity, maxHeight: .infinity).background(Palette.canvas)
+                        ))
+                    }).frame(width: max(geometry.size.width, CGFloat(store.tiles.count) * 301 - 1), height: geometry.size.height - 12)
                 }
             case .focus:
                 VStack(spacing: 12) {

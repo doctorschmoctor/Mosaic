@@ -6,7 +6,7 @@ A native macOS SwiftUI workspace for keeping several Messages conversations open
 
 Open a conversation from the sidebar to give it a tile. Keep up to eight chats open, resize the dividers, drag a header onto another tile to reorder, and reply from each tile's own composer. Grid, Columns, and Focus layouts are available. Open tiles, layout mode, and independent drafts survive reopening the app; divider sizes are adjusted within the current session.
 
-The tile area fills the right side of the window, with search at the top of the sidebar. Switch layouts with **⌘⌥1 / ⌘⌥2 / ⌘⌥3**; layout controls and workspace status bars stay out of the conversation area. The interface follows the system's light/dark appearance with blue iMessage bubbles, green SMS/RCS bubbles, and gray incoming messages. The original four-chat icon is green.
+The tile area fills the right side of the window, with search directly above the conversation list and no conversation-count or workspace-status labels. Tiles float over a solid background; invisible divider handles keep them resizable. Switch layouts with **⌘⌥1 / ⌘⌥2 / ⌘⌥3**. The interface follows the system's light/dark appearance with blue iMessage bubbles, green SMS/RCS bubbles, and gray incoming messages. The original four-chat icon is green.
 
 ## Run
 

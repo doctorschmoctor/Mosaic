@@ -11,6 +11,8 @@ MainActor.assumeIsolated {
     app.setActivationPolicy(.prohibited)
     app.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
     let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicPreview-\(UUID())")!)
+    if CommandLine.arguments.contains("--columns") { store.workspace.layout = .columns }
+    if CommandLine.arguments.contains("--focus") { store.workspace.layout = .focus }
     if CommandLine.arguments.contains("--sms"), let chat = store.conversations.first {
         store.conversations[0] = Conversation(id: chat.id, databaseID: chat.databaseID, name: chat.name,
             participants: chat.participants, service: "SMS", preview: chat.preview, lastActivity: chat.lastActivity,
