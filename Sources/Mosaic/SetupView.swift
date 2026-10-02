@@ -1,4 +1,5 @@
 import SwiftUI
+import Contacts
 
 struct SetupView: View {
     @EnvironmentObject private var store: WorkspaceStore
@@ -30,12 +31,22 @@ struct SetupView: View {
             step("3", "Allow sending when prompted", "Your first send asks permission to control Messages. Allow it to send from a tile. You can manage it in Automation settings.") {
                 HStack { Button("Open Automation") { store.openPrivacy("Privacy_Automation") }; Button("Open Messages") { store.openMessages() } }
             }
-            step("+", "Use contact names", "Allow Contacts access to show names instead of phone numbers. After permission is granted, names reload automatically and update when Contacts changes.") {
+            step("+", "Use contact names", "Show names instead of phone numbers. Names stay on this Mac and update when Contacts changes.") {
                 HStack {
-                    Button("Sync contact names") { Task { await store.loadContacts() } }.disabled(store.isLoadingContacts)
-                    Button("Open Contacts privacy") { store.openPrivacy("Privacy_Contacts") }
+                    switch store.contactAuthorization {
+                    case .authorized:
+                        Button("Sync contact names") { Task { await store.loadContacts() } }.disabled(store.isLoadingContacts)
+                    case .notDetermined:
+                        Button("Allow Contacts access") { Task { await store.loadContacts() } }
+                            .buttonStyle(.borderedProminent).tint(Palette.accent).disabled(store.isLoadingContacts)
+                    default:
+                        Button("Open Contacts settings") { store.openPrivacy("Privacy_Contacts") }
+                            .buttonStyle(.borderedProminent).tint(Palette.accent)
+                    }
                     if store.isLoadingContacts { ProgressView().controlSize(.small) }
                 }
+                Label(contactAccessSummary, systemImage: store.contactAuthorization == .authorized ? "checkmark.circle.fill" : "person.crop.circle.badge.questionmark")
+                    .font(.caption).foregroundStyle(store.contactAuthorization == .authorized ? Color.green : Color.secondary)
                 if let status = store.contactStatus {
                     Text(status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
@@ -49,6 +60,15 @@ struct SetupView: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }.padding(30).frame(width: 590).tint(Palette.accent)
+    }
+    private var contactAccessSummary: String {
+        switch store.contactAuthorization {
+        case .authorized: return "Contacts access is on."
+        case .notDetermined: return "Mosaic will ask for permission once."
+        case .denied: return "Contacts access is off. Turn on Mosaic in Privacy & Security → Contacts."
+        case .restricted: return "Contacts access is restricted on this Mac."
+        @unknown default: return "Contacts access is limited."
+        }
     }
     private func step<Content: View>(_ number: String, _ title: String, _ description: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .top, spacing: 14) {

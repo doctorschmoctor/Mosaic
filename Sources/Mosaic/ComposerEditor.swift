@@ -4,57 +4,97 @@ import AppKit
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
 struct ComposerEditor: NSViewRepresentable {
+    static let minimumHeight: CGFloat = 34
+    static let maximumHeight: CGFloat = 116
+
     @Binding var text: String
+    var placeholder = ""
+    var conversationID = ""
     let accessibilityLabel: String
+    /// A changed non-zero value asks this editor to become first responder (keyboard traversal).
     var focusRequest: Int
+    var height: Binding<CGFloat>? = nil
     let onFocus: () -> Void
     let onSend: () -> Void
+    var onTab: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+
+    func makeNSView(context: Context) -> ComposerScrollView {
+        let scroll = ComposerScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: Self.minimumHeight))
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
         scroll.borderType = .noBorder
-        let editor = DraftTextView(frame: NSRect(x: 0, y: 0, width: 240, height: 42))
+        // The field only scrolls once the text is taller than its maximum height; it never bounces.
+        scroll.verticalScrollElasticity = .none
+        scroll.horizontalScrollElasticity = .none
+        let font = NSFont.systemFont(ofSize: 12)
+        // An explicit TextKit 1 stack: its insertion point honors textContainerInset in every state,
+        // including an empty field, where the TextKit 2 default could draw the caret out of place.
+        let storage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(containerSize: NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        container.widthTracksTextView = true
+        layoutManager.addTextContainer(container)
+        let editor = DraftTextView(frame: NSRect(origin: .zero, size: scroll.contentSize), textContainer: container)
+        editor.ownedStorage = storage
         editor.delegate = context.coordinator
         editor.isRichText = false
         editor.importsGraphics = false
         editor.allowsUndo = true
         editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 12)
+        editor.font = font
         editor.textColor = .labelColor
-        editor.textContainerInset = NSSize(width: 7, height: 8)
+        editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
+        editor.textContainerInset = NSSize(width: 6, height: DraftTextView.verticalInset(for: font, height: Self.minimumHeight))
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]
-        editor.minSize = .zero
+        editor.minSize = NSSize(width: 0, height: scroll.contentSize.height)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        editor.textContainer?.widthTracksTextView = true
-        editor.textContainer?.containerSize = NSSize(width: 240, height: CGFloat.greatestFiniteMagnitude)
-        editor.setAccessibilityLabel(accessibilityLabel)
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
         editor.string = text
-        editor.onFocus = onFocus
-        editor.onSend = onSend
         scroll.documentView = editor
+        apply(to: editor, coordinator: context.coordinator)
+        if focusRequest != 0 { editor.requestFocus() }
+        context.coordinator.focusRequest = focusRequest
         return scroll
     }
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
+
+    func updateNSView(_ scroll: ComposerScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? DraftTextView else { return }
-        editor.onFocus = onFocus; editor.onSend = onSend
-        editor.setAccessibilityLabel(accessibilityLabel)
-        if editor.string != text {
+        apply(to: editor, coordinator: context.coordinator)
+        if editor.string != text, !editor.hasMarkedText() {
             let selection = editor.selectedRange()
             editor.string = text
             editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
+            editor.needsDisplay = true
+            editor.fitToClip(scroll.contentSize)
+            editor.reportHeight()
         }
         if focusRequest != context.coordinator.focusRequest {
             context.coordinator.focusRequest = focusRequest
-            editor.window?.makeFirstResponder(editor)
+            if focusRequest != 0 { editor.requestFocus() }
         }
     }
+
+    private func apply(to editor: DraftTextView, coordinator: Coordinator) {
+        editor.onFocus = onFocus
+        editor.onSend = onSend
+        editor.onTab = onTab
+        editor.conversationID = conversationID
+        DraftTextView.register(editor, for: conversationID)
+        if editor.placeholder != placeholder { editor.placeholder = placeholder; editor.needsDisplay = true }
+        editor.onHeightChange = { [weak coordinator] value in coordinator?.report(value) }
+        editor.setAccessibilityLabel(accessibilityLabel)
+        editor.setAccessibilityPlaceholderValue(placeholder)
+    }
+
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerEditor
         var focusRequest = 0
@@ -63,12 +103,58 @@ struct ComposerEditor: NSViewRepresentable {
             guard let editor = notification.object as? NSTextView else { return }
             parent.text = editor.string
         }
+        func report(_ value: CGFloat) {
+            let clamped = min(max(value.rounded(.up), ComposerEditor.minimumHeight), ComposerEditor.maximumHeight)
+            guard let height = parent.height, abs(height.wrappedValue - clamped) > 0.5 else { return }
+            // Defer: this runs during AppKit layout, never mutate SwiftUI state inside a view update.
+            DispatchQueue.main.async { if abs(height.wrappedValue - clamped) > 0.5 { height.wrappedValue = clamped } }
+        }
+    }
+}
+
+/// Keeps the text view exactly as wide as the visible area. Autoresizing alone drifts when SwiftUI
+/// first sizes the scroll view from zero, which put long lines and the caret outside the field.
+final class ComposerScrollView: NSScrollView {
+    override func tile() {
+        super.tile()
+        (documentView as? DraftTextView)?.fitToClip(contentSize)
     }
 }
 
 final class DraftTextView: NSTextView {
     var onFocus: (() -> Void)?
     var onSend: (() -> Void)?
+    var onTab: ((Bool) -> Void)?
+    var onHeightChange: ((CGFloat) -> Void)?
+    var conversationID = ""
+    var placeholder = ""
+    /// A hand-built text system is rooted in its storage, which the view must keep alive.
+    var ownedStorage: NSTextStorage?
+    private var pendingFocus = false
+    private var lastReportedWidth: CGFloat = 0
+
+    // Each tile's editor by conversation, so the emoji button next to a field can reach that field.
+    private final class WeakEditor { weak var view: DraftTextView?; init(_ view: DraftTextView) { self.view = view } }
+    @MainActor private static var registry: [String: WeakEditor] = [:]
+    @MainActor static func register(_ editor: DraftTextView, for conversationID: String) {
+        guard !conversationID.isEmpty else { return }
+        registry = registry.filter { $0.value.view != nil }
+        registry[conversationID] = WeakEditor(editor)
+    }
+    @MainActor static func editor(for conversationID: String) -> DraftTextView? { registry[conversationID]?.view }
+
+    /// Opens the system Emoji & Symbols palette; a chosen emoji is inserted at this field's caret.
+    func showEmojiPicker() {
+        requestFocus()
+        NSApp.orderFrontCharacterPalette(nil)
+    }
+
+    /// Centers one line of text inside the minimum composer height.
+    static func verticalInset(for font: NSFont, height: CGFloat) -> CGFloat {
+        let line = NSLayoutManager().defaultLineHeight(for: font)
+        return max(4, ((height - line) / 2).rounded(.down))
+    }
+
     override func becomeFirstResponder() -> Bool {
         let accepted = super.becomeFirstResponder()
         if accepted { onFocus?() }
@@ -80,5 +166,74 @@ final class DraftTextView: NSTextView {
             return
         }
         super.keyDown(with: event)
+    }
+    // Tab and Shift–Tab move between tiles instead of inserting a tab character.
+    override func insertTab(_ sender: Any?) { onTab?(true) }
+    override func insertBacktab(_ sender: Any?) { onTab?(false) }
+
+    override func didChangeText() {
+        super.didChangeText()
+        needsDisplay = true
+        if let scroll = enclosingScrollView { fitToClip(scroll.contentSize) }
+        reportHeight()
+    }
+
+    /// Makes the text view exactly as tall as the visible area, or as tall as its text when that is
+    /// taller. After a long draft is sent, the view used to stay tall inside a short field, which left
+    /// an empty composer that scrolled and clipped its placeholder.
+    func fitToClip(_ clip: NSSize) {
+        guard clip.width > 0, clip.height > 0, let layoutManager, let textContainer else { return }
+        minSize = NSSize(width: 0, height: clip.height)
+        if abs(frame.width - clip.width) > 0.5 { setFrameSize(NSSize(width: clip.width, height: frame.height)) }
+        layoutManager.ensureLayout(for: textContainer)
+        let line = layoutManager.defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
+        let used = max(layoutManager.usedRect(for: textContainer).height, line) + textContainerInset.height * 2
+        let height = max(used.rounded(.up), clip.height)
+        if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: clip.width, height: height)) }
+        if height <= clip.height + 0.5, let clipView = enclosingScrollView?.contentView, clipView.bounds.origin != .zero {
+            clipView.scroll(to: .zero)
+            enclosingScrollView?.reflectScrolledClipView(clipView)
+        }
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if abs(newSize.width - lastReportedWidth) > 0.5 {
+            lastReportedWidth = newSize.width
+            reportHeight()
+        }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard pendingFocus, window != nil else { return }
+        DispatchQueue.main.async { [weak self] in self?.requestFocus() }
+    }
+
+    func requestFocus() {
+        guard let window else { pendingFocus = true; return }
+        pendingFocus = false
+        if window.firstResponder !== self { window.makeFirstResponder(self) }
+        setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
+        scrollRangeToVisible(selectedRange())
+    }
+
+    /// Height of the laid-out text plus insets, reported so the composer can grow up to a few lines.
+    func reportHeight() {
+        guard let layoutManager, let textContainer, let onHeightChange else { return }
+        layoutManager.ensureLayout(for: textContainer)
+        let line = layoutManager.defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
+        let used = max(layoutManager.usedRect(for: textContainer).height, line)
+        onHeightChange(used + textContainerInset.height * 2)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard string.isEmpty, !placeholder.isEmpty, let font else { return }
+        // Drawn at the text container's own origin, so the caret and the placeholder always line up.
+        let padding = textContainer?.lineFragmentPadding ?? 0
+        let origin = textContainerOrigin
+        let line = layoutManager?.defaultLineHeight(for: font) ?? 16
+        let rect = NSRect(x: origin.x + padding, y: origin.y, width: max(0, bounds.width - origin.x * 2 - padding * 2), height: line)
+        NSAttributedString(string: placeholder, attributes: [.font: font, .foregroundColor: NSColor.placeholderTextColor])
+            .draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 }

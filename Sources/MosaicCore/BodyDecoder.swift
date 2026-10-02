@@ -3,8 +3,14 @@ import Foundation
 /// A bounded decoder for the NSString run used by Messages' legacy typedstream bodies.
 /// Unknown archives get a visible fallback rather than unsafe object unarchiving.
 public enum BodyDecoder {
+    /// U+FFFC marks where Messages placed an attachment inside the text.
+    static let attachmentMarker = "\u{fffc}"
+
     public static func decode(text: String?, attributedBody: Data?) -> String {
-        if let text, !text.isEmpty { return text }
+        if let text, !text.isEmpty {
+            guard text.contains(attachmentMarker) else { return text }
+            return text.replacingOccurrences(of: attachmentMarker, with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         guard let data = attributedBody, !data.isEmpty else { return "" }
         if data.starts(with: Data("bplist".utf8)),
            let value = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSAttributedString.self, from: data) {
@@ -29,7 +35,8 @@ public enum BodyDecoder {
                 } else if length >= 0x80 { continue }
                 guard length > 0, length <= 1_000_000, start + length <= bytes.count,
                       let value = String(bytes: bytes[start..<(start + length)], encoding: .utf8) else { continue }
-                return value.replacingOccurrences(of: "\u{fffc}", with: "")
+                let cleaned = value.replacingOccurrences(of: attachmentMarker, with: "")
+                return value.contains(attachmentMarker) ? cleaned.trimmingCharacters(in: .whitespacesAndNewlines) : cleaned
             }
         }
         return "Rich text message · Open in Messages"

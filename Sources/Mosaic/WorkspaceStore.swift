@@ -19,14 +19,19 @@ import MosaicCore
     @Published var historyLimits: [String: Int] = [:]
     @Published var isLoadingContacts = false
     @Published var contactStatus: String?
+    @Published private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
     @Published var tileDrag: TileDragSession?
+    /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
+    @Published private(set) var focusTarget: String?
+    @Published private(set) var focusToken = 0
     var openingOrigins: [String: CGPoint] = [:]
     private let defaults: UserDefaults
     private let database: MessagesDatabase
     private var pollTask: Task<Void, Never>?
+    private var persistTask: Task<Void, Never>?
     private var contactNames = ContactNames()
     private var originalTitles: [String: String] = [:]
-    private var contactObserver: NSObjectProtocol?
+    private var observers: [NSObjectProtocol] = []
     private var generation = 0
     private var loadingState = true
     // Submitted sends are held in memory until the database reports them; never auto-retry a send.
@@ -40,18 +45,32 @@ import MosaicCore
         isLive = !forcedDemo && defaults.bool(forKey: "Mosaic.live")
         if isLive {
             restore()
-            Task { await loadContacts(requestPermission: false); await refresh() }
+            Task { await self.loadContacts(requestPermission: self.contactAuthorization == .notDetermined); await self.refresh() }
         } else {
-            conversations = DemoData.conversations()
+            conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
         }
         loadingState = false
-        contactObserver = NotificationCenter.default.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { [weak self] _ in
+        let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isLive else { return }
                 await self.loadContacts(requestPermission: false)
             }
-        }
+        })
+        // Contacts may be switched on in System Settings while Mosaic is open; pick that up on return.
+        observers.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                let status = CNContactStore.authorizationStatus(for: .contacts)
+                let changed = status != self.contactAuthorization
+                self.contactAuthorization = status
+                if changed, self.isLive, status == .authorized { await self.loadContacts(requestPermission: false) }
+            }
+        })
+        observers.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.persistNow() }
+        })
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -63,7 +82,8 @@ import MosaicCore
 
     deinit {
         pollTask?.cancel()
-        if let contactObserver { NotificationCenter.default.removeObserver(contactObserver) }
+        persistTask?.cancel()
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }
 
     var filteredConversations: [Conversation] {
@@ -78,50 +98,109 @@ import MosaicCore
     var canSend: Bool { !isLive || (connectedBefore && connectionError == nil) }
     func name(for address: String) -> String { contactNames.name(for: address) ?? address }
 
+    /// Tile order shown on screen: the drag preview while a tile is held, always covering every open tile.
+    var displayOrder: [String] {
+        guard let drag = tileDrag else { return workspace.openIDs }
+        let open = Set(workspace.openIDs)
+        var order = drag.order.filter { open.contains($0) }
+        order += workspace.openIDs.filter { !order.contains($0) }
+        return order
+    }
+
+    /// Runs a workspace layout change with the shared tile animation, tagged so message lists can skip it.
+    func animateLayout(_ animation: Animation? = Motion.layout, _ changes: () -> Void) {
+        var transaction = Transaction(animation: animation)
+        transaction[TileLayoutTransactionKey.self] = true
+        withTransaction(transaction, changes)
+    }
+
     func open(_ id: String, from origin: CGPoint? = nil) {
         if let origin, !workspace.openIDs.contains(id) { openingOrigins[id] = origin }
         var opened = false
-        withAnimation(Motion.layout) { opened = workspace.open(id) }
+        animateLayout { opened = workspace.open(id) }
         guard opened else { banner = "Eight chats are open. Close a tile to make room for another."; return }
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
     func close(_ id: String) {
-        withAnimation(Motion.layout) {
-            tileDrag = nil
+        animateLayout {
+            if tileDrag?.id == id { tileDrag = nil }
             workspace.close(id)
         }
+        if focusTarget == id { focusTarget = nil }
     }
-    func focus(_ id: String) { withAnimation(Motion.layout) { workspace.focusedID = id }; markSeen(id) }
-    func reorder(_ id: String, before destination: String) { withAnimation(Motion.layout) { workspace.reorder(id, before: destination) } }
-    func setLayout(_ layout: WorkspaceLayout) { withAnimation(Motion.layout) { tileDrag = nil; workspace.layout = layout } }
+    func focus(_ id: String, animated: Bool = true) {
+        guard workspace.openIDs.contains(id) else { return }
+        if workspace.focusedID != id {
+            if animated { animateLayout { workspace.focusedID = id } } else { workspace.focusedID = id }
+        }
+        markSeen(id)
+    }
+    /// Moves keyboard focus to the next (or previous) tile's composer. Returns false when no tile is open.
+    @discardableResult func moveFocus(forward: Bool, from current: String?) -> Bool {
+        let ids = workspace.openIDs
+        guard !ids.isEmpty else { return false }
+        let target: String
+        if let current, let index = ids.firstIndex(of: current) {
+            target = ids[(index + (forward ? 1 : ids.count - 1)) % ids.count]
+        } else if let focusedID = workspace.focusedID, ids.contains(focusedID) {
+            target = focusedID
+        } else {
+            target = forward ? ids[0] : ids[ids.count - 1]
+        }
+        focus(target)
+        focusTarget = target
+        focusToken += 1
+        return true
+    }
+    func reorder(_ id: String, before destination: String) { animateLayout { workspace.reorder(id, before: destination) } }
+    func setLayout(_ layout: WorkspaceLayout) { animateLayout { tileDrag = nil; workspace.layout = layout } }
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard workspace.layout != .focus, let frame = plan.frames[id] else { return }
-        if tileDrag == nil { tileDrag = TileDragSession(id: id, origin: frame, order: workspace.openIDs) }
-        guard var drag = tileDrag, drag.id == id else { return }
+        // Only one tile can be held. A session for another tile is stale (its release was never reported).
+        if tileDrag?.id != id { tileDrag = TileDragSession(id: id, origin: frame, order: workspace.openIDs) }
+        guard var drag = tileDrag else { return }
+        let previousOrder = drag.order
         drag.update(translation: translation, plan: plan)
-        withAnimation(Motion.layout) { tileDrag = drag }
+        if drag.order != previousOrder {
+            animateLayout { tileDrag = drag }
+        } else {
+            // Follow the pointer exactly; neighbors keep any movement already in flight.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { tileDrag = drag }
+        }
     }
-    func finishTileDrag() {
-        guard let drag = tileDrag else { return }
-        withAnimation(Motion.layout) { workspace.openIDs = drag.order; tileDrag = nil }
+    func finishTileDrag(_ id: String? = nil) {
+        guard let drag = tileDrag, id == nil || drag.id == id else { return }
+        let order = displayOrder
+        animateLayout {
+            if workspace.openIDs != order { workspace.openIDs = order }
+            tileDrag = nil
+        }
     }
     func draft(_ id: String) -> Binding<String> {
         Binding(get: { self.workspace.drafts[id] ?? "" }, set: { self.workspace.drafts[id] = $0 })
     }
     func markSeen(_ id: String) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
-        conversations[index].unreadCount = 0
-        if let last = conversations[index].messages.last { workspace.seenMessageIDs[id] = last.id }
+        if conversations[index].unreadCount != 0 { conversations[index].unreadCount = 0 }
+        if let last = conversations[index].messages.last, workspace.seenMessageIDs[id] != last.id { workspace.seenMessageIDs[id] = last.id }
     }
     func setMode(live: Bool) {
         guard live != isLive, sendingIDs.isEmpty else { return }
-        persist(); generation += 1; isLive = live; connectedBefore = false
+        persistNow(); generation += 1; isLive = live; connectedBefore = false
         connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
+        focusTarget = nil
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
-        if live { conversations = []; restore(); Task { await loadContacts(requestPermission: false); await refresh() } }
-        else { conversations = DemoData.conversations(); restore(defaultIDs: Array(conversations.prefix(4).map(\.id))) }
+        if live {
+            conversations = []; restore()
+            Task { await loadContacts(requestPermission: contactAuthorization == .notDetermined); await refresh() }
+        } else {
+            conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
+            restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
+        }
         loadingState = false
     }
 
@@ -136,7 +215,8 @@ import MosaicCore
         do {
             var loaded = try await Task.detached(priority: .userInitiated) { try database.load(openIDs: ids, historyLimit: historyLimit) }.value
             guard generation == requestGeneration, isLive else { return }
-            connectionError = nil; connectedBefore = true; lastRefreshed = Date()
+            if connectionError != nil { connectionError = nil }
+            connectedBefore = true; lastRefreshed = Date()
             for index in loaded.indices {
                 let id = loaded[index].id
                 originalTitles[id] = loaded[index].name
@@ -151,9 +231,12 @@ import MosaicCore
                 else { loaded[index].unreadCount = conversations.first(where: { $0.id == id })?.unreadCount ?? 0 }
                 if ids.contains(id) { loaded[index].unreadCount = 0 }
             }
-            conversations = loaded
+            // Publishing identical data every three seconds re-rendered every tile; only publish real changes.
+            if loaded != conversations { conversations = loaded }
             updateContactStatus()
-            workspace.reconcile(availableIDs: Set(loaded.map(\.id)))
+            var reconciledWorkspace = workspace
+            reconciledWorkspace.reconcile(availableIDs: Set(loaded.map(\.id)))
+            if reconciledWorkspace != workspace { workspace = reconciledWorkspace }
             if workspace.openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
                 workspace.open(first.id)
                 defaults.set(true, forKey: "Mosaic.live.hasWorkspace")
@@ -201,19 +284,37 @@ import MosaicCore
         }
     }
 
+    // MARK: Contacts
+
+    /// Loads contact names. With `requestPermission`, asks macOS for Contacts access first if needed.
     func loadContacts(requestPermission: Bool = true) async {
         guard !isLoadingContacts else { return }
-        let status = CNContactStore.authorizationStatus(for: .contacts)
-        if !requestPermission, status != .authorized { return }
+        var status = CNContactStore.authorizationStatus(for: .contacts)
+        contactAuthorization = status
+        if status != .authorized {
+            guard requestPermission else { return }
+            switch status {
+            case .denied:
+                contactStatus = "Contacts access is off for Mosaic. Turn it on in System Settings → Privacy & Security → Contacts; names load as soon as you return."
+                return
+            case .restricted:
+                contactStatus = "Contacts access is restricted on this Mac (for example by a device profile)."
+                return
+            default: break
+            }
+            isLoadingContacts = true
+            let granted = (try? await CNContactStore().requestAccess(for: .contacts)) ?? false
+            isLoadingContacts = false
+            status = CNContactStore.authorizationStatus(for: .contacts)
+            contactAuthorization = status
+            guard granted, status == .authorized else {
+                contactStatus = "Mosaic wasn't given Contacts access. Turn it on in System Settings → Privacy & Security → Contacts."
+                return
+            }
+        }
         isLoadingContacts = true
         defer { isLoadingContacts = false }
         do {
-            if status != .authorized {
-                guard try await CNContactStore().requestAccess(for: .contacts) else {
-                    contactStatus = "Contacts access is off. Enable Mosaic in Privacy & Security → Contacts, then sync again."
-                    return
-                }
-            }
             let entries = try await Task.detached(priority: .userInitiated) {
                 let request = CNContactFetchRequest(keysToFetch: [CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
                     CNContactIdentifierKey as CNKeyDescriptor, CNContactNicknameKey as CNKeyDescriptor,
@@ -230,7 +331,6 @@ import MosaicCore
                 return entries
             }.value
             applyContactNames(ContactNames(entries: entries))
-            if isLive { await refresh() }
         } catch { contactStatus = "Contact sync failed: \(error.localizedDescription)" }
     }
 
@@ -241,21 +341,20 @@ import MosaicCore
             var original = conversations[index]
             if originalTitles[original.id] == nil { originalTitles[original.id] = original.name }
             original.name = originalTitles[original.id] ?? original.name
-            conversations[index].name = names.title(for: original)
+            let title = names.title(for: original)
+            if conversations[index].name != title { conversations[index].name = title }
         }
         if names.contactCount == 0 { contactStatus = "No named contacts were found. Check that your contacts appear in the Mac's Contacts app." }
         updateContactStatus()
     }
     private func updateContactStatus() {
-        guard contactNames.contactCount > 0 else {
-            if isLoadingContacts { contactStatus = "No named contacts were found. Check that your contacts appear in the Mac's Contacts app." }
-            return
-        }
+        guard contactNames.contactCount > 0 else { return }
         let matches = conversations.filter { chat in
             if chat.participants.isEmpty { return contactNames.name(for: originalTitles[chat.id] ?? chat.name) != nil }
             return chat.participants.contains { contactNames.name(for: $0) != nil }
         }.count
-        contactStatus = "Loaded \(contactNames.contactCount) contacts · Matched \(matches) of \(conversations.count) conversations."
+        let status = "Loaded \(contactNames.contactCount) contacts · Matched \(matches) of \(conversations.count) conversations."
+        if contactStatus != status { contactStatus = status }
     }
 
     func openPrivacy(_ section: String) {
@@ -268,8 +367,22 @@ import MosaicCore
         else { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Messages.app")) }
     }
     func revealApp() { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
+
+    // MARK: Persistence
+
     private var stateKey: String { "Mosaic.workspace.\(isLive ? "live" : "demo")" }
+    /// Coalesces saves: typing changes a draft on every keystroke, and encoding each one blocked the main thread.
     private func persist() {
+        guard !loadingState, !forcedDemo else { return }
+        persistTask?.cancel()
+        persistTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.persistNow()
+        }
+    }
+    func persistNow() {
+        persistTask?.cancel(); persistTask = nil
         guard !loadingState, !forcedDemo, let data = try? JSONEncoder().encode(workspace) else { return }
         defaults.set(data, forKey: stateKey)
     }

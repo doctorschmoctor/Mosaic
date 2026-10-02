@@ -1,5 +1,6 @@
 import Foundation
 import CSQLite
+import ImageIO
 
 public enum DatabaseError: LocalizedError {
     case accessDenied, sqlite(String), unsupportedSchema
@@ -14,8 +15,12 @@ public enum DatabaseError: LocalizedError {
 
 public struct MessagesDatabase: Sendable {
     public let path: String
-    public init(path: String = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Messages/chat.db").path) {
+    /// Messages stores attachment paths relative to the user's home ("~/Library/Messages/Attachments/…").
+    public let home: URL
+    public init(path: String = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Messages/chat.db").path,
+                home: URL = FileManager.default.homeDirectoryForCurrentUser) {
         self.path = path
+        self.home = home
     }
 
     public func load(openIDs: Set<String>, limit: Int = 500, historyLimit: Int = 100) throws -> [Conversation] {
@@ -93,28 +98,88 @@ public struct MessagesDatabase: Sendable {
         defer { sqlite3_finalize(statement) }
         sqlite3_bind_int64(statement, 1, chatID)
         sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 1000))))
-        var messages: [Message] = []
+        struct Row {
+            let id: Int64; let text: String; let date: Date; let isFromMe: Bool; let sender: String?
+            let attachmentCount: Int; let association: Int32; let itemType: Int32
+            let isDelivered: Bool; let isRead: Bool; let error: Int
+        }
+        var rows: [Row] = []
         var status = sqlite3_step(statement)
         while status == SQLITE_ROW {
-            var text = BodyDecoder.decode(text: string(statement, 1), attributedBody: blob(statement, 2))
-            let attachment = Int(sqlite3_column_int(statement, 9))
-            let association = sqlite3_column_int(statement, 10)
-            let itemType = sqlite3_column_int(statement, 11)
-            if text.isEmpty {
-                if attachment > 0 { text = "Attachment · Open in Messages" }
-                else if association != 0 { text = "Reaction · Open in Messages" }
-                else if itemType != 0 { text = "Conversation activity" }
-                else { text = "Message · Open in Messages" }
-            }
-            messages.append(Message(id: String(sqlite3_column_int64(statement, 0)), text: text,
+            rows.append(Row(id: sqlite3_column_int64(statement, 0),
+                text: BodyDecoder.decode(text: string(statement, 1), attributedBody: blob(statement, 2)),
                 date: Self.appleDate(sqlite3_column_int64(statement, 3)), isFromMe: sqlite3_column_int(statement, 4) != 0,
-                sender: string(statement, 5), attachmentCount: attachment,
+                sender: string(statement, 5), attachmentCount: Int(sqlite3_column_int(statement, 9)),
+                association: sqlite3_column_int(statement, 10), itemType: sqlite3_column_int(statement, 11),
                 isDelivered: sqlite3_column_int(statement, 6) != 0, isRead: sqlite3_column_int(statement, 7) != 0,
                 error: Int(sqlite3_column_int(statement, 8))))
             status = sqlite3_step(statement)
         }
         guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
-        return messages.reversed()
+        let files = try attachments(db, chatID: chatID, from: rows.map(\.id).min(), messageIDs: Set(rows.map(\.id)))
+        var messages: [Message] = []
+        messages.reserveCapacity(rows.count)
+        for row in rows.reversed() {
+            let attached = files[row.id] ?? []
+            var text = row.text
+            if text.isEmpty && attached.isEmpty {
+                if row.attachmentCount > 0 { text = "Attachment · Open in Messages" }
+                else if row.association != 0 { text = "Reaction · Open in Messages" }
+                else if row.itemType != 0 { text = "Conversation activity" }
+                else { text = "Message · Open in Messages" }
+            }
+            messages.append(Message(id: String(row.id), text: text, date: row.date, isFromMe: row.isFromMe,
+                sender: row.sender, attachmentCount: row.attachmentCount, attachments: attached,
+                isDelivered: row.isDelivered, isRead: row.isRead, error: row.error))
+        }
+        return messages
+    }
+
+    /// Attachment metadata for the loaded messages. Missing tables (older or synthetic schemas) yield no attachments.
+    private func attachments(_ db: OpaquePointer, chatID: Int64, from minimumID: Int64?, messageIDs: Set<Int64>) throws -> [Int64: [Attachment]] {
+        guard let minimumID, !messageIDs.isEmpty else { return [:] }
+        let columns = try tableColumns(db, table: "attachment")
+        let joinColumns = try tableColumns(db, table: "message_attachment_join")
+        guard columns.contains("filename"), joinColumns.contains("attachment_id") else { return [:] }
+        func col(_ name: String, fallback: String = "NULL") -> String { columns.contains(name) ? "a.\(name)" : fallback }
+        let statement = try prepare(db, """
+            SELECT maj.message_id, a.ROWID, \(col("guid")), a.filename, \(col("mime_type")), \(col("uti")),
+                   \(col("transfer_name")), \(col("is_sticker", fallback: "0")), \(col("hide_attachment", fallback: "0"))
+            FROM chat_message_join j
+            JOIN message_attachment_join maj ON maj.message_id = j.message_id
+            JOIN attachment a ON a.ROWID = maj.attachment_id
+            WHERE j.chat_id = ? AND j.message_id >= ?
+            ORDER BY maj.message_id, a.ROWID
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, chatID)
+        sqlite3_bind_int64(statement, 2, minimumID)
+        var result: [Int64: [Attachment]] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            let messageID = sqlite3_column_int64(statement, 0)
+            guard messageIDs.contains(messageID), sqlite3_column_int(statement, 8) == 0 else { continue }
+            let rawPath = string(statement, 3)
+            // Link-preview payloads are rendered from the URL itself, not shown as files.
+            if let rawPath, rawPath.hasSuffix(".pluginPayloadAttachment") { continue }
+            let path = Self.resolve(rawPath, home: home)
+            let name = string(statement, 6) ?? rawPath.map { ($0 as NSString).lastPathComponent } ?? "Attachment"
+            var attachment = Attachment(id: string(statement, 2) ?? "attachment-\(sqlite3_column_int64(statement, 1))",
+                path: path.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }, name: name,
+                mimeType: string(statement, 4), uti: string(statement, 5), isSticker: sqlite3_column_int(statement, 7) != 0)
+            if attachment.kind == .image, let file = attachment.path, let size = ImageSizeProbe.shared.size(at: file) {
+                attachment = Attachment(id: attachment.id, path: file, name: name, mimeType: attachment.mimeType, uti: attachment.uti,
+                    isSticker: attachment.isSticker, pixelWidth: size.width, pixelHeight: size.height)
+            }
+            result[messageID, default: []].append(attachment)
+        }
+        return result
+    }
+
+    static func resolve(_ raw: String?, home: URL) -> String? {
+        guard let value = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        if value == "~" { return home.path }
+        if value.hasPrefix("~/") { return home.appendingPathComponent(String(value.dropFirst(2))).path }
+        return value
     }
 
     public static func appleDate(_ raw: Int64) -> Date {
@@ -153,5 +218,34 @@ public struct MessagesDatabase: Sendable {
     private func blob(_ statement: OpaquePointer, _ index: Int32) -> Data? {
         guard let value = sqlite3_column_blob(statement, index) else { return nil }
         return Data(bytes: value, count: Int(sqlite3_column_bytes(statement, index)))
+    }
+}
+
+/// Reads image dimensions from file headers (no decoding) and remembers them for the session.
+final class ImageSizeProbe: @unchecked Sendable {
+    static let shared = ImageSizeProbe()
+    private let lock = NSLock()
+    private var sizes: [String: (width: Int, height: Int)] = [:]
+    private var failures = Set<String>()
+
+    func size(at path: String) -> (width: Int, height: Int)? {
+        lock.lock()
+        if let known = sizes[path] { lock.unlock(); return known }
+        if failures.contains(path) { lock.unlock(); return nil }
+        lock.unlock()
+        let measured = Self.measure(path)
+        lock.lock()
+        if let measured { sizes[path] = measured } else { failures.insert(path) }
+        lock.unlock()
+        return measured
+    }
+
+    private static func measure(_ path: String) -> (width: Int, height: Int)? {
+        guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue, width > 0, height > 0 else { return nil }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        return (5...8).contains(orientation) ? (height, width) : (width, height)
     }
 }
