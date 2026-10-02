@@ -17,10 +17,16 @@ import MosaicCore
     @Published var showSetup = false
     @Published var lastRefreshed: Date?
     @Published var historyLimits: [String: Int] = [:]
+    @Published var isLoadingContacts = false
+    @Published var contactStatus: String?
+    @Published var tileDrag: TileDragSession?
+    var openingOrigins: [String: CGPoint] = [:]
     private let defaults: UserDefaults
     private let database: MessagesDatabase
     private var pollTask: Task<Void, Never>?
-    private var contactNames: [String: String] = [:]
+    private var contactNames = ContactNames()
+    private var originalTitles: [String: String] = [:]
+    private var contactObserver: NSObjectProtocol?
     private var generation = 0
     private var loadingState = true
     // Submitted sends are held in memory until the database reports them; never auto-retry a send.
@@ -34,12 +40,18 @@ import MosaicCore
         isLive = !forcedDemo && defaults.bool(forKey: "Mosaic.live")
         if isLive {
             restore()
-            Task { await refresh() }
+            Task { await loadContacts(requestPermission: false); await refresh() }
         } else {
             conversations = DemoData.conversations()
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
         }
         loadingState = false
+        contactObserver = NotificationCenter.default.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isLive else { return }
+                await self.loadContacts(requestPermission: false)
+            }
+        }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -47,6 +59,11 @@ import MosaicCore
                 if self.isLive { await self.refresh() }
             }
         }
+    }
+
+    deinit {
+        pollTask?.cancel()
+        if let contactObserver { NotificationCenter.default.removeObserver(contactObserver) }
     }
 
     var filteredConversations: [Conversation] {
@@ -59,16 +76,36 @@ import MosaicCore
     var tiles: [Conversation] { workspace.openIDs.compactMap { id in conversations.first { $0.id == id } } }
     var focused: Conversation? { tiles.first { $0.id == workspace.focusedID } ?? tiles.first }
     var canSend: Bool { !isLive || (connectedBefore && connectionError == nil) }
-    func name(for address: String) -> String { contactNames[normalized(address)] ?? address }
+    func name(for address: String) -> String { contactNames.name(for: address) ?? address }
 
-    func open(_ id: String) {
-        guard workspace.open(id) else { banner = "Eight chats are open. Close a tile to make room for another."; return }
+    func open(_ id: String, from origin: CGPoint? = nil) {
+        if let origin, !workspace.openIDs.contains(id) { openingOrigins[id] = origin }
+        var opened = false
+        withAnimation(Motion.layout) { opened = workspace.open(id) }
+        guard opened else { banner = "Eight chats are open. Close a tile to make room for another."; return }
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
-    func close(_ id: String) { workspace.close(id) }
-    func focus(_ id: String) { workspace.focusedID = id; markSeen(id) }
-    func reorder(_ id: String, before destination: String) { workspace.reorder(id, before: destination) }
+    func close(_ id: String) {
+        withAnimation(Motion.layout) {
+            tileDrag = nil
+            workspace.close(id)
+        }
+    }
+    func focus(_ id: String) { withAnimation(Motion.layout) { workspace.focusedID = id }; markSeen(id) }
+    func reorder(_ id: String, before destination: String) { withAnimation(Motion.layout) { workspace.reorder(id, before: destination) } }
+    func setLayout(_ layout: WorkspaceLayout) { withAnimation(Motion.layout) { tileDrag = nil; workspace.layout = layout } }
+    func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
+        guard workspace.layout != .focus, let frame = plan.frames[id] else { return }
+        if tileDrag == nil { tileDrag = TileDragSession(id: id, origin: frame, order: workspace.openIDs) }
+        guard var drag = tileDrag, drag.id == id else { return }
+        drag.update(translation: translation, plan: plan)
+        withAnimation(Motion.layout) { tileDrag = drag }
+    }
+    func finishTileDrag() {
+        guard let drag = tileDrag else { return }
+        withAnimation(Motion.layout) { workspace.openIDs = drag.order; tileDrag = nil }
+    }
     func draft(_ id: String) -> Binding<String> {
         Binding(get: { self.workspace.drafts[id] ?? "" }, set: { self.workspace.drafts[id] = $0 })
     }
@@ -80,10 +117,10 @@ import MosaicCore
     func setMode(live: Bool) {
         guard live != isLive, sendingIDs.isEmpty else { return }
         persist(); generation += 1; isLive = live; connectedBefore = false
-        connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""
+        connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
-        if live { conversations = []; restore(); Task { await refresh() } }
+        if live { conversations = []; restore(); Task { await loadContacts(requestPermission: false); await refresh() } }
         else { conversations = DemoData.conversations(); restore(defaultIDs: Array(conversations.prefix(4).map(\.id))) }
         loadingState = false
     }
@@ -102,21 +139,20 @@ import MosaicCore
             connectionError = nil; connectedBefore = true; lastRefreshed = Date()
             for index in loaded.indices {
                 let id = loaded[index].id
-                if loaded[index].name == loaded[index].participants.joined(separator: ", ") {
-                    loaded[index].name = loaded[index].participants.map { name(for: $0) }.joined(separator: ", ")
-                }
+                originalTitles[id] = loaded[index].name
+                loaded[index].name = contactNames.title(for: loaded[index])
                 // Remove a submitted bubble when an outgoing row with the same text and a recent date appears.
-                let waiting = (pending[id] ?? []).filter { candidate in
-                    !loaded[index].messages.contains { $0.isFromMe && $0.text == candidate.text && abs($0.date.timeIntervalSince(candidate.date)) < 120 }
-                }
-                pending[id] = waiting
-                loaded[index].messages.append(contentsOf: waiting)
+                let reconciled = MessageReconciler.merge(loaded: loaded[index].messages,
+                    previous: conversations.first(where: { $0.id == id })?.messages ?? [], pending: pending[id] ?? [])
+                pending[id] = reconciled.pending
+                loaded[index].messages = reconciled.messages
                 if let previous = conversations.first(where: { $0.id == id }),
                    previous.preview != loaded[index].preview, !ids.contains(id) { loaded[index].unreadCount = previous.unreadCount + 1 }
                 else { loaded[index].unreadCount = conversations.first(where: { $0.id == id })?.unreadCount ?? 0 }
                 if ids.contains(id) { loaded[index].unreadCount = 0 }
             }
             conversations = loaded
+            updateContactStatus()
             workspace.reconcile(availableIDs: Set(loaded.map(\.id)))
             if workspace.openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
                 workspace.open(first.id)
@@ -149,11 +185,13 @@ import MosaicCore
                 pending[id, default: []].append(message)
             } catch { sendErrors[id] = error.localizedDescription; return }
         }
-        if workspace.drafts[id] == originalDraft { workspace.drafts[id] = "" }
-        if let currentIndex = conversations.firstIndex(where: { $0.id == id }) {
-            conversations[currentIndex].messages.append(message)
-            conversations[currentIndex].preview = text
-            conversations[currentIndex].lastActivity = Date()
+        withAnimation(Motion.message) {
+            if workspace.drafts[id] == originalDraft { workspace.drafts[id] = "" }
+            if let currentIndex = conversations.firstIndex(where: { $0.id == id }) {
+                conversations[currentIndex].messages.append(message)
+                conversations[currentIndex].preview = text
+                conversations[currentIndex].lastActivity = Date()
+            }
         }
         markSeen(id)
         if isLive { await refresh() }
@@ -163,22 +201,61 @@ import MosaicCore
         }
     }
 
-    func loadContacts() async {
-        let store = CNContactStore()
+    func loadContacts(requestPermission: Bool = true) async {
+        guard !isLoadingContacts else { return }
+        let status = CNContactStore.authorizationStatus(for: .contacts)
+        if !requestPermission, status != .authorized { return }
+        isLoadingContacts = true
+        defer { isLoadingContacts = false }
         do {
-            guard try await store.requestAccess(for: .contacts) else { banner = "Contacts access was declined. Phone numbers and email addresses still work."; return }
-            let request = CNContactFetchRequest(keysToFetch: [CNContactGivenNameKey, CNContactFamilyNameKey, CNContactPhoneNumbersKey, CNContactEmailAddressesKey] as [CNKeyDescriptor])
-            var names: [String: String] = [:]
-            try store.enumerateContacts(with: request) { contact, _ in
-                let name = [contact.givenName, contact.familyName].filter { !$0.isEmpty }.joined(separator: " ")
-                guard !name.isEmpty else { return }
-                for phone in contact.phoneNumbers { names[self.normalized(phone.value.stringValue)] = name }
-                for email in contact.emailAddresses { names[self.normalized(email.value as String)] = name }
+            if status != .authorized {
+                guard try await CNContactStore().requestAccess(for: .contacts) else {
+                    contactStatus = "Contacts access is off. Enable Mosaic in Privacy & Security → Contacts, then sync again."
+                    return
+                }
             }
-            contactNames = names
-            await refresh()
-            banner = "Contact names loaded for this session."
-        } catch { banner = error.localizedDescription }
+            let entries = try await Task.detached(priority: .userInitiated) {
+                let request = CNContactFetchRequest(keysToFetch: [CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
+                    CNContactIdentifierKey as CNKeyDescriptor, CNContactNicknameKey as CNKeyDescriptor,
+                    CNContactOrganizationNameKey as CNKeyDescriptor, CNContactPhoneNumbersKey as CNKeyDescriptor,
+                    CNContactEmailAddressesKey as CNKeyDescriptor])
+                var entries: [ContactNames.Entry] = []
+                try CNContactStore().enumerateContacts(with: request) { contact, _ in
+                    let formatted = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
+                    let name = [formatted, contact.nickname, contact.organizationName].first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+                    guard !name.isEmpty else { return }
+                    entries.append(ContactNames.Entry(id: contact.identifier, name: name,
+                        addresses: contact.phoneNumbers.map { $0.value.stringValue } + contact.emailAddresses.map { $0.value as String }))
+                }
+                return entries
+            }.value
+            applyContactNames(ContactNames(entries: entries))
+            if isLive { await refresh() }
+        } catch { contactStatus = "Contact sync failed: \(error.localizedDescription)" }
+    }
+
+    /// Apply immediately, even when a Messages refresh is already in flight.
+    func applyContactNames(_ names: ContactNames) {
+        contactNames = names
+        for index in conversations.indices {
+            var original = conversations[index]
+            if originalTitles[original.id] == nil { originalTitles[original.id] = original.name }
+            original.name = originalTitles[original.id] ?? original.name
+            conversations[index].name = names.title(for: original)
+        }
+        if names.contactCount == 0 { contactStatus = "No named contacts were found. Check that your contacts appear in the Mac's Contacts app." }
+        updateContactStatus()
+    }
+    private func updateContactStatus() {
+        guard contactNames.contactCount > 0 else {
+            if isLoadingContacts { contactStatus = "No named contacts were found. Check that your contacts appear in the Mac's Contacts app." }
+            return
+        }
+        let matches = conversations.filter { chat in
+            if chat.participants.isEmpty { return contactNames.name(for: originalTitles[chat.id] ?? chat.name) != nil }
+            return chat.participants.contains { contactNames.name(for: $0) != nil }
+        }.count
+        contactStatus = "Loaded \(contactNames.contactCount) contacts · Matched \(matches) of \(conversations.count) conversations."
     }
 
     func openPrivacy(_ section: String) {
@@ -191,11 +268,6 @@ import MosaicCore
         else { NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Messages.app")) }
     }
     func revealApp() { NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL]) }
-    private func normalized(_ address: String) -> String {
-        if address.contains("@") { return address.lowercased() }
-        // Preserve country code; do not guess which similarly ending number is a contact.
-        return address.filter(\.isNumber)
-    }
     private var stateKey: String { "Mosaic.workspace.\(isLive ? "live" : "demo")" }
     private func persist() {
         guard !loadingState, !forcedDemo, let data = try? JSONEncoder().encode(workspace) else { return }

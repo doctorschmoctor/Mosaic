@@ -30,8 +30,15 @@ struct SetupView: View {
             step("3", "Allow sending when prompted", "Your first send asks permission to control Messages. Allow it to send from a tile. You can manage it in Automation settings.") {
                 HStack { Button("Open Automation") { store.openPrivacy("Privacy_Automation") }; Button("Open Messages") { store.openMessages() } }
             }
-            step("+", "Use contact names (optional)", "Allow Contacts access to show names instead of phone numbers. Names are kept in memory for this session.") {
-                Button("Load contact names") { Task { await store.loadContacts() } }
+            step("+", "Use contact names", "Allow Contacts access to show names instead of phone numbers. After permission is granted, names reload automatically and update when Contacts changes.") {
+                HStack {
+                    Button("Sync contact names") { Task { await store.loadContacts() } }.disabled(store.isLoadingContacts)
+                    Button("Open Contacts privacy") { store.openPrivacy("Privacy_Contacts") }
+                    if store.isLoadingContacts { ProgressView().controlSize(.small) }
+                }
+                if let status = store.contactStatus {
+                    Text(status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let error = store.connectionError { Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
             Divider()

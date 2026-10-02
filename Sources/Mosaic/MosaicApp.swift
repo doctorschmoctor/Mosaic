@@ -17,9 +17,9 @@ import SwiftUI
                     .keyboardShortcut("k", modifiers: .command)
             }
             CommandMenu("Workspace") {
-                Button("Grid Layout") { store.workspace.layout = .grid }.keyboardShortcut("1", modifiers: [.command, .option])
-                Button("Column Layout") { store.workspace.layout = .columns }.keyboardShortcut("2", modifiers: [.command, .option])
-                Button("Focus Layout") { store.workspace.layout = .focus }.keyboardShortcut("3", modifiers: [.command, .option])
+                Button("Grid Layout") { store.setLayout(.grid) }.keyboardShortcut("1", modifiers: [.command, .option])
+                Button("Column Layout") { store.setLayout(.columns) }.keyboardShortcut("2", modifiers: [.command, .option])
+                Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])
                 Divider()
                 Button("Close Focused Tile") { if let id = store.focused?.id { store.close(id) } }.keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Refresh Messages") { Task { await store.refresh() } }.keyboardShortcut("r", modifiers: .command)

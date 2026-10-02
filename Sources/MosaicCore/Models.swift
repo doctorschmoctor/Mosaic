@@ -2,6 +2,7 @@ import Foundation
 
 public struct Message: Identifiable, Equatable, Sendable {
     public let id: String
+    public var presentationID: String
     public let text: String
     public let date: Date
     public let isFromMe: Bool
@@ -13,7 +14,7 @@ public struct Message: Identifiable, Equatable, Sendable {
 
     public init(id: String, text: String, date: Date, isFromMe: Bool, sender: String? = nil,
                 attachmentCount: Int = 0, isDelivered: Bool = false, isRead: Bool = false, error: Int = 0) {
-        self.id = id; self.text = text; self.date = date; self.isFromMe = isFromMe
+        self.id = id; self.presentationID = id; self.text = text; self.date = date; self.isFromMe = isFromMe
         self.sender = sender; self.attachmentCount = attachmentCount
         self.isDelivered = isDelivered; self.isRead = isRead; self.error = error
     }

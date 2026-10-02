@@ -7,10 +7,11 @@ import MosaicCore
 struct ConversationTile: View {
     @EnvironmentObject private var store: WorkspaceStore
     let conversation: Conversation
+    var onDragChanged: ((CGSize) -> Void)? = nil
+    var onDragEnded: (() -> Void)? = nil
     @State private var isDropTarget = false
-    @State private var showEmoji = false
     @State private var followsNewest = true
-    @State private var composerFocusRequest = 0
+    @State private var scrollTarget: String? = "bottom"
     private var isFocused: Bool { store.workspace.focusedID == conversation.id }
     private var draft: Binding<String> { store.draft(conversation.id) }
 
@@ -18,13 +19,15 @@ struct ConversationTile: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.6)
-            messages
+            messages.frame(maxWidth: .infinity, maxHeight: .infinity)
             composer
         }
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13))
         .clipShape(RoundedRectangle(cornerRadius: 13))
         .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(isDropTarget ? Palette.accent : isFocused ? Palette.accent.opacity(0.35) : Color.primary.opacity(0.09), lineWidth: isDropTarget ? 2 : 1))
         .shadow(color: .black.opacity(0.025), radius: 5, y: 2)
+        .animation(Motion.control, value: isFocused)
+        .animation(Motion.control, value: isDropTarget)
         .onDrop(of: [UTType.text], isTargeted: $isDropTarget) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: String.self) { value, _ in
@@ -40,21 +43,28 @@ struct ConversationTile: View {
     }
     private var header: some View {
         HStack(spacing: 9) {
-            Image(systemName: "line.3.horizontal").font(.system(size: 11)).foregroundStyle(.tertiary)
-                .help("Drag this header onto another tile to reorder")
-            Avatar(conversation: conversation, size: 30)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Text(conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            HStack(spacing: 9) {
+                Avatar(conversation: conversation, size: 30)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    Text(conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 2)
             }
-            Spacer(minLength: 2)
+            .contentShape(Rectangle()).onTapGesture { store.focus(conversation.id) }
+            .help("Drag this header to move the whole tile")
+            .onHover { hovering in
+                if store.workspace.layout != .focus { (hovering ? NSCursor.openHand : NSCursor.arrow).set() }
+            }
+            .gesture(DragGesture(minimumDistance: 5, coordinateSpace: .named("tileCanvas"))
+                .onChanged { value in onDragChanged?(value.translation); if store.workspace.layout != .focus { NSCursor.closedHand.set() } }
+                .onEnded { _ in onDragEnded?(); NSCursor.openHand.set() })
             Button { store.close(conversation.id) } label: { Image(systemName: "xmark") }
+                .buttonStyle(TileControlStyle())
                 .help("Close tile — your draft is kept").accessibilityLabel("Close \(conversation.name) tile")
         }
         .font(.system(size: 11)).buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 12)
-        .contentShape(Rectangle()).onTapGesture { store.focus(conversation.id) }
-        .onDrag { NSItemProvider(object: conversation.id as NSString) }
     }
     private var messages: some View {
         ScrollViewReader { reader in
@@ -67,29 +77,33 @@ struct ConversationTile: View {
                     if conversation.messages.isEmpty {
                         Text(store.isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 24)
                     }
-                    ForEach(Array(conversation.messages.enumerated()), id: \.element.id) { index, message in
+                    ForEach(Array(conversation.messages.enumerated()), id: \.element.presentationID) { index, message in
                         if index == 0 || !Calendar.current.isDate(message.date, inSameDayAs: conversation.messages[index - 1].date) {
                             Text(message.date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                         }
                         MessageBubble(message: message, group: conversation.isGroup, senderName: message.sender.map { store.name(for: $0) }, live: store.isLive, service: conversation.service)
-                            .id(message.id)
+                            .id(message.presentationID)
+                            .transition(Motion.reduced ? .opacity : .offset(x: message.isFromMe ? 12 : -12, y: 38)
+                                .combined(with: .scale(scale: 0.86, anchor: message.isFromMe ? .bottomTrailing : .bottomLeading))
+                                .combined(with: .opacity))
                     }
                     Color.clear.frame(height: 1).id("bottom")
-                }.padding(16)
+                }.scrollTargetLayout().padding(16)
             }
             .defaultScrollAnchor(.bottom)
+            .scrollPosition(id: $scrollTarget, anchor: .bottom)
             .task(id: conversation.id) {
-                // Native split views settle their initial sizes after the first layout pass.
+                // Let the tile's first layout settle before following its newest message.
                 try? await Task.sleep(for: .milliseconds(150))
                 reader.scrollTo("bottom", anchor: .bottom)
             }
-            .onChange(of: conversation.messages.last?.id) { _, _ in
-                if followsNewest { withAnimation(.easeOut(duration: 0.15)) { reader.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: conversation.messages.last?.presentationID) { _, _ in
+                if followsNewest { withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } }
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsNewest {
-                    Button { followsNewest = true; reader.scrollTo("bottom", anchor: .bottom) } label: {
+                    Button { followsNewest = true; withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } } label: {
                         Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                     }.buttonStyle(.plain).padding(12)
                 }
@@ -103,7 +117,7 @@ struct ConversationTile: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
                 ZStack(alignment: .topLeading) {
-                    ComposerEditor(text: draft, accessibilityLabel: "Message to \(conversation.name)", focusRequest: composerFocusRequest,
+                    ComposerEditor(text: draft, accessibilityLabel: "Message to \(conversation.name)", focusRequest: 0,
                         onFocus: { store.focus(conversation.id) }, onSend: { Task { await store.send(conversation.id) } })
                         .frame(height: 42)
                     if draft.wrappedValue.isEmpty {
@@ -115,27 +129,11 @@ struct ConversationTile: View {
                 Button { Task { await store.send(conversation.id) } } label: {
                     if store.sendingIDs.contains(conversation.id) { ProgressView().controlSize(.small).frame(width: 31, height: 31) }
                     else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.white).frame(width: 31, height: 31).background(Palette.outgoing(service: conversation.service), in: Circle()) }
-                }.buttonStyle(.plain).padding(.bottom, 5)
+                }.buttonStyle(TileControlStyle()).padding(.bottom, 5)
                     .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.sendingIDs.contains(conversation.id) || !store.canSend)
                     .opacity(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canSend ? 0.35 : 1)
                     .accessibilityLabel("Send to \(conversation.name)").help("Send to \(conversation.name) · Return")
             }
-            HStack(spacing: 8) {
-                Button { showEmoji.toggle() } label: { Image(systemName: "face.smiling").font(.system(size: 12)) }
-                    .buttonStyle(.plain).help("Add emoji").accessibilityLabel("Add emoji to \(conversation.name)")
-                    .popover(isPresented: $showEmoji) {
-                        LazyVGrid(columns: Array(repeating: GridItem(.fixed(32)), count: 4)) {
-                            ForEach(["😊", "❤️", "👍", "🎉", "😂", "☕", "✨", "🙏", "👋", "🔥", "🙌", "👀", "💚", "🤔", "🚀", "💯"], id: \.self) { emoji in
-                                Button(emoji) { draft.wrappedValue += emoji; showEmoji = false; composerFocusRequest += 1 }.buttonStyle(.plain).font(.title2).frame(width: 32, height: 32)
-                            }
-                        }.padding(12)
-                    }
-                if store.isLive {
-                    Button("Open Messages ↗") { store.openMessages(conversation) }.buttonStyle(.plain).font(.system(size: 10)).help("Use Messages for attachments, reactions, or calls")
-                } else { Text("Demo").font(.system(size: 10)) }
-                Spacer()
-                Text("Return to send · ⇧ Return for a new line").font(.system(size: 9))
-            }.foregroundStyle(.tertiary)
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
     }
 }

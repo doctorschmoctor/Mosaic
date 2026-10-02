@@ -4,9 +4,11 @@ A native macOS SwiftUI workspace for keeping several Messages conversations open
 
 ![Mosaic demo workspace](docs/workspace.png)
 
-Open a conversation from the sidebar to give it a tile. Keep up to eight chats open, resize the dividers, drag a header onto another tile to reorder, and reply from each tile's own composer. Grid, Columns, and Focus layouts are available. Open tiles, layout mode, and independent drafts survive reopening the app; divider sizes are adjusted within the current session.
+Open a conversation from the sidebar to give it a tile. Cards grow and move into the grid; closing one shrinks it in place while the remaining cards fill its space. Keep up to eight chats open, resize the invisible gaps, drag a header to move the whole card, and reply from each tile's own composer. Neighboring cards move aside during the drag and the card settles into its new position on release. Grid, Columns, and Focus layouts are available. Open tiles, layout mode, and independent drafts survive reopening the app; divider sizes are adjusted within the current session.
 
 The tile area fills the right side of the window, with search directly above the conversation list and no conversation-count or workspace-status labels. Tiles float over a solid background; invisible divider handles keep them resizable. Switch layouts with **⌘⌥1 / ⌘⌥2 / ⌘⌥3**. The interface follows the system's light/dark appearance with blue iMessage bubbles, green SMS/RCS bubbles, and gray incoming messages. The original four-chat icon is green.
+
+Replies animate into the conversation and retain their bubble identity when Messages confirms them. The input has no metadata footer or emoji picker. Motion follows the Mac's Reduce Motion setting.
 
 ## Run
 
@@ -37,15 +39,15 @@ open "$HOME/Applications/Mosaic.app" --args --demo
 2. Open **Full Disk Access**, add the built `Mosaic.app`, enable it, then quit and reopen Mosaic. The **Show Mosaic in Finder** button reveals the exact app to add. Grant access to the same app copy you will run regularly.
 3. Click **Connect Messages**. Mosaic reads conversations already synced to Apple Messages on this Mac and refreshes every three seconds.
 4. Send a text from a tile. macOS asks to let Mosaic control Messages; allow it. If denied, enable **Mosaic → Messages** in **Privacy & Security → Automation**. Failed submissions retain the draft.
-5. Optionally click **Load contact names** to resolve addresses using Contacts. Names are kept in memory for the session and must be loaded again after relaunch.
+5. Click **Sync contact names** to resolve addresses using Contacts. Names apply immediately, with loaded-contact and matched-conversation counts shown in settings. Once permission is granted, names reload after relaunch and when Contacts changes. Contact names remain in memory; they are not copied into app storage. Matching handles phone punctuation, country-code differences in the Mac's region, and email casing, while ambiguous addresses remain unresolved. Named groups keep their group names.
 
 Apple Messages must already be signed in. SMS/RCS availability depends on your existing Mac/iPhone Messages setup and the transport Apple exposes to automation. Mosaic never requests your Apple ID password.
 
 ## Workspace controls
 
 - Click a sidebar conversation to add it or focus an existing tile.
-- Drag a tile header onto another tile to place it before that tile.
-- Drag native split dividers to resize. Large grids scroll vertically; Columns scroll horizontally when they exceed the window width.
+- Drag a tile header to move its whole card; neighboring cards preview the new order before you release it. Text selection and message scrolling remain available inside the card.
+- Drag the invisible gaps to resize. Large grids scroll vertically; Columns scroll horizontally when they exceed the window width.
 - Close a tile with ×; its draft remains available when reopened.
 - **Return** sends from the active composer; **Shift–Return** inserts a line break.
 - **⌘K** focuses search; **⌘R** refreshes.
@@ -79,6 +81,8 @@ Message history and contact names remain in memory. Mosaic persists only workspa
 The core test suite covers independent drafts and restoration, tile capacity and ordering, read-only history isolation, WAL visibility, pinned conversations outside the recent limit, date formats, Unicode, long typedstream messages, malformed bodies, and permission errors. CI runs the tests and builds the app on macOS.
 
 Composer tests also verify per-editor Return routing, Shift–Return line breaks, isolated demo sends, and compilation of the Messages automation script without executing it. `./scripts/render-preview.sh` renders the native view using fictional data for visual inspection.
+
+Additional tests cover contact matching and immediate updates during refresh, tile layouts and resize minimums, drag previews and draft preservation, and stable message identities during confirmation.
 
 `Sources/Mosaic` contains the UI, workspace state, Contacts integration, and exact-chat AppleScript sender. `Sources/MosaicCore` contains models and the read-only database reader. `Sources/CSQLite` exposes the system SQLite library. The Xcode target compiles the same sources directly; SwiftPM keeps the core separate for tests.
 
