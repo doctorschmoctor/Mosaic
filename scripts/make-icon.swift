@@ -10,12 +10,12 @@ for (name, size) in [("16x16",16), ("16x16@2x",32), ("32x32",32), ("32x32@2x",64
     let transform = AffineTransform(scale: CGFloat(size) / 1024)
     (transform as NSAffineTransform).concat()
     let base = NSBezierPath(roundedRect: NSRect(x: 80, y: 80, width: 864, height: 864), xRadius: 190, yRadius: 190)
-    NSGradient(colors: [NSColor(red: 0.37, green: 0.43, blue: 0.94, alpha: 1), NSColor(red: 0.24, green: 0.28, blue: 0.72, alpha: 1)])!.draw(in: base, angle: -80)
+    NSGradient(colors: [NSColor(red: 0.24, green: 0.84, blue: 0.34, alpha: 1), NSColor(red: 0.15, green: 0.66, blue: 0.24, alpha: 1)])!.draw(in: base, angle: -80)
     for (x,y,alpha) in [(210.0,540.0,1.0),(535.0,540.0,0.85),(210.0,220.0,0.85),(535.0,220.0,1.0)] {
         NSColor.white.withAlphaComponent(alpha).setFill()
         NSBezierPath(roundedRect: NSRect(x: x, y: y, width: 280, height: 255), xRadius: 58, yRadius: 58).fill()
         let tail = NSBezierPath(); tail.move(to: NSPoint(x: x + 48, y: y + 25)); tail.line(to: NSPoint(x: x + 48, y: y - 25)); tail.line(to: NSPoint(x: x + 115, y: y + 25)); tail.close(); tail.fill()
-        NSColor(red: 0.35, green: 0.40, blue: 0.85, alpha: 0.65).setFill()
+        NSColor(red: 0.18, green: 0.68, blue: 0.27, alpha: 0.65).setFill()
         for dot in 0..<3 { NSBezierPath(ovalIn: NSRect(x: x + 66 + Double(dot) * 55, y: y + 112, width: 30, height: 30)).fill() }
     }
     NSGraphicsContext.restoreGraphicsState()

@@ -5,25 +5,29 @@ import MosaicCore
 #endif
 
 enum Palette {
-    static let accent = Color(red: 0.29, green: 0.34, blue: 0.86)
+    static let accent = Color(nsColor: .systemBlue)
     static let canvas = Color(nsColor: .windowBackgroundColor)
     static let surface = Color(nsColor: .controlBackgroundColor)
-    static let secondary = Color(nsColor: .secondaryLabelColor)
-    static let colors: [Color] = [Color(red: 0.40, green: 0.48, blue: 0.76), Color(red: 0.77, green: 0.52, blue: 0.34), Color(red: 0.39, green: 0.63, blue: 0.57), Color(red: 0.72, green: 0.44, blue: 0.56), Color(red: 0.52, green: 0.48, blue: 0.70)]
-    static func avatar(_ id: String) -> Color { colors[id.utf8.reduce(0) { ($0 + Int($1)) % colors.count }] }
+    static let avatar = Color(nsColor: .systemGray)
+    static let incoming = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(red: 58 / 255, green: 58 / 255, blue: 60 / 255, alpha: 1)
+            : NSColor(red: 233 / 255, green: 233 / 255, blue: 235 / 255, alpha: 1)
+    })
+    static func outgoing(service: String) -> Color {
+        service.caseInsensitiveCompare("iMessage") == .orderedSame ? Color(nsColor: .systemBlue) : Color(nsColor: .systemGreen)
+    }
 }
 
 struct WorkspaceView: View {
     @EnvironmentObject private var store: WorkspaceStore
     @FocusState private var searchFocused: Bool
-    @State private var sidebarVisible = true
 
     var body: some View {
         HStack(spacing: 0) {
-            if sidebarVisible { sidebar.frame(width: 256); Divider() }
+            sidebar.frame(width: 256)
+            Divider()
             VStack(spacing: 0) {
-                toolbar
-                Divider()
                 if let banner = store.banner {
                     HStack { Text(banner).font(.callout); Spacer(); Button { store.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
                         .padding(12).background(Palette.accent.opacity(0.08))
@@ -39,27 +43,23 @@ struct WorkspaceView: View {
                 }
                 if store.tiles.isEmpty { emptyWorkspace }
                 else { TileWorkspace().padding(16) }
-                footer
             }.background(Palette.canvas)
         }
+        .ignoresSafeArea(.container, edges: .top)
         .tint(Palette.accent)
         .sheet(isPresented: $store.showSetup) { SetupView().environmentObject(store) }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in sidebarVisible = true; searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "square.grid.2x2.fill").font(.system(size: 24, weight: .semibold)).foregroundStyle(Palette.accent)
-                Text("Mosaic").font(.system(size: 24, weight: .bold, design: .rounded))
-                Spacer()
-            }.padding(.horizontal, 22).padding(.top, 46).padding(.bottom, 20)
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Find a conversation", text: $store.search).textFieldStyle(.plain).focused($searchFocused)
                     .accessibilityLabel("Find a conversation")
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
-            }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9)).padding(.horizontal, 16)
+            }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
+                .padding(.horizontal, 16).padding(.top, 36)
             HStack {
                 Text("CONVERSATIONS").font(.system(size: 10, weight: .semibold)).tracking(1.2).foregroundStyle(.secondary)
                 Spacer(); Text("\(store.conversations.count)").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
@@ -87,43 +87,6 @@ struct WorkspaceView: View {
                 }.buttonStyle(.plain)
             }.padding(20)
         }.background(.regularMaterial)
-    }
-    private var toolbar: some View {
-        HStack(spacing: 16) {
-            Button { sidebarVisible.toggle() } label: { Image(systemName: "sidebar.left").font(.system(size: 17)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Toggle conversation sidebar")
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Your workspace").font(.system(size: 21, weight: .semibold))
-                Text(store.isLive ? "Keep the conversation going." : "A little more room for everyone.").font(.system(size: 12)).foregroundStyle(.secondary)
-            }
-            Spacer()
-            HStack(spacing: 3) {
-                ForEach(WorkspaceLayout.allCases, id: \.self) { layout in
-                    Button { store.workspace.layout = layout } label: {
-                        Label(layout.title, systemImage: layout == .grid ? "square.grid.2x2" : layout == .columns ? "rectangle.split.3x1" : "rectangle.inset.filled")
-                            .font(.system(size: 12, weight: .medium)).padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(store.workspace.layout == layout ? Palette.surface : .clear, in: RoundedRectangle(cornerRadius: 7))
-                            .shadow(color: .black.opacity(store.workspace.layout == layout ? 0.06 : 0), radius: 2, y: 1)
-                    }.buttonStyle(.plain).foregroundStyle(store.workspace.layout == layout ? .primary : .secondary)
-                        .accessibilityLabel("\(layout.title) layout")
-                }
-            }.padding(3).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-            Button { store.showSetup = true } label: { Image(systemName: "gearshape").font(.system(size: 16)) }
-                .buttonStyle(.plain).foregroundStyle(.secondary).help("Connection settings")
-        }.padding(.horizontal, 24).padding(.top, 35).padding(.bottom, 20)
-    }
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "square.stack.3d.up").font(.system(size: 11))
-            Text("\(store.tiles.count) of \(Workspace.maximumTiles) tiles")
-            Text("·").padding(.horizontal, 2)
-            Text("Drag headers to reorder · Drag dividers to resize")
-            Spacer()
-            if store.isLive {
-                if store.isRefreshing { ProgressView().controlSize(.mini) }
-                Text(store.lastRefreshed == nil ? "Connecting…" : "Refreshes every 3 seconds")
-            } else { Text("Sample chats · Sends stay in this demo") }
-        }.font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 12)
     }
     private var emptyWorkspace: some View {
         VStack(spacing: 16) {
@@ -171,7 +134,7 @@ struct Avatar: View {
     let size: CGFloat
     var body: some View {
         ZStack {
-            Circle().fill(Palette.avatar(conversation.id).gradient)
+            Circle().fill(Palette.avatar.gradient)
             if conversation.isGroup { Image(systemName: "person.2.fill").font(.system(size: size * 0.33)).foregroundStyle(.white) }
             else { Text(conversation.initials).font(.system(size: size * 0.30, weight: .semibold, design: .rounded)).foregroundStyle(.white) }
         }.frame(width: size, height: size).accessibilityHidden(true)

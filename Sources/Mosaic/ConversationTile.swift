@@ -49,9 +49,6 @@ struct ConversationTile: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 2)
-            Button { store.focus(conversation.id); store.workspace.layout = store.workspace.layout == .focus ? .grid : .focus } label: {
-                Image(systemName: store.workspace.layout == .focus ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-            }.help("Focus \(conversation.name)").accessibilityLabel("Focus \(conversation.name)")
             Button { store.close(conversation.id) } label: { Image(systemName: "xmark") }
                 .help("Close tile — your draft is kept").accessibilityLabel("Close \(conversation.name) tile")
         }
@@ -75,7 +72,7 @@ struct ConversationTile: View {
                             Text(message.date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                         }
-                        MessageBubble(message: message, group: conversation.isGroup, senderName: message.sender.map { store.name(for: $0) }, live: store.isLive)
+                        MessageBubble(message: message, group: conversation.isGroup, senderName: message.sender.map { store.name(for: $0) }, live: store.isLive, service: conversation.service)
                             .id(message.id)
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -117,7 +114,7 @@ struct ConversationTile: View {
                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
                 Button { Task { await store.send(conversation.id) } } label: {
                     if store.sendingIDs.contains(conversation.id) { ProgressView().controlSize(.small).frame(width: 31, height: 31) }
-                    else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.white).frame(width: 31, height: 31).background(Palette.accent, in: Circle()) }
+                    else { Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.white).frame(width: 31, height: 31).background(Palette.outgoing(service: conversation.service), in: Circle()) }
                 }.buttonStyle(.plain).padding(.bottom, 5)
                     .disabled(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.sendingIDs.contains(conversation.id) || !store.canSend)
                     .opacity(draft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !store.canSend ? 0.35 : 1)
@@ -148,6 +145,7 @@ struct MessageBubble: View {
     let group: Bool
     let senderName: String?
     let live: Bool
+    let service: String
     var body: some View {
         HStack(alignment: .bottom, spacing: 24) {
             if message.isFromMe { Spacer(minLength: 30) }
@@ -156,7 +154,7 @@ struct MessageBubble: View {
                 Text(message.text).font(.system(size: 12)).lineSpacing(3).textSelection(.enabled)
                     .foregroundStyle(message.isFromMe ? .white : Color.primary)
                     .padding(.horizontal, 12).padding(.vertical, 9)
-                    .background(message.isFromMe ? Palette.accent : Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                    .background(message.isFromMe ? Palette.outgoing(service: service) : Palette.incoming, in: RoundedRectangle(cornerRadius: 14))
                 HStack(spacing: 4) {
                     Text(message.date.formatted(date: .omitted, time: .shortened))
                     if message.isFromMe {
