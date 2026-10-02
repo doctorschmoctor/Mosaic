@@ -15,6 +15,9 @@ cp -X "$BIN_DIR/Mosaic" "$STAGED_APP/Contents/MacOS/Mosaic"
 cp -X Resources/Info.plist "$STAGED_APP/Contents/Info.plist"
 cp -X Resources/Mosaic.icns "$STAGED_APP/Contents/Resources/Mosaic.icns"
 codesign --force --sign "${MOSAIC_SIGNING_IDENTITY:--}" --options runtime --entitlements Resources/Mosaic.entitlements "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
+ditto -c -k --norsrc --noextattr --keepParent "$STAGED_APP" "$PWD/build/Mosaic.zip"
 ditto --norsrc --noextattr "$STAGED_APP" "$APP"
-codesign --verify --deep --strict "$APP"
-printf 'Built app: %s\n' "$APP"
+# The archive is the verified distribution artifact. A Desktop file provider may
+# immediately add Finder metadata to the convenience copy; install from the ZIP.
+printf 'Built signed archive: %s\n' "$PWD/build/Mosaic.zip"

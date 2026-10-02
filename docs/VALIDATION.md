@@ -4,7 +4,7 @@ Validated locally with Swift 6.0.2 / Xcode 16.1 on Apple Silicon.
 
 - SwiftPM debug compilation: passed.
 - XCTest suite: 14 tests passed (10 core tests and 4 composer/bridge tests).
-- Release app packaging and ad-hoc signature verification: passed.
+- Release archive packaging and ad-hoc signature verification: passed (verified before archiving and again after extracting outside the synced Desktop).
 - Native Xcode project: build verified separately.
 - Native demo view rendered and inspected at 1320 × 860 points.
 - Return, Shift–Return, independent demo sends, and AppleScript compilation tested without sending any real messages.

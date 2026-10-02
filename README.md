@@ -14,15 +14,19 @@ Requires macOS 14 or later and Xcode 16 / Swift 6 or later to build. No third-pa
 git clone git@github.com:doctorschmoctor/Mosaic.git
 cd Mosaic
 ./scripts/build-app.sh
-open build/Mosaic.app
+mkdir -p "$HOME/Applications"
+ditto -x -k build/Mosaic.zip "$HOME/Applications"
+open "$HOME/Applications/Mosaic.app"
 ```
+
+The build verifies the signed app in a temporary directory and creates `build/Mosaic.zip`. Install from this ZIP into `~/Applications` (or `/Applications`) rather than running from a synced Desktop folder: iCloud/file-provider metadata can interfere with app signature checks. A convenience `.app` copy is also placed in `build/`.
 
 Or open **Mosaic.xcodeproj**, select the **Mosaic** scheme, and press Run. The project defaults to local ad-hoc signing; no paid developer account is required. SwiftPM is also supported through `Package.swift`. Use the packaged `.app` for Messages permissions because it contains the privacy descriptions and automation entitlement.
 
 The app starts with fictional demo conversations. Sending in demo mode adds a local bubble only. To force a fresh demo without touching your saved workspaces:
 
 ```sh
-open build/Mosaic.app --args --demo
+open "$HOME/Applications/Mosaic.app" --args --demo
 ```
 
 ## Connect real conversations
