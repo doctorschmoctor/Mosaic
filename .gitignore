@@ -1,0 +1,11 @@
+.build/
+build/
+DerivedData/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.zip

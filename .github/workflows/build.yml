@@ -1,0 +1,17 @@
+name: macOS build and tests
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Swift toolchain
+        run: swift --version
+      - name: Test workspace and database reader
+        run: ./scripts/test.sh
+      - name: Build signed local app
+        run: ./scripts/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mosaic-macOS
+          path: build/Mosaic.app

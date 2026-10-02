@@ -1,0 +1,51 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		06ADE619148CF422AF695723 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/ComposerEditor.swift"; sourceTree = SOURCE_ROOT; };
+		02F9FA6171A56CC8CCEDABB3 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/ConversationTile.swift"; sourceTree = SOURCE_ROOT; };
+		07B74FD797B113340E1AE843 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/MessagesBridge.swift"; sourceTree = SOURCE_ROOT; };
+		BDCA460AA3E64E846C16A219 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/MosaicApp.swift"; sourceTree = SOURCE_ROOT; };
+		EC98D2D23002BEF1F0CC78E6 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/SetupView.swift"; sourceTree = SOURCE_ROOT; };
+		A9DDB2A31040DF9AB69583A5 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/WorkspaceStore.swift"; sourceTree = SOURCE_ROOT; };
+		717528127E856F648A2F7407 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/Mosaic/WorkspaceView.swift"; sourceTree = SOURCE_ROOT; };
+		AF4ECECC9EF44427F4A1AC8C = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/MosaicCore/BodyDecoder.swift"; sourceTree = SOURCE_ROOT; };
+		3FE6007777C643CDE3DD921B = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/MosaicCore/DemoData.swift"; sourceTree = SOURCE_ROOT; };
+		AAC5B55DADC5C5DE0FD1A776 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/MosaicCore/MessagesDatabase.swift"; sourceTree = SOURCE_ROOT; };
+		0921B5FEDD96F857366E462A = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Sources/MosaicCore/Models.swift"; sourceTree = SOURCE_ROOT; };
+		35C7E2A321D683B84FDE91BE = { isa = PBXFileReference; lastKnownFileType = image.icns; path = "Resources/Mosaic.icns"; sourceTree = SOURCE_ROOT; };
+		D9C6393D6C2EE0244C1E3BAF = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/Info.plist"; sourceTree = SOURCE_ROOT; };
+		6B426CF9BF181EB7C225633F = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/Mosaic.entitlements"; sourceTree = SOURCE_ROOT; };
+		E1FC813DF8392D86504FDEA1 = { isa = PBXBuildFile; fileRef = 06ADE619148CF422AF695723; };
+		023EE798A21C0CECA5B1A6FA = { isa = PBXBuildFile; fileRef = 02F9FA6171A56CC8CCEDABB3; };
+		531F389809AB85515E776A39 = { isa = PBXBuildFile; fileRef = 07B74FD797B113340E1AE843; };
+		2361F88CD4E79448473A906F = { isa = PBXBuildFile; fileRef = BDCA460AA3E64E846C16A219; };
+		03BAB78623F38BF92FD7C95F = { isa = PBXBuildFile; fileRef = EC98D2D23002BEF1F0CC78E6; };
+		16300C45A7D122AD9B0B81B1 = { isa = PBXBuildFile; fileRef = A9DDB2A31040DF9AB69583A5; };
+		2F7259EF76B0752AC90F5C02 = { isa = PBXBuildFile; fileRef = 717528127E856F648A2F7407; };
+		3EB32E24EE81104156CB3ABE = { isa = PBXBuildFile; fileRef = AF4ECECC9EF44427F4A1AC8C; };
+		C4EAED2D381E4FD685208BC5 = { isa = PBXBuildFile; fileRef = 3FE6007777C643CDE3DD921B; };
+		C3D4EAA26CBD8E0FB6F0D27E = { isa = PBXBuildFile; fileRef = AAC5B55DADC5C5DE0FD1A776; };
+		A2DC7D9135733630F2D3D213 = { isa = PBXBuildFile; fileRef = 0921B5FEDD96F857366E462A; };
+		279B952068BF8572DD8B76FC = { isa = PBXBuildFile; fileRef = 35C7E2A321D683B84FDE91BE; };
+		38A007151ABE87CC01A5B6E9 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mosaic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BCE16DD0260827ECF338C787 = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (E1FC813DF8392D86504FDEA1,023EE798A21C0CECA5B1A6FA,531F389809AB85515E776A39,2361F88CD4E79448473A906F,03BAB78623F38BF92FD7C95F,16300C45A7D122AD9B0B81B1,2F7259EF76B0752AC90F5C02,3EB32E24EE81104156CB3ABE,C4EAED2D381E4FD685208BC5,C3D4EAA26CBD8E0FB6F0D27E,A2DC7D9135733630F2D3D213); runOnlyForDeploymentPostprocessing = 0; };
+		0189424A5A60FED329FA868E = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (279B952068BF8572DD8B76FC); runOnlyForDeploymentPostprocessing = 0; };
+		7561BFB015D8F536760CB671 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		7DF82ADD8F7F79E463545C22 = { isa = PBXGroup; children = (06ADE619148CF422AF695723,02F9FA6171A56CC8CCEDABB3,07B74FD797B113340E1AE843,BDCA460AA3E64E846C16A219,EC98D2D23002BEF1F0CC78E6,A9DDB2A31040DF9AB69583A5,717528127E856F648A2F7407,AF4ECECC9EF44427F4A1AC8C,3FE6007777C643CDE3DD921B,AAC5B55DADC5C5DE0FD1A776,0921B5FEDD96F857366E462A); name = "Swift sources"; sourceTree = "<group>"; };
+		A024F06580C79B7582C3806A = { isa = PBXGroup; children = (35C7E2A321D683B84FDE91BE,D9C6393D6C2EE0244C1E3BAF,6B426CF9BF181EB7C225633F); name = "Resources"; sourceTree = "<group>"; };
+		5151B46607EBC8890D8DFCC2 = { isa = PBXGroup; children = (38A007151ABE87CC01A5B6E9); name = Products; sourceTree = "<group>"; };
+		E50290A24C49A459B43487C5 = { isa = PBXGroup; children = (7DF82ADD8F7F79E463545C22,A024F06580C79B7582C3806A,5151B46607EBC8890D8DFCC2); sourceTree = "<group>"; };
+		89E1FD6268CC0F221A2BE178 = { isa = XCBuildConfiguration; buildSettings = {SDKROOT = "macosx"; MACOSX_DEPLOYMENT_TARGET = "14.0"; SWIFT_VERSION = "5.0"; CLANG_ENABLE_MODULES = "YES"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = "dwarf"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG"; }; name = Debug; };
+		E6DE6C99132752C914FEF632 = { isa = XCBuildConfiguration; buildSettings = {SDKROOT = "macosx"; MACOSX_DEPLOYMENT_TARGET = "14.0"; SWIFT_VERSION = "5.0"; CLANG_ENABLE_MODULES = "YES"; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; name = Release; };
+		8E70B5292C2478FA2B77DC09 = { isa = XCConfigurationList; buildConfigurations = (89E1FD6268CC0F221A2BE178,E6DE6C99132752C914FEF632); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		7082CC0B6FC1282FCEABD07A = { isa = XCBuildConfiguration; buildSettings = {SDKROOT = "macosx"; MACOSX_DEPLOYMENT_TARGET = "14.0"; SWIFT_VERSION = "5.0"; CLANG_ENABLE_MODULES = "YES"; PRODUCT_NAME = "Mosaic"; PRODUCT_BUNDLE_IDENTIFIER = "com.doctorschmoctor.Mosaic"; INFOPLIST_FILE = "Resources/Info.plist"; GENERATE_INFOPLIST_FILE = "NO"; SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Sources/CSQLite"; CODE_SIGN_STYLE = "Manual"; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_ENTITLEMENTS = "Resources/Mosaic.entitlements"; ENABLE_HARDENED_RUNTIME = "YES"; SWIFT_EMIT_LOC_STRINGS = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = "dwarf"; SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG"; }; name = Debug; };
+		639A7CA24D39909E713B47F7 = { isa = XCBuildConfiguration; buildSettings = {SDKROOT = "macosx"; MACOSX_DEPLOYMENT_TARGET = "14.0"; SWIFT_VERSION = "5.0"; CLANG_ENABLE_MODULES = "YES"; PRODUCT_NAME = "Mosaic"; PRODUCT_BUNDLE_IDENTIFIER = "com.doctorschmoctor.Mosaic"; INFOPLIST_FILE = "Resources/Info.plist"; GENERATE_INFOPLIST_FILE = "NO"; SWIFT_INCLUDE_PATHS = "$(SRCROOT)/Sources/CSQLite"; CODE_SIGN_STYLE = "Manual"; CODE_SIGN_IDENTITY = "-"; CODE_SIGN_ENTITLEMENTS = "Resources/Mosaic.entitlements"; ENABLE_HARDENED_RUNTIME = "YES"; SWIFT_EMIT_LOC_STRINGS = "YES"; LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks"; SWIFT_OPTIMIZATION_LEVEL = "-O"; DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym"; }; name = Release; };
+		211093B3B1F936BC80182959 = { isa = XCConfigurationList; buildConfigurations = (7082CC0B6FC1282FCEABD07A,639A7CA24D39909E713B47F7); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		0E8A3AD980EC179856012B7E = { isa = PBXNativeTarget; buildConfigurationList = 211093B3B1F936BC80182959; buildPhases = (BCE16DD0260827ECF338C787,7561BFB015D8F536760CB671,0189424A5A60FED329FA868E); buildRules = (); dependencies = (); name = Mosaic; productName = Mosaic; productReference = 38A007151ABE87CC01A5B6E9; productType = "com.apple.product-type.application"; };
+		98F54143AB4E86B28C3AFEE0 = { isa = PBXProject; attributes = { LastUpgradeCheck = 1610; }; buildConfigurationList = 8E70B5292C2478FA2B77DC09; compatibilityVersion = "Xcode 14.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en,Base); mainGroup = E50290A24C49A459B43487C5; productRefGroup = 5151B46607EBC8890D8DFCC2; projectDirPath = ""; projectRoot = ""; targets = (0E8A3AD980EC179856012B7E); };
+	};
+	rootObject = 98F54143AB4E86B28C3AFEE0;
+}
