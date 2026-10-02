@@ -31,8 +31,10 @@ public enum TileLayout {
                             columnWeights: [CGFloat] = []) -> TilePlan {
         let count = order.count
         let rows = layout == .grid ? max(1, (count + 1) / 2) : 1
+        // The grid always fits the window: rows share its height, shrinking below their preferred
+        // minimum when many are open rather than scrolling. Columns may extend sideways.
         let size = CGSize(width: layout == .columns ? max(viewport.width, CGFloat(count) * 300 + CGFloat(max(0, count - 1)) * gap + inset * 2) : viewport.width,
-                          height: layout == .grid ? max(viewport.height, CGFloat(rows) * 250) : viewport.height)
+                          height: viewport.height)
         let bounds = CGRect(origin: .zero, size: size).insetBy(dx: inset, dy: inset)
         var frames: [String: CGRect] = [:]
         var dividers: [TileDivider] = []

@@ -205,30 +205,17 @@ struct TileWorkspace: View {
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
             VStack(spacing: 8) {
                 if layout == .focus { focusPicker.frame(height: 36).transition(.move(edge: .top).combined(with: .opacity)) }
-                ScrollViewReader { scroller in
-                    ScrollView(layout == .columns ? .horizontal : .vertical) {
-                        GeometryReader { canvas in
-                            TileCanvas {
-                                ForEach(store.tiles) { chat in
-                                    if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, canvas: canvas) }
-                                }
-                                ForEach(plan.dividers) { divider in
-                                    DividerHandle(divider: divider, enabled: store.tileDrag == nil,
-                                        onChanged: { translation in resize(divider, translation: translation, plan: plan) },
-                                        onEnded: { resizeStart = nil })
-                                        .zIndex(2)
-                                        .tileFrame(divider.frame)
-                                }
+                if layout == .columns {
+                    // Only Columns can outgrow the window, sideways. Grid and Focus always fit it.
+                    ScrollViewReader { scroller in
+                        ScrollView(.horizontal) { canvas(plan) }
+                            .onChange(of: store.focusToken) { _, _ in
+                                guard let id = store.focusTarget else { return }
+                                withAnimation(Motion.layout) { scroller.scrollTo(id) }
                             }
-                            .frame(width: plan.size.width, height: plan.size.height, alignment: .topLeading)
-                            .coordinateSpace(name: TileCanvas.space)
-                        }
-                        .frame(width: plan.size.width, height: plan.size.height)
                     }
-                    .onChange(of: store.focusToken) { _, _ in
-                        guard let id = store.focusTarget, layout != .focus else { return }
-                        withAnimation(Motion.layout) { scroller.scrollTo(id) }
-                    }
+                } else {
+                    canvas(plan)
                 }
             }
         }
@@ -236,6 +223,26 @@ struct TileWorkspace: View {
             store.animateLayout { gridFractions = [:]; rowWeights = []; columnWeights = [] }
             resizeStart = nil
         }
+    }
+
+    private func canvas(_ plan: TilePlan) -> some View {
+        GeometryReader { canvas in
+            TileCanvas {
+                ForEach(store.tiles) { chat in
+                    if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, canvas: canvas) }
+                }
+                ForEach(plan.dividers) { divider in
+                    DividerHandle(divider: divider, enabled: store.tileDrag == nil,
+                        onChanged: { translation in resize(divider, translation: translation, plan: plan) },
+                        onEnded: { resizeStart = nil })
+                        .zIndex(2)
+                        .tileFrame(divider.frame)
+                }
+            }
+            .frame(width: plan.size.width, height: plan.size.height, alignment: .topLeading)
+            .coordinateSpace(name: TileCanvas.space)
+        }
+        .frame(width: plan.size.width, height: plan.size.height)
     }
 
     @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, canvas: GeometryProxy) -> some View {
@@ -250,6 +257,7 @@ struct TileWorkspace: View {
             .id(chat.id)
             .zIndex(dragging ? 100 : 1)
             .transition(tileTransition(chat.id, target: slot, canvas: canvas))
+            .onAppear { store.consumeOpeningOrigin(chat.id) }
             .tileFrame(frame)
     }
 
@@ -258,8 +266,10 @@ struct TileWorkspace: View {
             HStack(spacing: 8) {
                 ForEach(store.tiles) { chat in
                     Button { store.focus(chat.id) } label: {
-                        HStack(spacing: 7) { Avatar(conversation: chat, size: 22); Text(chat.name).font(.system(size: 12, weight: .medium)) }
+                        HStack(spacing: 7) { Avatar(conversation: chat, size: 22); Text(chat.name).font(.system(size: 12, weight: .medium)).lineLimit(1) }
                             .padding(8).background(store.focused?.id == chat.id ? Palette.surface : .clear, in: RoundedRectangle(cornerRadius: 8))
+                            // The whole chip, padding and background included, takes the click.
+                            .contentShape(RoundedRectangle(cornerRadius: 8))
                     }.buttonStyle(TileControlStyle())
                 }
             }
@@ -268,7 +278,10 @@ struct TileWorkspace: View {
     private func tileTransition(_ id: String, target: CGRect, canvas: GeometryProxy) -> AnyTransition {
         guard !Motion.reduced else { return .opacity }
         let origin = canvas.frame(in: .named("workspace")).origin
-        let source = store.openingOrigins[id] ?? CGPoint(x: origin.x - 60, y: origin.y + target.midY)
+        // A tile grows out of the sidebar row that opened it. Focus mode swaps tiles in place, so
+        // every conversation there grows from the same spot at the left edge.
+        let sidebar = store.workspace.layout == .focus ? nil : store.openingOrigins[id]
+        let source = sidebar ?? CGPoint(x: origin.x - 60, y: origin.y + target.midY)
         let insertion = AnyTransition.scale(scale: 0.06)
             .combined(with: .offset(x: source.x - origin.x - target.midX, y: source.y - origin.y - target.midY))
             .combined(with: .opacity).animation(Motion.layout)

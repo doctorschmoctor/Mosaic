@@ -122,6 +122,12 @@ import MosaicCore
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
+    /// Forgets where a tile was opened from once it has appeared, so a later re-insertion (switching
+    /// layouts, say) does not replay the sidebar fly-out.
+    func consumeOpeningOrigin(_ id: String) {
+        guard openingOrigins[id] != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.openingOrigins[id] = nil }
+    }
     func close(_ id: String) {
         animateLayout {
             if tileDrag?.id == id { tileDrag = nil }

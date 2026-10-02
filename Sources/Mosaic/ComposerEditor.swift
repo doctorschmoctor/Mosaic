@@ -4,8 +4,9 @@ import AppKit
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
 struct ComposerEditor: NSViewRepresentable {
-    static let minimumHeight: CGFloat = 34
-    static let maximumHeight: CGFloat = 116
+    /// Single-line height and the limit after which the field scrolls, matching Messages' composer.
+    static let minimumHeight: CGFloat = 32
+    static let maximumHeight: CGFloat = 112
 
     @Binding var text: String
     var placeholder = ""
@@ -31,16 +32,11 @@ struct ComposerEditor: NSViewRepresentable {
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
         let font = NSFont.systemFont(ofSize: 12)
-        // An explicit TextKit 1 stack: its insertion point honors textContainerInset in every state,
-        // including an empty field, where the TextKit 2 default could draw the caret out of place.
-        let storage = NSTextStorage()
-        let layoutManager = NSLayoutManager()
-        storage.addLayoutManager(layoutManager)
-        let container = NSTextContainer(containerSize: NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude))
-        container.widthTracksTextView = true
-        layoutManager.addTextContainer(container)
-        let editor = DraftTextView(frame: NSRect(origin: .zero, size: scroll.contentSize), textContainer: container)
-        editor.ownedStorage = storage
+        // TextKit 1, set up by AppKit itself: its insertion point follows textContainerInset in every
+        // state, including an empty field, where the default stack could draw the caret at the edge.
+        let editor = DraftTextView(usingTextLayoutManager: false)
+        editor.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        editor.textContainer?.widthTracksTextView = true
         editor.delegate = context.coordinator
         editor.isRichText = false
         editor.importsGraphics = false
@@ -49,7 +45,7 @@ struct ComposerEditor: NSViewRepresentable {
         editor.font = font
         editor.textColor = .labelColor
         editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
-        editor.textContainerInset = NSSize(width: 6, height: DraftTextView.verticalInset(for: font, height: Self.minimumHeight))
+        editor.textContainerInset = NSSize(width: 8, height: DraftTextView.verticalInset(for: font, height: Self.minimumHeight))
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]
@@ -59,6 +55,8 @@ struct ComposerEditor: NSViewRepresentable {
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.string = text
         scroll.documentView = editor
+        ThinScroller.install(in: scroll)
+        if let layoutManager = editor.layoutManager, let container = editor.textContainer { layoutManager.ensureLayout(for: container) }
         apply(to: editor, coordinator: context.coordinator)
         if focusRequest != 0 { editor.requestFocus() }
         context.coordinator.focusRequest = focusRequest
@@ -128,8 +126,6 @@ final class DraftTextView: NSTextView {
     var onHeightChange: ((CGFloat) -> Void)?
     var conversationID = ""
     var placeholder = ""
-    /// A hand-built text system is rooted in its storage, which the view must keep alive.
-    var ownedStorage: NSTextStorage?
     private var pendingFocus = false
     private var lastReportedWidth: CGFloat = 0
 
@@ -186,8 +182,7 @@ final class DraftTextView: NSTextView {
         minSize = NSSize(width: 0, height: clip.height)
         if abs(frame.width - clip.width) > 0.5 { setFrameSize(NSSize(width: clip.width, height: frame.height)) }
         layoutManager.ensureLayout(for: textContainer)
-        let line = layoutManager.defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
-        let used = max(layoutManager.usedRect(for: textContainer).height, line) + textContainerInset.height * 2
+        let used = textHeight + textContainerInset.height * 2
         let height = max(used.rounded(.up), clip.height)
         if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: clip.width, height: height)) }
         if height <= clip.height + 0.5, let clipView = enclosingScrollView?.contentView, clipView.bounds.origin != .zero {
@@ -216,13 +211,19 @@ final class DraftTextView: NSTextView {
         scrollRangeToVisible(selectedRange())
     }
 
-    /// Height of the laid-out text plus insets, reported so the composer can grow up to a few lines.
-    func reportHeight() {
-        guard let layoutManager, let textContainer, let onHeightChange else { return }
+    /// Height of the laid-out text. An empty field measures as exactly one line, so every tile's
+    /// composer is the same height whatever the layout manager reports for its empty line.
+    private var textHeight: CGFloat {
+        let line = NSLayoutManager().defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
+        guard !string.isEmpty, let layoutManager, let textContainer else { return line }
         layoutManager.ensureLayout(for: textContainer)
-        let line = layoutManager.defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
-        let used = max(layoutManager.usedRect(for: textContainer).height, line)
-        onHeightChange(used + textContainerInset.height * 2)
+        return max(layoutManager.usedRect(for: textContainer).height, line)
+    }
+
+    /// Reported so the composer can grow up to a few lines.
+    func reportHeight() {
+        guard let onHeightChange else { return }
+        onHeightChange(textHeight + textContainerInset.height * 2)
     }
 
     override func draw(_ dirtyRect: NSRect) {

@@ -92,7 +92,7 @@ struct ConversationTile: View {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                ComposerEditor(text: draft, placeholder: "Message \(conversation.name)", conversationID: conversation.id,
+                ComposerEditor(text: draft, placeholder: placeholder, conversationID: conversation.id,
                     accessibilityLabel: "Message to \(conversation.name)",
                     focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
                     height: $composerHeight,
@@ -100,11 +100,23 @@ struct ConversationTile: View {
                     onSend: { Task { await store.send(conversation.id) } },
                     onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) })
                     .frame(height: composerHeight)
-                    .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.07)).allowsHitTesting(false))
+                    // Messages' field: a capsule on one line, with the same corner radius as it grows.
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: ComposerEditor.minimumHeight / 2, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: ComposerEditor.minimumHeight / 2, style: .continuous)
+                        .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
                 emojiButton.padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
             }
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
+    }
+
+    /// The service name, as Messages labels its own field.
+    private var placeholder: String {
+        switch conversation.service.lowercased() {
+        case "imessage": return "iMessage"
+        case "sms": return "Text Message"
+        case "rcs": return "RCS Message"
+        default: return conversation.service
+        }
     }
 
     /// Opens Emoji & Symbols for this tile's field. Return sends; there is no send button.
@@ -141,6 +153,18 @@ struct MessageList: View, Equatable {
         lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore && lhs.senderNames == rhs.senderNames
     }
 
+    /// Scrolls to the newest message. Rows added in the current update have no size yet, so the
+    /// scroll is repeated once layout has run; otherwise a freshly loaded history landed mid-way.
+    private func scrollToLatest(_ reader: ScrollViewProxy, animated: Bool) {
+        let scroll = {
+            if animated && !Motion.reduced { withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } }
+            else { reader.scrollTo("bottom", anchor: .bottom) }
+        }
+        scroll()
+        DispatchQueue.main.async(execute: scroll)
+        if !animated { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { reader.scrollTo("bottom", anchor: .bottom) } }
+    }
+
     var body: some View {
         ScrollViewReader { reader in
             ScrollView {
@@ -172,6 +196,7 @@ struct MessageList: View, Equatable {
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(16)
+                .background(ThinScrollerInstaller())
                 // Bubbles take their final positions at once during tile animations; the card around them
                 // still grows, shrinks and moves smoothly. Interpolating every bubble made text slide around.
                 .transaction { transaction in
@@ -182,10 +207,13 @@ struct MessageList: View, Equatable {
             .task(id: conversation.id) {
                 // Let the tile's first layout settle before following its newest message.
                 try? await Task.sleep(for: .milliseconds(150))
-                reader.scrollTo("bottom", anchor: .bottom)
+                if followsNewest { scrollToLatest(reader, animated: false) }
             }
-            .onChange(of: conversation.messages.last?.presentationID) { _, _ in
-                if followsNewest { withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } }
+            .onChange(of: conversation.messages.last?.presentationID) { previous, _ in
+                guard followsNewest else { return }
+                // History arriving in an open tile (previous == nil) jumps straight to the end; a new
+                // message slides in.
+                scrollToLatest(reader, animated: previous != nil)
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsNewest {
@@ -228,11 +256,10 @@ struct MessageBubble: View {
             HStack(spacing: 4) {
                 Text(message.date.formatted(date: .omitted, time: .shortened))
                 if fromMe {
+                    // A sent message shows only its time until Messages reports delivery.
                     if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
-                    else if !live { Text("· Demo") }
                     else if message.isRead { Text("· Read") }
                     else if message.isDelivered { Text("· Delivered") }
-                    else if message.id.hasPrefix("pending-") { Text("· Submitted to Messages") }
                 }
             }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
         }

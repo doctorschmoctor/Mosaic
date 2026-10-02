@@ -8,10 +8,13 @@ final class TileLayoutTests: XCTestCase {
             let ids = (0..<count).map(String.init)
             let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 820), layout: .grid)
             XCTAssertEqual(plan.frames.count, count)
+            XCTAssertEqual(plan.size.height, 820, "the grid never grows past the window")
+            let rows = CGFloat((count + 1) / 2)
+            let rowHeight = (820 - TileLayout.inset * 2 - (rows - 1) * TileLayout.gap) / rows
             for id in ids {
                 let frame = try XCTUnwrap(plan.frames[id])
                 XCTAssertGreaterThanOrEqual(frame.width, TileLayout.minimumWidth)
-                XCTAssertGreaterThanOrEqual(frame.height, TileLayout.minimumHeight)
+                XCTAssertEqual(frame.height, rowHeight, accuracy: 0.01)
                 XCTAssertGreaterThanOrEqual(frame.minX, TileLayout.inset)
                 XCTAssertLessThanOrEqual(frame.maxX, plan.size.width - TileLayout.inset + 0.01)
                 for other in ids where id != other { XCTAssertFalse(frame.intersects(try XCTUnwrap(plan.frames[other]))) }
