@@ -31,7 +31,8 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(OutgoingAttachment(url: gif).previewText, "GIF")
         let staged = try OutgoingFiles.stage(picture, in: staging)
         XCTAssertEqual(staged.lastPathComponent, picture.lastPathComponent)
-        XCTAssertEqual(staged.deletingLastPathComponent().deletingLastPathComponent(), staging, "each staged file has a folder of its own")
+        XCTAssertEqual(staged.deletingLastPathComponent().deletingLastPathComponent().resolvingSymlinksInPath().path,
+                       staging.resolvingSymlinksInPath().path, "each staged file has a folder of its own")
         XCTAssertEqual(try Data(contentsOf: staged), try Data(contentsOf: picture))
         XCTAssertTrue(FileManager.default.fileExists(atPath: picture.path), "the pending copy stays until the message is delivered")
         // Purging removes only what is older than the age given.
