@@ -100,6 +100,35 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertNotNil(store.alert, "a full workspace explains itself in an alert")
     }
 
+    /// A fresh install asks nothing on launch: no settings sheet, no alert, no demo workspace; it
+    /// is live with an empty workspace, and the reason Messages cannot be read goes to the empty
+    /// workspace rather than an alert. Once conversations are on screen, losing the connection is
+    /// announced once, in an alert.
+    @MainActor func testFreshInstallLaunchesQuietlyAndAnnouncesConnectionLossOnce() async throws {
+        let defaults = UserDefaults(suiteName: "MosaicTest-\(UUID())")!
+        let database = MessagesDatabase(path: NSTemporaryDirectory() + "mosaic-missing-\(UUID()).db")
+        let store = WorkspaceStore(defaults: defaults, database: database)
+        XCTAssertTrue(store.isLive, "a fresh install is live, not the demo")
+        XCTAssertFalse(store.showSetup, "no settings sheet on launch")
+        XCTAssertNil(store.alert)
+        XCTAssertTrue(store.workspace.openIDs.isEmpty)
+        XCTAssertTrue(store.conversations.isEmpty)
+        for _ in 0..<200 where store.connectionError == nil { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertNotNil(store.connectionError)
+        XCTAssertNil(store.alert, "with nothing on screen, the empty workspace carries the message")
+        // Conversations on screen, then the connection fails: one alert, not one per failed poll.
+        store.conversations = [Conversation(id: "a", name: "Alex Morgan", participants: ["alex@example.test"])]
+        store.connectionError = nil
+        for _ in 0..<200 where store.alert == nil { await store.refresh(); try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertNotNil(store.alert)
+        XCTAssertNotNil(store.connectionError)
+        store.alert = nil
+        await store.refresh()
+        await store.refresh()
+        XCTAssertNil(store.alert, "the same trouble is not announced again")
+        store.setMode(live: false)
+    }
+
     @MainActor func testKeyboardTraversalSkipsNothingAndWrapsAround() {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         let ids = store.workspace.openIDs

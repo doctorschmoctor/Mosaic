@@ -26,8 +26,10 @@ import MosaicCore
     var contactEntries: [ContactNames.Entry] = []
     var search = ""
     var isLive = false
+    /// Why Messages cannot be read right now. Shown where there is room for it — the empty
+    /// workspace and the connection settings — and announced in an alert when conversations are
+    /// on screen (the window's title area never carries messages).
     var connectionError: String?
-    var banner: String?
     /// A modal message for something that cannot be done right now.
     var alert: WorkspaceAlert?
     var sendingIDs = Set<String>()
@@ -91,13 +93,13 @@ import MosaicCore
     init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false) {
         self.defaults = defaults; self.database = database
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
-        isLive = !forcedDemo && defaults.bool(forKey: "Mosaic.live")
-        // Connection settings open on launch until Messages is connected; afterwards they live in
-        // Mosaic › Settings and the Workspace menu.
-        showSetup = !isLive && !forcedDemo
+        // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
+        // whose "Connect Messages" leads to the connection settings. Nothing opens or asks on
+        // launch — no settings sheet, no Contacts prompt (that waits for the settings' button).
+        isLive = !forcedDemo && (defaults.object(forKey: "Mosaic.live") as? Bool ?? true)
         if isLive {
             restore()
-            Task { await self.loadContacts(requestPermission: self.contactAuthorization == .notDetermined); await self.refresh() }
+            Task { await self.loadContacts(requestPermission: false); await self.refresh() }
         } else {
             conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
@@ -353,7 +355,7 @@ import MosaicCore
     func setMode(live: Bool) {
         guard live != isLive, sendingIDs.isEmpty else { return }
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
-        connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
+        connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
@@ -431,6 +433,11 @@ import MosaicCore
             guard generation == requestGeneration else { return }
             consecutiveLoadFailures += 1
             if !connectedBefore || consecutiveLoadFailures >= Self.failuresBeforeError {
+                // With conversations on screen there is nowhere quiet to show this: say it once, in
+                // an alert, when the trouble starts. The empty workspace shows it otherwise.
+                if connectionError == nil, !conversations.isEmpty {
+                    alert = WorkspaceAlert(title: "Mosaic can't read Messages right now", message: error.localizedDescription)
+                }
                 connectionError = error.localizedDescription
             }
         }

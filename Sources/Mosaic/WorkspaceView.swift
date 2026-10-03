@@ -47,26 +47,13 @@ struct WorkspaceView: View {
                     }.frame(height: Self.titleBarHeight)
                 }
             Divider()
-            VStack(spacing: 0) {
-                if let banner = store.banner {
-                    HStack { Text(banner).font(.callout); Spacer(); Button { store.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
-                        .padding(12).padding(.top, Self.titleBarHeight - 12).background(Palette.accent.opacity(0.08))
-                }
-                if let error = store.connectionError {
-                    HStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.lock").foregroundStyle(.orange)
-                        Text(error).font(.callout).lineLimit(3)
-                        Spacer()
-                        Button("Set up") { store.showSetup = true }
-                        Button("Retry") { Task { await store.refresh() } }
-                    }.padding(14).padding(.top, Self.titleBarHeight - 14).background(Color.orange.opacity(0.08))
-                }
-                ZStack {
-                    // Tiles reach up into the title-bar strip; their headers handle their own mouse
-                    // events there. The empty parts of the strip (margins, gaps) move the window.
-                    TileWorkspace().padding(Self.tileAreaMargin)
-                    if store.tiles.isEmpty { emptyWorkspace }
-                }
+            // Nothing but tiles on the right: no message strips in the title area. What the
+            // workspace has to say is said in the empty workspace or in an alert.
+            ZStack {
+                // Tiles reach up into the title-bar strip; their headers handle their own mouse
+                // events there. The empty parts of the strip (margins, gaps) move the window.
+                TileWorkspace().padding(Self.tileAreaMargin)
+                if store.tiles.isEmpty { emptyWorkspace }
             }
             // Behind everything in the right pane, only as tall as the strip: a press there that no
             // tile header, chip or divider takes moves the window.
@@ -111,9 +98,11 @@ struct WorkspaceView: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
                             .listRowSeparator(.hidden)
                             // Inside the list's scroll view: gives it the slim scroller the tiles have,
-                            // one that does not thicken under the pointer or appear for a swipe, and
-                            // tells the rows while a swipe is under way.
-                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true) { swiping in store.setSidebarSwiping(swiping) })
+                            // one that does not thicken under the pointer or appear for a swipe, tells
+                            // the rows while a swipe is under way, and tracks the pointer over the row.
+                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true,
+                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
+                                onPointer: { inside in inside ? store.hoverSidebarRow(conversation.id) : store.leaveSidebarRow(conversation.id) }))
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                     .tint(.red)
@@ -138,13 +127,24 @@ struct WorkspaceView: View {
         .background(alignment: .topLeading) { SidebarKeyFocus(keyboard: sidebarKeyboard, store: store).frame(width: 1, height: 1) }
     }
     private var emptyWorkspace: some View {
-        VStack(spacing: 16) {
+        let unconnected = store.isLive && store.conversations.isEmpty
+        return VStack(spacing: 16) {
             Image(systemName: "rectangle.split.2x2").font(.system(size: 54, weight: .ultraLight)).foregroundStyle(Palette.accent.opacity(0.6))
-            Text(store.isLive && store.conversations.isEmpty ? "Bring your conversations together" : "Make room for a conversation")
+            Text(unconnected ? "Bring your conversations together" : "Make room for a conversation")
                 .font(.system(size: 24, weight: .medium))
-            Text(store.isLive && store.conversations.isEmpty ? "Connect Messages to see the chats already on your Mac." : "Choose someone in the sidebar to open a tile.\nEvery conversation gets its own space and draft.")
+            Text(unconnected ? "Connect Messages to see the chats already on your Mac." : "Choose someone in the sidebar to open a tile.\nEvery conversation gets its own space and draft.")
                 .font(.callout).multilineTextAlignment(.center).foregroundStyle(.secondary)
-            if store.isLive && store.conversations.isEmpty { Button("Connect Messages") { store.showSetup = true }.buttonStyle(.borderedProminent) }
+            if unconnected {
+                // Why nothing has loaded yet, in the workspace rather than a strip at the top.
+                if let error = store.connectionError {
+                    Label(error, systemImage: "lock").font(.callout).foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center).frame(maxWidth: 480).padding(.top, 4)
+                }
+                HStack(spacing: 10) {
+                    Button("Connect Messages") { store.showSetup = true }.buttonStyle(.borderedProminent)
+                    if store.connectionError != nil { Button("Retry") { Task { await store.refresh() } } }
+                }
+            }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -308,7 +308,6 @@ struct ConversationRow: View {
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .accessibilityAddTraits(isSelected ? .isSelected : [])
-            .onHover { inside in inside ? store.hoverSidebarRow(conversation.id) : store.leaveSidebarRow(conversation.id) }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }

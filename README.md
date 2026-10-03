@@ -29,7 +29,7 @@ The build verifies the signed app in a temporary directory and creates `build/Mo
 
 Or open **Mosaic.xcodeproj**, select the **Mosaic** scheme, and press Run. The project defaults to local ad-hoc signing; no paid developer account is required. SwiftPM is also supported through `Package.swift`. Use the packaged `.app` for Messages permissions because it contains the privacy descriptions and automation entitlement.
 
-The app starts with fictional demo conversations. Sending in demo mode adds a local bubble only. To force a fresh demo without touching your saved workspaces:
+A fictional demo workspace is available from the connection settings (**Use demo workspace**). Sending in demo mode adds a local bubble only. To launch straight into a fresh demo without touching your saved workspaces:
 
 ```sh
 open "$HOME/Applications/Mosaic.app" --args --demo
@@ -37,7 +37,7 @@ open "$HOME/Applications/Mosaic.app" --args --demo
 
 ## Connect real conversations
 
-1. Mosaic opens its connection settings when it launches until Messages is connected. Later, open them from **Mosaic › Settings** (⌘,) or **Workspace › Connect Messages…**.
+1. Mosaic launches quietly, with an empty workspace. Press **Connect Messages** there to open the connection settings; later, open them from **Mosaic › Settings** (⌘,) or **Workspace › Connect Messages…**. Nothing is shown in the title area: what Mosaic has to say appears in the empty workspace or, when conversations are on screen, in an alert.
 2. Open **Full Disk Access**, add the built `Mosaic.app`, enable it, then quit and reopen Mosaic. The **Show Mosaic in Finder** button reveals the exact app to add. Grant access to the same app copy you will run regularly.
 3. Click **Connect Messages**. Mosaic reads conversations already synced to Apple Messages on this Mac and refreshes every three seconds.
 4. Send a text from a tile. macOS asks to let Mosaic control Messages; allow it. If denied, enable **Mosaic → Messages** in **Privacy & Security → Automation**. Failed submissions retain the draft.
