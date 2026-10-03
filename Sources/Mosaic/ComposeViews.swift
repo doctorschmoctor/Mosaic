@@ -30,7 +30,6 @@ struct RecipientField: View {
                 WrapLayout(spacing: 6, lineHeight: Self.lineHeight) {
                     ForEach(draft.recipients) { recipient in chip(recipient) }
                     RecipientTextField(text: $query, takesFocus: true) { command in handle(command, suggestions) }
-                        .frame(height: Self.lineHeight)
                         .accessibilityLabel("Recipients")
                 }
                 Button { showsAll.toggle() } label: {
@@ -161,6 +160,9 @@ struct RecipientTextField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> FocusingTextField {
         let field = FocusingTextField()
+        field.cell = CenteredTextFieldCell(textCell: "")
+        field.isEditable = true
+        field.isSelectable = true
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none
@@ -179,9 +181,28 @@ struct RecipientTextField: NSViewRepresentable {
         context.coordinator.parent = self
         if field.stringValue != text { field.stringValue = text }
     }
-    /// At least room for a few words, and all the room its line has (see WrapLayout).
+    /// At least room for a few words, and all the room its line has (see WrapLayout); as tall as the
+    /// chips beside it, with the text centered in that height by the cell.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: FocusingTextField, context: Context) -> CGSize? {
-        CGSize(width: max(140, proposal.width ?? 140), height: proposal.height ?? 17)
+        CGSize(width: max(140, proposal.width ?? 140), height: proposal.height ?? RecipientField.lineHeight)
+    }
+
+    /// Draws single-line text vertically centered in a cell taller than the text, where
+    /// NSTextFieldCell would draw it along the top.
+    final class CenteredTextFieldCell: NSTextFieldCell {
+        private func centered(_ rect: NSRect) -> NSRect {
+            let textHeight = cellSize(forBounds: rect).height
+            let inset = (rect.height - textHeight) / 2
+            guard inset > 0 else { return rect }
+            return NSRect(x: rect.minX, y: rect.minY + inset, width: rect.width, height: textHeight)
+        }
+        override func drawingRect(forBounds rect: NSRect) -> NSRect { super.drawingRect(forBounds: centered(rect)) }
+        override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+            super.select(withFrame: centered(rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+        }
+        override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+            super.edit(withFrame: centered(rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+        }
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {

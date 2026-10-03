@@ -99,12 +99,14 @@ struct WorkspaceView: View {
             // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
             List {
                 ForEach(store.filteredConversations) { conversation in
+                    // Rows run to the sidebar's trailing edge, so the swipe action sits flush
+                    // against an open row's highlight instead of beside a gap.
                     ConversationRow(conversation: conversation)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 10))
+                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) { store.hide(conversation.id) } label: { Label("Delete", systemImage: "trash") }
+                            Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                 .tint(.red)
                         }
                 }
@@ -275,8 +277,10 @@ struct ConversationRow: View {
                     }
                     Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
-            }.padding(.horizontal, 10).padding(.vertical, 12)
-                .background(isOpen ? Palette.accent.opacity(0.075) : .clear, in: RoundedRectangle(cornerRadius: 10))
+            }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
+                // Rounded on the left, square where it meets the sidebar's edge (and a swipe action).
+                .background(isOpen ? Palette.accent.opacity(0.075) : .clear,
+                            in: UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10, bottomTrailingRadius: 0, topTrailingRadius: 0))
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
