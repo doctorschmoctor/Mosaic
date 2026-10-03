@@ -22,9 +22,11 @@ enum Palette {
 }
 
 struct WorkspaceView: View {
-    /// Height of the unified title bar the window controls sit in.
+    /// Height of the window-control strip (traffic lights). The tile area starts below it, so no tile
+    /// header sits in the draggable title-bar region — that is what made a header drag move the whole
+    /// window and swallow clicks on the × and focus chips.
     static let titleBarHeight: CGFloat = 52
-    /// Space between the window edge and the tile area, the same on every side.
+    /// Space between the tile area's edges and the tiles, the same on every side.
     static let tileAreaMargin: CGFloat = 8
     @EnvironmentObject private var store: WorkspaceStore
     @FocusState private var searchFocused: Bool
@@ -35,9 +37,12 @@ struct WorkspaceView: View {
             sidebar.frame(width: 256)
             Divider()
             VStack(spacing: 0) {
+                // The title-bar strip: window background, nothing over it, so dragging it moves the
+                // window as a title bar should. Tiles live below it.
+                Color.clear.frame(height: Self.titleBarHeight)
                 if let banner = store.banner {
                     HStack { Text(banner).font(.callout); Spacer(); Button { store.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
-                        .padding(12).padding(.top, Self.titleBarHeight - 12).background(Palette.accent.opacity(0.08))
+                        .padding(12).background(Palette.accent.opacity(0.08))
                 }
                 if let error = store.connectionError {
                     HStack(spacing: 12) {
@@ -46,11 +51,10 @@ struct WorkspaceView: View {
                         Spacer()
                         Button("Set up") { store.showSetup = true }
                         Button("Retry") { Task { await store.refresh() } }
-                    }.padding(14).padding(.top, Self.titleBarHeight - 14).background(Color.orange.opacity(0.08))
+                    }.padding(14).background(Color.orange.opacity(0.08))
                 }
                 ZStack {
-                    // Tiles reach up into the title bar strip; their headers handle their own mouse events there.
-                    TileWorkspace().padding(Self.tileAreaMargin)
+                    TileWorkspace().padding([.horizontal, .bottom], Self.tileAreaMargin).padding(.top, Self.tileAreaMargin)
                     if store.tiles.isEmpty { emptyWorkspace }
                 }
             }.background(Palette.canvas)
