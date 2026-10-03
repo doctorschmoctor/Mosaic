@@ -110,19 +110,32 @@ struct ConversationTile: View {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
-                    accessibilityLabel: "Message to \(conversation.name)",
-                    focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
-                    height: $composerHeight,
-                    onFocus: { store.focus(conversation.id) },
-                    onSend: { Task { await store.send(conversation.id) } },
-                    onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
-                    onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil)
-                    .frame(height: composerHeight)
-                    // The field's corners match the tile's.
-                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
+                // Photos, GIFs and files, as in Messages.
+                AttachmentMenuButton(conversationName: conversation.name, tenorKey: store.tenorKey,
+                    onFiles: { urls in store.attach(urls, to: conversation.id) },
+                    onOpenSettings: { store.showSetup = true })
+                    .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
+                VStack(spacing: 0) {
+                    if let files = store.outgoing[conversation.id], !files.isEmpty {
+                        // Pictures and files going out with the next message, above the text.
+                        AttachmentStrip(files: files) { store.removeAttachment($0, from: conversation.id) }
+                    }
+                    ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
+                        accessibilityLabel: "Message to \(conversation.name)",
+                        focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
+                        height: $composerHeight,
+                        onFocus: { store.focus(conversation.id) },
+                        onSend: { Task { await store.send(conversation.id) } },
+                        onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
+                        onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil,
+                        onAttachFiles: { urls in store.attach(urls, to: conversation.id) },
+                        onAttachPicture: { data, type in store.attachPicture(data, type: type, to: conversation.id) })
+                        .frame(height: composerHeight)
+                }
+                // The field's corners match the tile's.
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
                 emojiButton.padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
             }
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)

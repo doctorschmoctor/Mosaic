@@ -10,6 +10,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 - **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
+- **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, search GIFs, or choose a file. They go out through Messages like anything else.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them.
 - **Media and links** — Photo and video thumbnails, file chips, and link previews, all sized before they load so nothing jumps.
 - **Contact names** — Phone numbers and addresses become names with Contacts access. Names stay in memory.
@@ -37,6 +38,7 @@ Mosaic launches with an empty workspace. Press **Connect Messages** there (or op
 2. **Connect** — Mosaic reads the conversations synced to Messages on this Mac and follows the database for changes.
 3. **Sending** — Your first send asks permission to control Messages. Allow it, or enable Mosaic › Messages under Privacy & Security › Automation.
 4. **Contacts** (optional) — Allow Contacts access to see names instead of numbers.
+5. **GIFs** (optional) — Paste a free [Tenor API key](https://developers.google.com/tenor/guides/quickstart) into Settings to search GIFs from the + button.
 
 Messages must already be signed in. SMS/RCS availability follows your Messages setup.
 
@@ -63,6 +65,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 - Swipe a row left (or right-click it) to delete the conversation from Mosaic. It stays in Messages and returns with its next message.
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
+- The **+** button at the left of the composer offers Photos, GIFs and files; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
 - Click a photo or video to open it; right-click for Finder. Right-click a bubble to copy its text or open its links.
 - **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
 
@@ -73,14 +76,14 @@ Mosaic covers existing conversations and text replies. It reads `~/Library/Messa
 - The sidebar lists the 500 most recent conversations plus any open ones. Search covers names, participants and previews.
 - Plain text and common rich bodies are shown; unknown formats offer **Open in Messages**. Edits, unsends, formatting and tapbacks are not rendered.
 - Attachments come from the copies Messages keeps locally; one never downloaded to this Mac says so. Link previews use LinkPresentation and are kept in memory.
-- Attachments, reactions, calls and brand-new groups are done in Messages; **Open Messages** takes you there.
+- Reactions, calls and brand-new groups are done in Messages; **Open Messages** takes you there. Each file is sent as its own message, before the text.
 - Messages from one sender within fifteen minutes form a run with a single time stamp. **Delivered** / **Read** appears under the latest sent message once Messages reports it. Sends are never retried automatically.
 - Mosaic does not write to Apple's database. Unread indicators are local to the session.
 - The database schema is Apple's and undocumented; a macOS release may require an update.
 
 ## Privacy
 
-Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts, locally, in UserDefaults. Fetching a link preview is the only network request it makes. There is no analytics, backend or upload code. The demo workspace uses fictional data.
+Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts, locally, in UserDefaults; pictures you paste wait in `~/Library/Application Support/Mosaic/Outgoing` until sent. Mosaic's only network requests are link previews and, if you add a Tenor key, GIF searches while the GIF panel is open. There is no analytics, backend or upload code. The demo workspace uses fictional data.
 
 ## Development
 

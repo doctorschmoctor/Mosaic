@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
@@ -24,6 +25,10 @@ struct ComposerEditor: NSViewRepresentable {
     var onTab: (Bool) -> Void = { _ in }
     /// Esc, when the field has a use for it (closing a new-message tile).
     var onCancel: (() -> Void)? = nil
+    /// Files pasted or dropped into the field (a Finder copy, a drag from the desktop).
+    var onAttachFiles: ([URL]) -> Void = { _ in }
+    /// Picture data pasted or dropped into the field (a screenshot, Copy Image in a browser).
+    var onAttachPicture: (Data, UTType) -> Void = { _, _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -65,6 +70,8 @@ struct ComposerEditor: NSViewRepresentable {
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
         editor.string = text
+        // Files and pictures can be dropped on the field; they become attachments, not text.
+        editor.registerForDraggedTypes(editor.registeredDraggedTypes + DraftTextView.attachmentTypes)
         scroll.documentView = editor
         ThinScroller.install(in: scroll)
         if let layoutManager = editor.layoutManager, let container = editor.textContainer { layoutManager.ensureLayout(for: container) }
@@ -106,6 +113,8 @@ struct ComposerEditor: NSViewRepresentable {
         editor.onSend = onSend
         editor.onTab = onTab
         editor.onCancel = onCancel
+        editor.onAttachFiles = onAttachFiles
+        editor.onAttachPicture = onAttachPicture
         editor.conversationID = conversationID
         DraftTextView.register(editor, for: conversationID)
         if editor.placeholder != placeholder { editor.placeholder = placeholder; editor.needsDisplay = true }
@@ -168,6 +177,8 @@ final class DraftTextView: NSTextView {
     var onSend: (() -> Void)?
     var onTab: ((Bool) -> Void)?
     var onCancel: (() -> Void)?
+    var onAttachFiles: (([URL]) -> Void)?
+    var onAttachPicture: ((Data, UTType) -> Void)?
     var onHeightChange: ((CGFloat) -> Void)?
     var conversationID = ""
     var placeholder = ""
@@ -208,8 +219,41 @@ final class DraftTextView: NSTextView {
     // Tab and Shift–Tab move between tiles instead of inserting a tab character.
     override func insertTab(_ sender: Any?) { onTab?(true) }
     override func insertBacktab(_ sender: Any?) { onTab?(false) }
-    override func cancelOperation(_ sender: Any?) {
-        if let onCancel { onCancel() } else { super.cancelOperation(sender) }
+    // Esc closes a New Message tile; elsewhere it does nothing. (NSResponder declares
+    // cancelOperation(_:) without implementing it: calling super raised an exception.)
+    override func cancelOperation(_ sender: Any?) { onCancel?() }
+
+    // MARK: Pictures and files
+
+    static let attachmentTypes: [NSPasteboard.PasteboardType] =
+        [.fileURL] + [UTType.png, .jpeg, .gif, .heic, .tiff].map { NSPasteboard.PasteboardType($0.identifier) }
+
+    /// Pasting a picture or a file attaches it to the message; anything else pastes as text.
+    override func paste(_ sender: Any?) { if !attach(from: NSPasteboard.general) { super.paste(sender) } }
+    override func pasteAsPlainText(_ sender: Any?) { if !attach(from: NSPasteboard.general) { super.pasteAsPlainText(sender) } }
+    /// Takes the files or picture a pasteboard carries, if any.
+    @discardableResult func attach(from pasteboard: NSPasteboard) -> Bool {
+        switch OutgoingFiles.contents(of: pasteboard) {
+        case .files(let urls): onAttachFiles?(urls); return true
+        case .picture(let data, let type): onAttachPicture?(data, type); return true
+        case nil: return false
+        }
+    }
+    private func carriesAttachment(_ sender: NSDraggingInfo) -> Bool {
+        sender.draggingPasteboard.availableType(from: Self.attachmentTypes) != nil
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        carriesAttachment(sender) ? .copy : super.draggingEntered(sender)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        carriesAttachment(sender) ? .copy : super.draggingUpdated(sender)
+    }
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        carriesAttachment(sender) ? true : super.prepareForDragOperation(sender)
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        if carriesAttachment(sender), attach(from: sender.draggingPasteboard) { return true }
+        return super.performDragOperation(sender)
     }
 
     override func didChangeText() {

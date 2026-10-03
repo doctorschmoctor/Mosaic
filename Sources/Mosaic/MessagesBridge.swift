@@ -22,6 +22,27 @@ enum MessagesBridge {
         end tell
         return "submitted"
     end sendToParticipant
+    on sendFile(filePath, conversationID)
+        set theFile to (POSIX file filePath) as alias
+        tell application id "com.apple.MobileSMS"
+            set targetChat to chat id conversationID
+            send theFile to targetChat
+        end tell
+        return "submitted"
+    end sendFile
+    on sendFileToParticipant(filePath, handle, serviceKind)
+        set theFile to (POSIX file filePath) as alias
+        tell application id "com.apple.MobileSMS"
+            if serviceKind is "SMS" then
+                set targetService to 1st account whose service type = SMS
+            else
+                set targetService to 1st account whose service type = iMessage
+            end if
+            set targetParticipant to participant handle of targetService
+            send theFile to targetParticipant
+        end tell
+        return "submitted"
+    end sendFileToParticipant
     """
 
     /// Arguments are Apple event descriptors, never interpolated into executable script.
@@ -42,7 +63,19 @@ enum MessagesBridge {
     /// creates the chat; it shows up in the database afterwards. Group chats cannot be created this
     /// way: Messages offers no automation for it.
     static func send(text: String, toNewRecipient handle: String, service: String = "iMessage") throws {
-        try call("sendToParticipant", [text, handle, service.caseInsensitiveCompare("SMS") == .orderedSame ? "SMS" : "iMessage"])
+        try call("sendToParticipant", [text, handle, serviceKind(service)])
+    }
+    /// Sends a file (a picture, a document) to an existing conversation. The file must be where
+    /// Messages' sandbox can read it — see `OutgoingFiles.stage`; a file elsewhere is accepted and
+    /// then fails to send.
+    static func send(filePath: String, conversationID: String) throws {
+        try call("sendFile", [filePath, conversationID])
+    }
+    static func send(filePath: String, toNewRecipient handle: String, service: String = "iMessage") throws {
+        try call("sendFileToParticipant", [filePath, handle, serviceKind(service)])
+    }
+    private static func serviceKind(_ service: String) -> String {
+        service.caseInsensitiveCompare("SMS") == .orderedSame ? "SMS" : "iMessage"
     }
 
     private static func call(_ handler: String, _ arguments: [String]) throws {

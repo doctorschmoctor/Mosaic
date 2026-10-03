@@ -51,4 +51,14 @@ final class ComposerTests: XCTestCase {
     @MainActor func testMessagesSenderScriptCompilesWithoutExecuting() throws {
         _ = try MessagesBridge.prepareScript()
     }
+    /// Esc closes a New Message tile and does nothing in any other composer. (The default
+    /// NSResponder implementation does not exist; calling it raised an exception.)
+    @MainActor func testEscapeOnlyActsWhereTheComposerHasACancelAction() {
+        let editor = DraftTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 50))
+        editor.cancelOperation(nil)
+        var cancelled = 0
+        editor.onCancel = { cancelled += 1 }
+        editor.cancelOperation(nil)
+        XCTAssertEqual(cancelled, 1)
+    }
 }

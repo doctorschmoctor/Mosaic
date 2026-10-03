@@ -1,6 +1,7 @@
 import SwiftUI
 import Observation
 import Contacts
+import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
 import MosaicCore
 #endif
@@ -34,6 +35,10 @@ import MosaicCore
     var alert: WorkspaceAlert?
     var sendingIDs = Set<String>()
     var sendErrors: [String: String] = [:]
+    /// Files waiting in each tile's composer to go out with the next message.
+    var outgoing: [String: [OutgoingAttachment]] = [:]
+    /// The Tenor API key for GIF search (Settings); empty until the user adds one.
+    var tenorKey: String { didSet { if tenorKey != oldValue { defaults.set(tenorKey, forKey: "Mosaic.tenorKey") } } }
     var showSetup = false
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
@@ -92,7 +97,9 @@ import MosaicCore
 
     init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false) {
         self.defaults = defaults; self.database = database
+        tenorKey = defaults.string(forKey: "Mosaic.tenorKey") ?? ""
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
+        OutgoingFiles.purgeStale()
         // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
         // whose "Connect Messages" leads to the connection settings. Nothing opens or asks on
         // launch — no settings sheet, no Contacts prompt (that waits for the settings' button).
@@ -467,32 +474,100 @@ import MosaicCore
         if composeDrafts[id] != nil { await sendCompose(id); return }
         let originalDraft = drafts[id] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !sendingIDs.contains(id), canSend,
+        let files = outgoing[id] ?? []
+        guard !text.isEmpty || !files.isEmpty, !sendingIDs.contains(id), canSend,
               conversations.contains(where: { $0.id == id }) else { return }
         sendingIDs.insert(id); sendErrors[id] = nil
         defer { sendingIDs.remove(id) }
-        let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
-        if isLive {
-            do {
-                // NSAppleScript is executed on the main actor, as required by Foundation.
-                try MessagesBridge.send(text: text, conversationID: id)
-                pending[id, default: []].append(message)
-            } catch { sendErrors[id] = error.localizedDescription; return }
-        }
+        var delivered: [Message] = []
+        let failure = deliver(text: text, files: files, from: id, to: .chat(id), delivered: &delivered)
+        if let failure { sendErrors[id] = failure }
         instantly {
-            if drafts[id] == originalDraft { drafts[id] = "" }
-            if let currentIndex = conversations.firstIndex(where: { $0.id == id }) {
-                conversations[currentIndex].messages.append(message)
-                conversations[currentIndex].preview = text
+            if failure == nil, drafts[id] == originalDraft { drafts[id] = "" }
+            if let currentIndex = conversations.firstIndex(where: { $0.id == id }), !delivered.isEmpty {
+                conversations[currentIndex].messages.append(contentsOf: delivered)
+                conversations[currentIndex].preview = Self.preview(text: failure == nil ? text : "", files: files, delivered: delivered)
                 conversations[currentIndex].lastActivity = Date()
             }
         }
+        guard !delivered.isEmpty else { return }
         markSeen(id)
         if isLive { lastLoad = nil; await refresh() }
         else if let index = conversations.firstIndex(where: { $0.id == id }) {
             // Demo sending stays local. No invented replies or real recipients.
             conversations[index].unreadCount = 0
         }
+    }
+
+    /// Where a message goes: an existing conversation, or a person who has no chat yet.
+    enum SendTarget { case chat(String), participant(handle: String, service: String) }
+
+    /// Hands the files, then the text, to Messages (or, in the demo, to nobody), appending a
+    /// pending bubble for each as it goes out and dropping each sent file from the composer. Stops
+    /// at the first failure and returns its description; what did go out stays delivered. The
+    /// files are copied into Messages' folder first, the one place its sandbox reads from.
+    private func deliver(text: String, files: [OutgoingAttachment], from tileID: String, to target: SendTarget, delivered: inout [Message]) -> String? {
+        for file in files {
+            if isLive {
+                do {
+                    let staged = try OutgoingFiles.stage(file.url)
+                    // NSAppleScript is executed on the main actor, as required by Foundation.
+                    switch target {
+                    case .chat(let id): try MessagesBridge.send(filePath: staged.path, conversationID: id)
+                    case .participant(let handle, let service): try MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
+                    }
+                    OutgoingFiles.scheduleRemoval(of: staged)
+                } catch { return error.localizedDescription }
+            }
+            let message = file.pendingMessage()
+            delivered.append(message)
+            instantly { outgoing[tileID]?.removeAll { $0.id == file.id }; if outgoing[tileID]?.isEmpty == true { outgoing[tileID] = nil } }
+            if isLive { pending[Self.pendingKey(for: target, tileID: tileID), default: []].append(message) }
+        }
+        guard !text.isEmpty else { return nil }
+        if isLive {
+            do {
+                switch target {
+                case .chat(let id): try MessagesBridge.send(text: text, conversationID: id)
+                case .participant(let handle, let service): try MessagesBridge.send(text: text, toNewRecipient: handle, service: service)
+                }
+            } catch { return error.localizedDescription }
+        }
+        let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
+        delivered.append(message)
+        if isLive { pending[Self.pendingKey(for: target, tileID: tileID), default: []].append(message) }
+        return nil
+    }
+    private static func pendingKey(for target: SendTarget, tileID: String) -> String {
+        if case .chat(let id) = target { return id }
+        return tileID
+    }
+    /// The sidebar preview after a send: the text, else what the last file was.
+    static func preview(text: String, files: [OutgoingAttachment], delivered: [Message]) -> String {
+        if !text.isEmpty { return text }
+        return files.last { file in delivered.contains { $0.attachments.first?.id == file.id } }?.previewText ?? "Attachment"
+    }
+
+    // MARK: Attachments
+
+    /// Adds files to a tile's composer, to go out with its next message.
+    func attach(_ urls: [URL], to id: String) {
+        guard !urls.isEmpty, openIDs.contains(id) else { return }
+        instantly { outgoing[id, default: []] += urls.map(OutgoingAttachment.init) }
+    }
+    /// Adds a pasted or dropped picture to a tile's composer.
+    func attachPicture(_ data: Data, type: UTType, to id: String) {
+        do { attach([try OutgoingFiles.store(data, type: type)], to: id) }
+        catch { sendErrors[id] = "Couldn't keep the pasted picture: \(error.localizedDescription)" }
+    }
+    func removeAttachment(_ attachmentID: String, from id: String) {
+        guard let file = outgoing[id]?.first(where: { $0.id == attachmentID }) else { return }
+        instantly {
+            outgoing[id]?.removeAll { $0.id == attachmentID }
+            if outgoing[id]?.isEmpty == true { outgoing[id] = nil }
+        }
+        // A picture Mosaic wrote for this message is not needed any more; a chosen file is the user's.
+        if file.url.path.hasPrefix(OutgoingFiles.pendingDirectory.path) { try? FileManager.default.removeItem(at: file.url) }
     }
 
     // MARK: New messages
@@ -575,27 +650,27 @@ import MosaicCore
         guard let draft = composeDrafts[draftID] else { return }
         let originalDraft = drafts[draftID] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !sendingIDs.contains(draftID) else { return }
+        let files = outgoing[draftID] ?? []
+        guard !text.isEmpty || !files.isEmpty, !sendingIDs.contains(draftID) else { return }
         guard !draft.recipients.isEmpty else { sendErrors[draftID] = "Add at least one recipient."; return }
         guard canSend else { sendErrors[draftID] = "Connect Messages before sending."; return }
         let target = draft.boundConversationID.flatMap { id in conversations.first { $0.id == id } } ?? conversation(with: draft.recipients)
         sendingIDs.insert(draftID); sendErrors[draftID] = nil
         defer { sendingIDs.remove(draftID) }
-        let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
+        var delivered: [Message] = []
         if let target {
-            if isLive {
-                do { try MessagesBridge.send(text: text, conversationID: target.id) }
-                catch { sendErrors[draftID] = error.localizedDescription; return }
-                pending[target.id, default: []].append(message)
-            }
+            let failure = deliver(text: text, files: files, from: draftID, to: .chat(target.id), delivered: &delivered)
+            if let failure { sendErrors[draftID] = failure }
+            guard !delivered.isEmpty else { return }
             instantly {
-                if drafts[draftID] == originalDraft { drafts[draftID] = nil }
+                if failure == nil, drafts[draftID] == originalDraft { drafts[draftID] = nil }
                 if let index = conversations.firstIndex(where: { $0.id == target.id }) {
-                    conversations[index].messages.append(message)
-                    conversations[index].preview = text
+                    conversations[index].messages.append(contentsOf: delivered)
+                    conversations[index].preview = Self.preview(text: failure == nil ? text : "", files: files, delivered: delivered)
                     conversations[index].lastActivity = Date()
                 }
-                replaceTile(draftID, with: target.id)
+                // A failure keeps what is left in the draft tile; otherwise the tile becomes the conversation.
+                if failure == nil { replaceTile(draftID, with: target.id) }
             }
             markSeen(target.id)
             if isLive { lastLoad = nil; await refresh() }
@@ -606,20 +681,19 @@ import MosaicCore
             openMessages(addresses: draft.recipients.map(\.address))
             return
         }
-        if isLive {
-            do { try MessagesBridge.send(text: text, toNewRecipient: Recipient.handle(for: recipient.address)) }
-            catch { sendErrors[draftID] = error.localizedDescription; return }
-        }
+        let failure = deliver(text: text, files: files, from: draftID,
+                              to: .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage"), delivered: &delivered)
+        if let failure { sendErrors[draftID] = failure }
+        guard !delivered.isEmpty else { return }
         // The conversation appears in the database once Messages has created it; the tile adopts
-        // it then (adoptConversations). Until then the sent text is shown in the draft tile.
+        // it then (adoptConversations). Until then what was sent is shown in the draft tile.
         var waiting = draft
-        waiting.sent.append(message)
+        waiting.sent.append(contentsOf: delivered)
         waiting.awaitingConversationSince = Date()
         instantly {
-            if drafts[draftID] == originalDraft { drafts[draftID] = "" }
+            if failure == nil, drafts[draftID] == originalDraft { drafts[draftID] = "" }
             composeDrafts[draftID] = waiting
         }
-        pending[draftID, default: []].append(message)
         if isLive { lastLoad = nil; await refresh() }
     }
     /// Swaps a new-message tile for the conversation it turned out to be.
