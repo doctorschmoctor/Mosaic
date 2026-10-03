@@ -16,6 +16,7 @@ import SwiftUI
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
+                Button("New Message") { store.beginNewChat() }.keyboardShortcut("n", modifiers: .command)
                 Button("Find a Conversation") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
                     .keyboardShortcut("k", modifiers: .command)
             }

@@ -69,20 +69,25 @@ public struct Conversation: Identifiable, Equatable, Sendable {
     public let id: String
     public let databaseID: Int64
     public var name: String
-    public let participants: [String]
+    public var participants: [String]
     public let service: String
     public var preview: String
     public var lastActivity: Date
     public var unreadCount: Int
     public var messages: [Message]
+    /// A tile for a message that has no conversation yet: the reader is still choosing recipients.
+    public var isComposeDraft: Bool
 
     public init(id: String, databaseID: Int64 = 0, name: String, participants: [String],
                 service: String = "iMessage", preview: String = "", lastActivity: Date = Date(),
-                unreadCount: Int = 0, messages: [Message] = []) {
+                unreadCount: Int = 0, messages: [Message] = [], isComposeDraft: Bool = false) {
         self.id = id; self.databaseID = databaseID; self.name = name; self.participants = participants
         self.service = service; self.preview = preview; self.lastActivity = lastActivity
-        self.unreadCount = unreadCount; self.messages = messages
+        self.unreadCount = unreadCount; self.messages = messages; self.isComposeDraft = isComposeDraft
     }
+
+    /// The participants as comparable keys, so a chosen set of people can be matched to a chat.
+    public var participantKeys: Set<String> { Set(participants.map(Recipient.key(for:))) }
 
     public var initials: String {
         let parts = name.split(separator: " ")
@@ -97,7 +102,52 @@ public enum WorkspaceLayout: String, Codable, CaseIterable, Sendable {
     public var title: String { rawValue.capitalized }
 }
 
-/// Only layout, seen IDs, and drafts are persisted; message history stays in memory.
+/// Someone a new message is addressed to: a handle (phone number or email) and the name shown for it.
+public struct Recipient: Identifiable, Equatable, Hashable, Sendable {
+    public let address: String
+    public let name: String
+    public var id: String { Recipient.key(for: address) }
+    public init(address: String, name: String? = nil) {
+        self.address = address
+        self.name = name?.isEmpty == false ? name! : Recipient.display(address)
+    }
+
+    /// A comparable form of a handle: emails lowercased, phone numbers reduced to digits without a
+    /// leading country code 1, so "(917) 831-0374" and "+19178310374" are the same person.
+    public static func key(for address: String) -> String {
+        var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for prefix in ["mailto:", "tel:", "imessage:", "sms:"] where value.hasPrefix(prefix) { value.removeFirst(prefix.count) }
+        if value.contains("@") { return value }
+        var digits = value.filter(\.isNumber)
+        if digits.count == 11, digits.hasPrefix("1") { digits.removeFirst() }
+        return digits.isEmpty ? value : digits
+    }
+    /// The handle in the form Messages accepts for a new recipient.
+    public static func handle(for address: String) -> String {
+        let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.contains("@") { return value.lowercased() }
+        let digits = value.filter(\.isNumber)
+        guard !digits.isEmpty else { return value }
+        if digits.count == 10 { return "+1" + digits }
+        if digits.count == 11, digits.hasPrefix("1") { return "+" + digits }
+        return value.hasPrefix("+") ? "+" + digits : digits
+    }
+    /// A phone number formatted for display; other addresses unchanged.
+    public static func display(_ address: String) -> String {
+        let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.contains("@") else { return value }
+        var digits = value.filter(\.isNumber)
+        guard !digits.isEmpty, digits.count == value.filter { !"+()- .".contains($0) }.count else { return value }
+        var prefix = ""
+        if digits.count == 11, digits.hasPrefix("1") { digits.removeFirst(); prefix = "+1 " }
+        else if digits.count == 10 { prefix = value.hasPrefix("+") ? "+" : "" }
+        guard digits.count == 10 else { return value }
+        let area = digits.prefix(3), middle = digits.dropFirst(3).prefix(3), last = digits.suffix(4)
+        return "\(prefix)(\(area)) \(middle)-\(last)"
+    }
+}
+
+/// Only layout, seen IDs, drafts and hidden conversations are persisted; message history stays in memory.
 public struct Workspace: Codable, Equatable, Sendable {
     public static let maximumTiles = 4
     public var openIDs: [String] = []
@@ -105,11 +155,24 @@ public struct Workspace: Codable, Equatable, Sendable {
     public var layout: WorkspaceLayout = .grid
     public var drafts: [String: String] = [:]
     public var seenMessageIDs: [String: String] = [:]
+    /// Conversations removed from Mosaic, with the id of their newest message when they were
+    /// removed: a newer message brings a conversation back, as in Messages.
+    public var hidden: [String: String] = [:]
 
     public init(openIDs: [String] = []) {
         var seen = Set<String>()
         self.openIDs = Array(openIDs.filter { seen.insert($0).inserted }.prefix(Self.maximumTiles))
         self.focusedID = self.openIDs.first
+    }
+    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        openIDs = try container.decodeIfPresent([String].self, forKey: .openIDs) ?? []
+        focusedID = try container.decodeIfPresent(String.self, forKey: .focusedID)
+        layout = try container.decodeIfPresent(WorkspaceLayout.self, forKey: .layout) ?? .grid
+        drafts = try container.decodeIfPresent([String: String].self, forKey: .drafts) ?? [:]
+        seenMessageIDs = try container.decodeIfPresent([String: String].self, forKey: .seenMessageIDs) ?? [:]
+        hidden = try container.decodeIfPresent([String: String].self, forKey: .hidden) ?? [:]
     }
     @discardableResult public mutating func open(_ id: String) -> Bool {
         if openIDs.contains(id) { focusedID = id; return true }

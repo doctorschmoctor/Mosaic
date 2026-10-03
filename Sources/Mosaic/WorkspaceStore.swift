@@ -18,6 +18,12 @@ import MosaicCore
     var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
     var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist() } } }
     var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
+    /// Conversations removed from Mosaic (they stay in Messages), with their newest message id then.
+    var hidden: [String: String] = [:] { didSet { if hidden != oldValue { persist() } } }
+    /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
+    var composeDrafts: [String: ComposeDraft] = [:]
+    /// Every contact with its handles, for addressing new messages.
+    var contactEntries: [ContactNames.Entry] = []
     var search = ""
     var isLive = false
     var connectionError: String?
@@ -118,7 +124,7 @@ import MosaicCore
         get {
             var state = Workspace()
             state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
-            state.drafts = drafts; state.seenMessageIDs = seenMessageIDs
+            state.drafts = drafts; state.seenMessageIDs = seenMessageIDs; state.hidden = hidden
             return state
         }
         set {
@@ -127,6 +133,7 @@ import MosaicCore
             if layout != newValue.layout { layout = newValue.layout }
             if drafts != newValue.drafts { drafts = newValue.drafts }
             if seenMessageIDs != newValue.seenMessageIDs { seenMessageIDs = newValue.seenMessageIDs }
+            if hidden != newValue.hidden { hidden = newValue.hidden }
         }
     }
     /// Applies a `Workspace` mutation, writing back only the fields it changed.
@@ -136,14 +143,24 @@ import MosaicCore
         workspace = state
     }
 
+    /// The sidebar's conversations: not hidden, and matching the search when there is one.
     var filteredConversations: [Conversation] {
-        guard !search.isEmpty else { return conversations }
-        return conversations.filter {
+        let visible = hidden.isEmpty ? conversations : conversations.filter { hidden[$0.id] == nil }
+        guard !search.isEmpty else { return visible }
+        return visible.filter {
             $0.name.localizedCaseInsensitiveContains(search) || $0.preview.localizedCaseInsensitiveContains(search) ||
             $0.participants.contains { $0.localizedCaseInsensitiveContains(search) }
         }
     }
-    var tiles: [Conversation] { openIDs.compactMap { id in conversations.first { $0.id == id } } }
+    var tiles: [Conversation] { openIDs.compactMap(tile(for:)) }
+    /// A tile's content: a conversation, or the placeholder for a new message being addressed.
+    func tile(for id: String) -> Conversation? {
+        if let draft = composeDrafts[id] {
+            return Conversation(id: id, name: "New Message", participants: draft.recipients.map(\.address),
+                                preview: "", lastActivity: draft.created, messages: draft.sent, isComposeDraft: true)
+        }
+        return conversations.first { $0.id == id }
+    }
     var focused: Conversation? { tiles.first { $0.id == focusedID } ?? tiles.first }
     var canSend: Bool { !isLive || (connectedBefore && connectionError == nil) }
     func name(for address: String) -> String { contactNames.name(for: address) ?? address }
@@ -169,8 +186,29 @@ import MosaicCore
         instantly {
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
+            if composeDrafts[id] != nil { composeDrafts[id] = nil; drafts[id] = nil }
         }
         if focusTarget == id { focusTarget = nil }
+    }
+    /// Removes a conversation from Mosaic: its tile closes and it leaves the sidebar. It stays in
+    /// Messages, and a message newer than the moment it was removed brings it back.
+    func hide(_ id: String) {
+        guard let conversation = conversations.first(where: { $0.id == id }) else { return }
+        instantly {
+            close(id)
+            hidden[id] = String(max(conversation.lastActivity, Date()).timeIntervalSinceReferenceDate)
+        }
+    }
+    /// A hidden conversation with activity newer than its removal is shown again.
+    private func unhideChanged(in loaded: [Conversation]) {
+        guard !hidden.isEmpty else { return }
+        var remaining = hidden
+        for conversation in loaded {
+            guard let marker = hidden[conversation.id].flatMap(Double.init),
+                  conversation.lastActivity.timeIntervalSinceReferenceDate > marker + 1 else { continue }
+            remaining[conversation.id] = nil
+        }
+        if remaining != hidden { hidden = remaining }
     }
     func focus(_ id: String) {
         guard openIDs.contains(id) else { return }
@@ -230,7 +268,7 @@ import MosaicCore
         guard live != isLive, sendingIDs.isEmpty else { return }
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
-        focusTarget = nil
+        focusTarget = nil; composeDrafts = [:]
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
         if live {
@@ -292,9 +330,11 @@ import MosaicCore
             }
             // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
+            unhideChanged(in: loaded)
+            adoptConversations(for: loaded)
             updateContactStatus()
             var reconciledWorkspace = workspace
-            reconciledWorkspace.reconcile(availableIDs: Set(loaded.map(\.id)))
+            reconciledWorkspace.reconcile(availableIDs: Set(loaded.map(\.id)).union(composeDrafts.keys))
             if reconciledWorkspace != workspace { instantly { workspace = reconciledWorkspace } }
             if openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
                 mutate { $0.open(first.id) }
@@ -331,6 +371,7 @@ import MosaicCore
     }
 
     func send(_ id: String) async {
+        if composeDrafts[id] != nil { await sendCompose(id); return }
         let originalDraft = drafts[id] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sendingIDs.contains(id), canSend,
@@ -359,6 +400,163 @@ import MosaicCore
             // Demo sending stays local. No invented replies or real recipients.
             conversations[index].unreadCount = 0
         }
+    }
+
+    // MARK: New messages
+
+    /// Opens a tile for a new message. Recipients are chosen in the tile; the conversation is
+    /// found or created when the first message is sent.
+    @discardableResult func beginNewChat() -> String? {
+        guard openIDs.count < Workspace.maximumTiles else {
+            banner = "Close a tile to start a new message."
+            return nil
+        }
+        let id = "new-\(UUID().uuidString)"
+        instantly {
+            composeDrafts[id] = ComposeDraft()
+            mutate { $0.open(id) }
+        }
+        return id
+    }
+    func addRecipient(_ recipient: Recipient, to draftID: String) {
+        guard var draft = composeDrafts[draftID], !draft.recipients.contains(where: { $0.id == recipient.id }) else { return }
+        draft.recipients.append(recipient)
+        draft.boundConversationID = nil
+        instantly { composeDrafts[draftID] = draft }
+    }
+    func removeRecipient(_ recipient: Recipient, from draftID: String) {
+        guard var draft = composeDrafts[draftID] else { return }
+        draft.recipients.removeAll { $0.id == recipient.id }
+        draft.boundConversationID = nil
+        instantly { composeDrafts[draftID] = draft }
+    }
+    /// Addresses the new message to an existing conversation (all of its people).
+    func addressDraft(_ draftID: String, to conversation: Conversation) {
+        guard var draft = composeDrafts[draftID] else { return }
+        draft.recipients = conversation.participants.map { Recipient(address: $0, name: contactNames.name(for: $0)) }
+        draft.boundConversationID = conversation.id
+        instantly { composeDrafts[draftID] = draft }
+    }
+    /// People and conversations matching what was typed in the To field: contacts (one row per
+    /// handle) and existing conversations, including groups.
+    func recipientSuggestions(for query: String, excluding draftID: String) -> [RecipientSuggestion] {
+        let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen = Set(composeDrafts[draftID]?.recipients.map(\.id) ?? [])
+        var results: [RecipientSuggestion] = []
+        var seen = Set<String>()
+        func add(_ suggestion: RecipientSuggestion) { if seen.insert(suggestion.id).inserted { results.append(suggestion) } }
+        if text.isEmpty {
+            for conversation in filteredConversations.prefix(8) where !conversation.isComposeDraft { add(.conversation(conversation)) }
+            return results
+        }
+        let digits = text.filter(\.isNumber)
+        for entry in contactEntries where entry.name.localizedCaseInsensitiveContains(text) || entry.addresses.contains(where: { $0.localizedCaseInsensitiveContains(text) || (!digits.isEmpty && Recipient.key(for: $0).contains(digits)) }) {
+            for address in entry.addresses where !chosen.contains(Recipient.key(for: address)) {
+                add(.contact(Recipient(address: address, name: entry.name)))
+            }
+            if results.count >= 12 { break }
+        }
+        for conversation in filteredConversations where !conversation.isComposeDraft &&
+            (conversation.name.localizedCaseInsensitiveContains(text) || conversation.participants.contains { $0.localizedCaseInsensitiveContains(text) || (!digits.isEmpty && Recipient.key(for: $0).contains(digits)) }) {
+            add(.conversation(conversation))
+            if results.count >= 16 { break }
+        }
+        // Typing a full handle addresses it directly, even with no contact for it.
+        if text.contains("@") && text.contains(".") || digits.count >= 7 && digits.count == text.filter { !"+()- .".contains($0) }.count {
+            add(.contact(Recipient(address: text, name: contactNames.name(for: text))))
+        }
+        return Array(results.prefix(16))
+    }
+    /// The existing conversation with exactly these people, if there is one.
+    func conversation(with recipients: [Recipient]) -> Conversation? {
+        guard !recipients.isEmpty else { return nil }
+        let keys = Set(recipients.map(\.id))
+        return conversations.first { !$0.isComposeDraft && $0.participantKeys == keys }
+    }
+
+    /// Sends a new message: to the conversation that has these people, or, for one new person, by
+    /// asking Messages to start the conversation. Messages cannot start a new group from another
+    /// app, so a new group is handed to Messages itself.
+    private func sendCompose(_ draftID: String) async {
+        guard let draft = composeDrafts[draftID] else { return }
+        let originalDraft = drafts[draftID] ?? ""
+        let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !sendingIDs.contains(draftID) else { return }
+        guard !draft.recipients.isEmpty else { sendErrors[draftID] = "Add at least one recipient."; return }
+        guard canSend else { sendErrors[draftID] = "Connect Messages before sending."; return }
+        let target = draft.boundConversationID.flatMap { id in conversations.first { $0.id == id } } ?? conversation(with: draft.recipients)
+        sendingIDs.insert(draftID); sendErrors[draftID] = nil
+        defer { sendingIDs.remove(draftID) }
+        let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
+        if let target {
+            if isLive {
+                do { try MessagesBridge.send(text: text, conversationID: target.id) }
+                catch { sendErrors[draftID] = error.localizedDescription; return }
+                pending[target.id, default: []].append(message)
+            }
+            instantly {
+                if drafts[draftID] == originalDraft { drafts[draftID] = nil }
+                if let index = conversations.firstIndex(where: { $0.id == target.id }) {
+                    conversations[index].messages.append(message)
+                    conversations[index].preview = text
+                    conversations[index].lastActivity = Date()
+                }
+                replaceTile(draftID, with: target.id)
+            }
+            markSeen(target.id)
+            if isLive { lastLoad = nil; await refresh() }
+            return
+        }
+        guard draft.recipients.count == 1, let recipient = draft.recipients.first else {
+            sendErrors[draftID] = "Messages can't start a new group from another app. Start it in Messages — it will appear here once it exists."
+            openMessages(addresses: draft.recipients.map(\.address))
+            return
+        }
+        if isLive {
+            do { try MessagesBridge.send(text: text, toNewRecipient: Recipient.handle(for: recipient.address)) }
+            catch { sendErrors[draftID] = error.localizedDescription; return }
+        }
+        // The conversation appears in the database once Messages has created it; the tile adopts
+        // it then (adoptConversations). Until then the sent text is shown in the draft tile.
+        var waiting = draft
+        waiting.sent.append(message)
+        waiting.awaitingConversationSince = Date()
+        instantly {
+            if drafts[draftID] == originalDraft { drafts[draftID] = "" }
+            composeDrafts[draftID] = waiting
+        }
+        pending[draftID, default: []].append(message)
+        if isLive { lastLoad = nil; await refresh() }
+    }
+    /// Swaps a new-message tile for the conversation it turned out to be.
+    private func replaceTile(_ draftID: String, with conversationID: String) {
+        var state = workspace
+        if let index = state.openIDs.firstIndex(of: draftID) {
+            if state.openIDs.contains(conversationID) { state.openIDs.remove(at: index) } else { state.openIDs[index] = conversationID }
+        }
+        if state.focusedID == draftID { state.focusedID = conversationID }
+        if let text = state.drafts[draftID], !text.isEmpty, (state.drafts[conversationID] ?? "").isEmpty { state.drafts[conversationID] = text }
+        state.drafts[draftID] = nil
+        workspace = state
+        if let pendingMessages = pending[draftID] { pending[conversationID, default: []].append(contentsOf: pendingMessages); pending[draftID] = nil }
+        composeDrafts[draftID] = nil
+        if focusTarget == draftID { focusTarget = conversationID }
+    }
+    /// New-message tiles whose conversation now exists in the database adopt it.
+    private func adoptConversations(for loaded: [Conversation]) {
+        for (draftID, draft) in composeDrafts where draft.awaitingConversationSince != nil {
+            let keys = Set(draft.recipients.map(\.id))
+            guard let match = loaded.first(where: { $0.participantKeys == keys }) else { continue }
+            instantly { replaceTile(draftID, with: match.id) }
+            markSeen(match.id)
+            refreshRequestedWhileBusy = true
+        }
+    }
+    /// Opens Messages addressed to these people, for what automation cannot do (new groups).
+    func openMessages(addresses: [String]) {
+        let handles = addresses.map(Recipient.handle(for:)).joined(separator: ",")
+        if let url = URL(string: "imessage:" + handles.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!), NSWorkspace.shared.open(url) { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Messages.app"))
     }
 
     // MARK: Contacts
@@ -407,6 +605,7 @@ import MosaicCore
                 }
                 return entries
             }.value
+            contactEntries = entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             applyContactNames(ContactNames(entries: entries))
         } catch { contactStatus = "Contact sync failed: \(error.localizedDescription)" }
     }
@@ -471,6 +670,30 @@ import MosaicCore
         else { state = Workspace(openIDs: defaultIDs) }
         if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id))) }
         workspace = state
+    }
+}
+
+/// A message being addressed in a new-message tile.
+struct ComposeDraft: Equatable {
+    var recipients: [Recipient] = []
+    /// Set when the reader picked an existing conversation in the To field.
+    var boundConversationID: String?
+    /// Messages sent to a new person before Messages has created the conversation.
+    var sent: [Message] = []
+    var awaitingConversationSince: Date?
+    let created = Date()
+    var hasRecipients: Bool { !recipients.isEmpty }
+}
+
+/// A row in the To field's suggestions: a person (one handle) or an existing conversation.
+enum RecipientSuggestion: Identifiable, Equatable {
+    case contact(Recipient)
+    case conversation(Conversation)
+    var id: String {
+        switch self {
+        case .contact(let recipient): return "contact:" + recipient.id
+        case .conversation(let conversation): return "chat:" + conversation.id
+        }
     }
 }
 

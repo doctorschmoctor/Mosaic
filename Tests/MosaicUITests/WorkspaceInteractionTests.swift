@@ -62,6 +62,44 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.drafts[all[0]], "draft survives churn")
     }
 
+    @MainActor func testDeletingAConversationClosesItsTileAndHidesItUntilNewActivity() {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let id = store.workspace.openIDs[1]
+        store.hide(id)
+        XCTAssertFalse(store.workspace.openIDs.contains(id), "the tile closes")
+        XCTAssertFalse(store.filteredConversations.contains { $0.id == id }, "the sidebar no longer lists it")
+        XCTAssertTrue(store.conversations.contains { $0.id == id }, "but it is still a conversation on this Mac")
+        XCTAssertNotNil(store.hidden[id])
+        XCTAssertEqual(store.workspace.hidden, store.hidden)
+    }
+
+    @MainActor func testNewMessageTileAddressesPeopleAndBecomesTheConversationWhenSent() async {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        store.close(store.workspace.openIDs[0])
+        let draftID = store.beginNewChat()!
+        XCTAssertTrue(store.workspace.openIDs.contains(draftID))
+        XCTAssertEqual(store.workspace.focusedID, draftID)
+        XCTAssertEqual(store.tiles.first { $0.id == draftID }?.isComposeDraft, true)
+        // Suggestions: typing part of a name offers the conversations with that name.
+        let existing = store.conversations.first { $0.name == "Sam Rivera" }!
+        let suggestions = store.recipientSuggestions(for: "sam", excluding: draftID)
+        XCTAssertTrue(suggestions.contains(.conversation(existing)))
+        // Addressing the draft to an existing person then sending goes to that conversation.
+        store.addRecipient(Recipient(address: existing.participants[0], name: existing.name), to: draftID)
+        XCTAssertEqual(store.conversation(with: store.composeDrafts[draftID]!.recipients)?.id, existing.id)
+        store.workspace.drafts[draftID] = "Hey Sam"
+        await store.send(draftID)
+        XCTAssertFalse(store.workspace.openIDs.contains(draftID), "the new-message tile became the conversation")
+        XCTAssertTrue(store.workspace.openIDs.contains(existing.id))
+        XCTAssertEqual(store.workspace.focusedID, existing.id)
+        XCTAssertEqual(store.conversations.first { $0.id == existing.id }?.messages.last?.text, "Hey Sam")
+        XCTAssertNil(store.composeDrafts[draftID])
+        // A full workspace cannot start a new message.
+        for id in store.conversations.map(\.id) where !store.workspace.openIDs.contains(id) && store.workspace.openIDs.count < Workspace.maximumTiles { store.open(id) }
+        XCTAssertNil(store.beginNewChat())
+        XCTAssertNotNil(store.banner)
+    }
+
     @MainActor func testKeyboardTraversalSkipsNothingAndWrapsAround() {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         let ids = store.workspace.openIDs

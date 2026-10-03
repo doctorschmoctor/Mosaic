@@ -36,8 +36,15 @@ struct WorkspaceView: View {
         @Bindable var store = store
         HStack(spacing: 0) {
             sidebar.frame(width: 256)
-                // The strip above the sidebar (where the window controls are) moves the window.
-                .overlay(alignment: .top) { TitleBarDragArea().frame(height: Self.titleBarHeight) }
+                // The strip above the sidebar (where the window controls are) moves the window; the
+                // compose button sits at its trailing end, as in Messages.
+                .overlay(alignment: .top) {
+                    ZStack(alignment: .trailing) {
+                        TitleBarDragArea()
+                        StripButton(symbol: "square.and.pencil", label: "New Message") { store.beginNewChat() }
+                            .frame(width: 30, height: 28).padding(.trailing, 12)
+                    }.frame(height: Self.titleBarHeight)
+                }
             Divider()
             VStack(spacing: 0) {
                 if let banner = store.banner {
@@ -88,17 +95,28 @@ struct WorkspaceView: View {
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 10).padding(.top, Self.titleBarHeight + 4)
-            ScrollView {
-                LazyVStack(spacing: 3) {
-                    ForEach(store.filteredConversations) { conversation in
-                        ConversationRow(conversation: conversation)
-                    }
-                    if store.filteredConversations.isEmpty {
-                        Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
-                            .font(.callout).foregroundStyle(.secondary).padding(20)
-                    }
-                }.padding(.horizontal, 10)
-            }.padding(.top, 12)
+            // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
+            List {
+                ForEach(store.filteredConversations) { conversation in
+                    ConversationRow(conversation: conversation)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 10))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            Button(role: .destructive) { store.hide(conversation.id) } label: { Label("Delete", systemImage: "trash") }
+                                .tint(.red)
+                        }
+                }
+                if store.filteredConversations.isEmpty {
+                    Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
+                        .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
+                        .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 1)
+            .padding(.top, 12)
         }.background(.regularMaterial)
     }
     private var emptyWorkspace: some View {
@@ -264,6 +282,8 @@ struct ConversationRow: View {
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }
                 if store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
+                Divider()
+                Button("Delete", role: .destructive) { store.hide(conversation.id) }
             }
             .onDrag { NSItemProvider(object: conversation.id as NSString) }
     }

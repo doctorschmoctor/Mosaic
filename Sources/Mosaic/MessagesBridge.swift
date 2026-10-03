@@ -10,6 +10,18 @@ enum MessagesBridge {
         end tell
         return "submitted"
     end sendMessage
+    on sendToParticipant(messageText, handle, serviceKind)
+        tell application id "com.apple.MobileSMS"
+            if serviceKind is "SMS" then
+                set targetService to 1st account whose service type = SMS
+            else
+                set targetService to 1st account whose service type = iMessage
+            end if
+            set targetParticipant to participant handle of targetService
+            send messageText to targetParticipant
+        end tell
+        return "submitted"
+    end sendToParticipant
     """
 
     /// Arguments are Apple event descriptors, never interpolated into executable script.
@@ -24,14 +36,23 @@ enum MessagesBridge {
     }
 
     static func send(text: String, conversationID: String) throws {
+        try call("sendMessage", [text, conversationID])
+    }
+    /// Starts (or continues) a one-to-one conversation with a handle that has no chat yet. Messages
+    /// creates the chat; it shows up in the database afterwards. Group chats cannot be created this
+    /// way: Messages offers no automation for it.
+    static func send(text: String, toNewRecipient handle: String, service: String = "iMessage") throws {
+        try call("sendToParticipant", [text, handle, service.caseInsensitiveCompare("SMS") == .orderedSame ? "SMS" : "iMessage"])
+    }
+
+    private static func call(_ handler: String, _ arguments: [String]) throws {
         let script = try prepareScript()
         let event = NSAppleEventDescriptor(eventClass: AEEventClass(kASAppleScriptSuite),
             eventID: AEEventID(kASSubroutineEvent), targetDescriptor: nil,
             returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
-        event.setParam(NSAppleEventDescriptor(string: "sendMessage"), forKeyword: AEKeyword(keyASSubroutineName))
+        event.setParam(NSAppleEventDescriptor(string: handler), forKeyword: AEKeyword(keyASSubroutineName))
         let parameters = NSAppleEventDescriptor.list()
-        parameters.insert(NSAppleEventDescriptor(string: text), at: 1)
-        parameters.insert(NSAppleEventDescriptor(string: conversationID), at: 2)
+        for (index, argument) in arguments.enumerated() { parameters.insert(NSAppleEventDescriptor(string: argument), at: index + 1) }
         event.setParam(parameters, forKeyword: AEKeyword(keyDirectObject))
         var error: NSDictionary?
         _ = script.executeAppleEvent(event, error: &error)

@@ -18,14 +18,25 @@ struct ConversationTile: View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.6)
-            MessageList(conversation: conversation, isLive: store.isLive,
-                        canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
-                        senderNames: senderNames, onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
-                .equatable()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // A click anywhere in the thread puts the keyboard in this tile's composer; links,
-                // pictures and text selection keep working because this runs alongside their gestures.
-                .simultaneousGesture(TapGesture().onEnded { store.requestComposerFocus(conversation.id) })
+            if conversation.isComposeDraft {
+                RecipientField(draftID: conversation.id)
+                if conversation.messages.isEmpty {
+                    Spacer(minLength: 0)
+                } else {
+                    MessageList(conversation: conversation, isLive: store.isLive, canLoadMore: false, senderNames: [:], onLoadMore: {})
+                        .equatable()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            } else {
+                MessageList(conversation: conversation, isLive: store.isLive,
+                            canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
+                            senderNames: senderNames, onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
+                    .equatable()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    // A click anywhere in the thread puts the keyboard in this tile's composer; links
+                    // and pictures keep working because this runs alongside their gestures.
+                    .simultaneousGesture(TapGesture().onEnded { store.requestComposerFocus(conversation.id) })
+            }
             composer
         }
         .background(Palette.surface)
@@ -58,10 +69,18 @@ struct ConversationTile: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            Avatar(conversation: conversation, size: 30)
+            if conversation.isComposeDraft {
+                ZStack {
+                    Circle().fill(Palette.accent.opacity(0.15))
+                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.accent)
+                }.frame(width: 30, height: 30).accessibilityHidden(true)
+            } else {
+                Avatar(conversation: conversation, size: 30)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Text(conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
+                Text(conversation.isComposeDraft ? (conversation.participants.isEmpty ? "Choose who to message" : "\(conversation.participants.count) \(conversation.participants.count == 1 ? "person" : "people")")
+                     : conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 2)
@@ -124,14 +143,10 @@ struct ConversationTile: View {
             store.focus(conversation.id)
             DraftTextView.editor(for: conversation.id)?.showEmojiPicker()
         } label: {
-            if store.sendingIDs.contains(conversation.id) { ProgressView().controlSize(.small).frame(width: 31, height: 31) }
-            else {
-                Image(systemName: "face.smiling").font(.system(size: 20, weight: .light)).foregroundStyle(.secondary)
-                    .frame(width: 31, height: 31).contentShape(Circle())
-            }
+            Image(systemName: "face.smiling").font(.system(size: 20, weight: .light)).foregroundStyle(.secondary)
+                .frame(width: 31, height: 31).contentShape(Circle())
         }
         .buttonStyle(TileControlStyle())
-        .disabled(store.sendingIDs.contains(conversation.id))
         .accessibilityLabel("Insert emoji into message to \(conversation.name)").help("Emoji & Symbols")
     }
 }
@@ -173,9 +188,12 @@ struct MessageList: View, Equatable {
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                         }
                         MessageBubble(message: row.message, group: conversation.isGroup,
-                                      senderName: row.message.sender.map { senderNames[$0] ?? $0 }, live: isLive, service: conversation.service,
-                                      showsStatus: row.showsStatus)
+                                      senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
+                                      live: isLive, service: conversation.service,
+                                      showsStatus: row.showsStatus, showsTime: row.showsTime)
                     }
+                    // Messages in a run from the same person sit close together; a new run gets the full gap.
+                    .padding(.top, row.continuesRun ? -7 : 0)
                 }
             }
             .padding(16)
@@ -193,26 +211,46 @@ struct MessageList: View, Equatable {
     }
 }
 
-/// One message with everything the list needs precomputed (day separators, which sent message shows
-/// its status), so the per-row work is done once per conversation change rather than per render.
-struct MessageRow: Identifiable {
+/// One message with everything the list needs precomputed (day separators, runs of messages from
+/// the same person, which rows show a time or a status), so the per-row work is done once per
+/// conversation change rather than per render.
+struct MessageRow: Identifiable, Equatable {
+    /// Messages from the same person closer together than this form one run with one time stamp.
+    static let runGap: TimeInterval = 15 * 60
     let message: Message
     let dayLabel: String?
+    /// Part of a run started by the row above (same person, soon after).
+    let continuesRun: Bool
+    /// The last message of its run shows the time; a failed message always does.
+    let showsTime: Bool
+    /// The sender's name appears once, at the start of a run (groups only).
+    let showsSender: Bool
     let showsStatus: Bool
     var id: String { message.presentationID }
 
     static func rows(for conversation: Conversation) -> [MessageRow] {
-        let latestOutgoing = conversation.messages.last(where: \.isFromMe)?.presentationID
+        let messages = conversation.messages
+        let latestOutgoing = messages.last(where: \.isFromMe)?.presentationID
         var rows: [MessageRow] = []
-        rows.reserveCapacity(conversation.messages.count)
+        rows.reserveCapacity(messages.count)
         var previousDay: Int?
-        for message in conversation.messages {
+        for (index, message) in messages.enumerated() {
             let day = MessageText.dayOrdinal(message.date)
-            rows.append(MessageRow(message: message, dayLabel: day == previousDay ? nil : MessageText.day(message.date),
-                                   showsStatus: message.presentationID == latestOutgoing))
+            let newDay = day != previousDay
+            let previous = index > 0 ? messages[index - 1] : nil
+            let next = index + 1 < messages.count ? messages[index + 1] : nil
+            let continuesRun = !newDay && previous.map { sameRun($0, message) } ?? false
+            let endsRun = next.map { !sameRun(message, $0) || MessageText.dayOrdinal($0.date) != day } ?? true
+            rows.append(MessageRow(message: message, dayLabel: newDay ? MessageText.day(message.date) : nil,
+                                   continuesRun: continuesRun, showsTime: endsRun || message.error != 0,
+                                   showsSender: !continuesRun, showsStatus: message.presentationID == latestOutgoing))
             previousDay = day
         }
         return rows
+    }
+    /// Same side, same sender, and close in time.
+    static func sameRun(_ first: Message, _ second: Message) -> Bool {
+        first.isFromMe == second.isFromMe && first.sender == second.sender && second.date.timeIntervalSince(first.date) < runGap
     }
 }
 
@@ -265,6 +303,8 @@ struct MessageBubble: View {
     let service: String
     /// Delivery and read receipts appear under the most recent sent message only, as in Messages.
     var showsStatus = true
+    /// The time appears under the last message of a run, not under every message.
+    var showsTime = true
 
     var body: some View {
         let fromMe = message.isFromMe
@@ -297,15 +337,17 @@ struct MessageBubble: View {
                     }
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
-            HStack(spacing: 4) {
-                Text(MessageText.time(message.date))
-                if fromMe {
-                    // A sent message shows only its time until Messages reports delivery.
-                    if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
-                    else if showsStatus && message.isRead { Text("· Read") }
-                    else if showsStatus && message.isDelivered { Text("· Delivered") }
-                }
-            }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
+            if showsTime || (fromMe && showsStatus && (message.isRead || message.isDelivered)) {
+                HStack(spacing: 4) {
+                    Text(MessageText.time(message.date))
+                    if fromMe {
+                        // A sent message shows only its time until Messages reports delivery.
+                        if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
+                        else if showsStatus && message.isRead { Text("· Read") }
+                        else if showsStatus && message.isDelivered { Text("· Delivered") }
+                    }
+                }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
+            }
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
         .padding(fromMe ? .leading : .trailing, 36)

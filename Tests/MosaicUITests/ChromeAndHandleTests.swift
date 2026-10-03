@@ -144,6 +144,19 @@ final class ChromeAndHandleTests: XCTestCase {
         let rows = MessageRow.rows(for: Conversation(id: "c", name: "C", participants: ["x"], messages: messages))
         XCTAssertEqual(rows.map { $0.dayLabel != nil }, [true, false, true, false])
         XCTAssertEqual(rows.map(\.showsStatus), [false, false, true, false], "only the latest sent message shows Delivered/Read")
+        // Runs: a, then b (mine), then c (mine, two days later: new run), then d (theirs).
+        XCTAssertEqual(rows.map(\.continuesRun), [false, false, false, false])
+        XCTAssertEqual(rows.map(\.showsTime), [true, true, true, true])
+        let run = [Message(id: "1", text: "a", date: base, isFromMe: false),
+                   Message(id: "2", text: "b", date: base.addingTimeInterval(30), isFromMe: false),
+                   Message(id: "3", text: "c", date: base.addingTimeInterval(60), isFromMe: false),
+                   Message(id: "4", text: "d", date: base.addingTimeInterval(90), isFromMe: true),
+                   Message(id: "5", text: "e", date: base.addingTimeInterval(120), isFromMe: true),
+                   Message(id: "6", text: "f", date: base.addingTimeInterval(120 + MessageRow.runGap + 1), isFromMe: true)]
+        let runRows = MessageRow.rows(for: Conversation(id: "c", name: "C", participants: ["x"], messages: run))
+        XCTAssertEqual(runRows.map(\.continuesRun), [false, true, true, false, true, false], "a long pause starts a new run")
+        XCTAssertEqual(runRows.map(\.showsTime), [false, false, true, false, true, true], "one time per run, under its last message")
+        XCTAssertEqual(runRows.map(\.showsSender), [true, false, false, true, false, true])
         XCTAssertEqual(MessageText.time(base), MessageText.time(base.addingTimeInterval(20)), "cached per minute")
         XCTAssertEqual(MessageText.day(base), MessageText.day(base.addingTimeInterval(3600)))
         let attributed = MessageText.attributed("d https://example.com")
