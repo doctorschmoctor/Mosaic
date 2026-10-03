@@ -11,8 +11,6 @@ struct ConversationTile: View {
     var onDragEnded: (() -> Void)? = nil
     @State private var isDropTarget = false
     @State private var composerHeight = ComposerEditor.minimumHeight
-    /// Resets automatically even when the system cancels a drag, so a tile can never stay "lifted".
-    @GestureState private var headerDragging = false
     private var isFocused: Bool { store.workspace.focusedID == conversation.id }
     private var draft: Binding<String> { store.draft(conversation.id) }
 
@@ -53,7 +51,6 @@ struct ConversationTile: View {
             }
             return true
         }
-        .onChange(of: headerDragging) { _, dragging in if !dragging { onDragEnded?() } }
     }
 
     private var senderNames: [String: String] {
@@ -63,30 +60,22 @@ struct ConversationTile: View {
 
     private var header: some View {
         HStack(spacing: 9) {
-            HStack(spacing: 9) {
-                Avatar(conversation: conversation, size: 30)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                    Text(conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 2)
+            Avatar(conversation: conversation, size: 30)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                Text(conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
-            .contentShape(Rectangle())
-            .onTapGesture { store.requestComposerFocus(conversation.id) }
-            .help(onDragChanged == nil ? "" : "Drag to move this tile")
-            .hoverCursor(.openHand, enabled: onDragChanged != nil && store.tileDrag == nil)
-            .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(TileCanvas.space))
-                .updating($headerDragging) { _, state, _ in state = true }
-                .onChanged { value in onDragChanged?(value.translation) }
-                .onEnded { _ in onDragEnded?() })
-            Button { store.close(conversation.id) } label: {
-                Image(systemName: "xmark").frame(width: 22, height: 22).contentShape(Rectangle())
-            }
-            .buttonStyle(TileControlStyle())
-            .help("Close tile — your draft is kept").accessibilityLabel("Close \(conversation.name) tile")
+            Spacer(minLength: 2)
+            Color.clear.frame(width: 22, height: 22) // the close button, drawn by the handle below
         }
-        .font(.system(size: 11)).buttonStyle(.plain).padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 12)
+        .font(.system(size: 11)).padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 12)
+        .background(TileHeaderHandle(draggable: onDragChanged != nil, closeLabel: "Close \(conversation.name) tile",
+            onDragChanged: { onDragChanged?($0) }, onDragEnded: { onDragEnded?() },
+            onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) }))
+        .help(onDragChanged == nil ? "" : "Drag to move this tile")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(conversation.name)
     }
 
     private var composer: some View {

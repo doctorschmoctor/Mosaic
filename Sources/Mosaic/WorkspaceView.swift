@@ -24,6 +24,8 @@ enum Palette {
 struct WorkspaceView: View {
     /// Height of the unified title bar the window controls sit in.
     static let titleBarHeight: CGFloat = 52
+    /// Space between the window edge and the tile area, the same on every side.
+    static let tileAreaMargin: CGFloat = 8
     @EnvironmentObject private var store: WorkspaceStore
     @FocusState private var searchFocused: Bool
     @StateObject private var keyboard = KeyboardRouter()
@@ -47,9 +49,8 @@ struct WorkspaceView: View {
                     }.padding(14).padding(.top, Self.titleBarHeight - 14).background(Color.orange.opacity(0.08))
                 }
                 ZStack {
-                    // Tile headers start below the title bar, where a press would drag the window instead.
-                    TileWorkspace().padding(.horizontal, 8).padding(.bottom, 8)
-                        .padding(.top, store.banner == nil && store.connectionError == nil ? Self.titleBarHeight - TileLayout.inset - 12 : 10)
+                    // Tiles reach up into the title bar strip; their headers handle their own mouse events there.
+                    TileWorkspace().padding(Self.tileAreaMargin)
                     if store.tiles.isEmpty { emptyWorkspace.transition(.opacity) }
                 }
             }.background(Palette.canvas)
@@ -200,14 +201,13 @@ struct TileWorkspace: View {
         GeometryReader { geometry in
             let layout = store.workspace.layout
             let order = layout == .focus ? store.focused.map { [$0.id] } ?? [] : store.displayOrder
-            // How far the title bar strip reaches into the tile area (tiles start 12pt above its bottom edge).
-            let pickerInset = TileLayout.inset + 12
+            // The focus chips are SwiftUI buttons, so they stay below the title bar strip.
+            let pickerInset = max(0, WorkspaceView.titleBarHeight - WorkspaceView.tileAreaMargin)
             let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? 44 + pickerInset : 0))
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
             VStack(spacing: 8) {
                 if layout == .focus {
-                    // Below the title bar strip: a click inside the strip moves the window instead of reaching a chip.
                     focusPicker.frame(height: 36).padding(.top, pickerInset).transition(.move(edge: .top).combined(with: .opacity))
                 }
                 if layout == .columns {

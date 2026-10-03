@@ -89,7 +89,7 @@ Composer tests also verify per-editor Return routing, Shift–Return line breaks
 
 Additional tests cover contact matching and immediate updates during refresh, tile layouts and resize minimums, drag previews and draft preservation, and stable message identities during confirmation.
 
-`Sources/Mosaic` contains the UI, workspace state, Contacts integration, attachment and link-preview views, and exact-chat AppleScript sender. `Sources/MosaicCore` contains models, link detection, and the read-only database reader. `Sources/CSQLite` exposes the system SQLite library. The Xcode target compiles the same sources directly; SwiftPM keeps the core separate for tests.
+`Sources/Mosaic` contains the UI, workspace state, Contacts integration, attachment and link-preview views, and exact-chat AppleScript sender. Tile headers handle their own mouse events in AppKit (`TileHeaderHandle`) so dragging, clicking, and closing work even where a tile reaches into the window's title bar strip. `Sources/MosaicCore` contains models, link detection, and the read-only database reader. `Sources/CSQLite` exposes the system SQLite library. The Xcode target compiles the same sources directly; SwiftPM keeps the core separate for tests.
 
 After adding source files, regenerate the Xcode project with `python3 scripts/generate-xcode-project.py`. To regenerate the original icon, run `swift scripts/make-icon.swift` followed by `iconutil -c icns .build/Mosaic.iconset -o Resources/Mosaic.icns`.
 
