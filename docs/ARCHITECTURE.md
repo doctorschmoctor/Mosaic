@@ -4,7 +4,7 @@ Mosaic is a SwiftUI app with AppKit where SwiftUI gets in the way of precise inp
 
 ## State
 
-`WorkspaceStore` is `@Observable`, with the workspace split into separate fields so a view re-renders only when something it read changes — typing a draft re-renders one composer, not every row and tile. Open tiles, layout and drafts persist in UserDefaults; message history, thumbnails, previews and contact names stay in memory. Sends are held as pending bubbles until the database reports them, then reconciled by text and time so a bubble keeps its identity. Nothing is retried automatically.
+`WorkspaceStore` is `@Observable`, with the workspace split into separate fields so a view re-renders only when something it read changes — typing a draft re-renders one composer, not every row and tile. Each tile's last use (opened, focused, typed in, sent from) is counted, and a fifth conversation replaces the tile used longest ago in that tile's place, so the layout keeps its shape; an unsent New Message is never the one replaced while a conversation can be. Open tiles, layout and drafts persist in UserDefaults; message history, thumbnails, previews and contact names stay in memory. Sends are held as pending bubbles until the database reports them, then reconciled by text and time so a bubble keeps its identity. Nothing is retried automatically.
 
 ## Window chrome
 

@@ -73,7 +73,7 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.hidden, store.hidden)
     }
 
-    @MainActor func testNewMessageTileAddressesPeopleAndBecomesTheConversationWhenSent() async {
+    @MainActor func testNewMessageTileAddressesPeopleAndBecomesTheConversationWhenSent() async throws {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         store.close(store.workspace.openIDs[0])
         let draftID = store.beginNewChat()!
@@ -94,10 +94,54 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.focusedID, existing.id)
         XCTAssertEqual(store.conversations.first { $0.id == existing.id }?.messages.last?.text, "Hey Sam")
         XCTAssertNil(store.composeDrafts[draftID])
-        // A full workspace cannot start a new message.
+        // A full workspace still starts a new message: the tile used longest ago makes room.
         for id in store.conversations.map(\.id) where !store.workspace.openIDs.contains(id) && store.workspace.openIDs.count < Workspace.maximumTiles { store.open(id) }
-        XCTAssertNil(store.beginNewChat())
-        XCTAssertNotNil(store.alert, "a full workspace explains itself in an alert")
+        XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
+        let victim = try XCTUnwrap(store.tileToReplace())
+        let position = try XCTUnwrap(store.workspace.openIDs.firstIndex(of: victim))
+        let newDraft = try XCTUnwrap(store.beginNewChat())
+        XCTAssertNil(store.alert)
+        XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
+        XCTAssertEqual(store.workspace.openIDs[position], newDraft, "the new message takes the replaced tile's place")
+        XCTAssertFalse(store.workspace.openIDs.contains(victim))
+    }
+
+    /// Opening a fifth conversation replaces the tile used longest ago — opened, focused, typed in
+    /// or sent from — in that tile's place, so the layout keeps its shape; an unsent New Message
+    /// is never the one replaced while anything else is open.
+    @MainActor func testOpeningAFifthConversationReplacesTheLeastRecentlyUsedTile() async throws {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let all = store.conversations.map(\.id)
+        let open = store.workspace.openIDs
+        XCTAssertEqual(open.count, Workspace.maximumTiles)
+        // Fresh from launch, nothing has been used: the first tile on screen goes.
+        store.open(all[4])
+        XCTAssertEqual(store.workspace.openIDs, [all[4], open[1], open[2], open[3]])
+        XCTAssertEqual(store.workspace.focusedID, all[4])
+        XCTAssertNil(store.alert)
+        // Using tiles changes the order: touch everything but the third, and the third goes next.
+        store.focus(open[1])
+        store.draft(open[3]).wrappedValue = "typing here"
+        store.focus(all[4])
+        store.open(all[5])
+        XCTAssertEqual(store.workspace.openIDs, [all[4], open[1], all[5], open[3]])
+        XCTAssertEqual(store.workspace.drafts[open[3]], "typing here", "drafts of other tiles are untouched")
+        // Sending counts as use, so the tile sent from stays; a replaced tile keeps its draft for later.
+        store.draft(open[1]).wrappedValue = "kept for later"
+        store.workspace.drafts[all[4]] = "sent now"
+        await store.send(all[4])
+        store.focus(all[5]); store.focus(open[3])
+        store.open(all[6])
+        XCTAssertEqual(store.workspace.openIDs, [all[4], all[6], all[5], open[3]])
+        XCTAssertEqual(store.workspace.drafts[open[1]], "kept for later")
+        store.open(open[1])
+        XCTAssertEqual(store.workspace.drafts[open[1]], "kept for later", "reopening brings the draft back")
+        // An unsent New Message is not replaced while a conversation can be.
+        let draftID = try XCTUnwrap(store.beginNewChat())
+        XCTAssertTrue(store.workspace.openIDs.contains(draftID))
+        for _ in 0..<3 { if let next = all.first(where: { !store.workspace.openIDs.contains($0) }) { store.open(next) } }
+        XCTAssertTrue(store.workspace.openIDs.contains(draftID), "the New Message tile survives three replacements")
+        XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
     }
 
     /// A fresh install asks nothing on launch: no settings sheet, no alert, no demo workspace; it
@@ -164,25 +208,25 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.sidebarSelection, rows.last, "↑ with no row starts at the bottom")
         store.moveSidebarSelection(by: 1)
         XCTAssertEqual(store.sidebarSelection, rows.last, "the last row stops ↓")
-        // Return on a closed row with every tile taken: an alert, nothing opens.
+        // Return on a closed row with every tile taken: it takes the place of the tile used longest ago.
         let closed = rows.first { !open.contains($0) }!
+        store.focus(open[0]); store.focus(open[1]); store.focus(open[3])
         store.sidebarSelection = closed
         store.activateSidebarSelection()
-        XCTAssertEqual(store.workspace.openIDs, open)
-        XCTAssertNotNil(store.alert)
-        store.alert = nil
+        XCTAssertEqual(store.workspace.openIDs, [open[0], open[1], closed, open[3]])
+        XCTAssertEqual(store.workspace.focusedID, closed)
+        XCTAssertNil(store.alert)
         // Delete on an open row closes its tile; on a closed row it does nothing.
         store.sidebarSelection = open[1]
         store.untileSidebarSelection()
-        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3]])
-        store.sidebarSelection = closed
+        XCTAssertEqual(store.workspace.openIDs, [open[0], closed, open[3]])
+        store.sidebarSelection = open[2]
         store.untileSidebarSelection()
-        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3]])
-        // Return now opens the closed row, and Return on an open row focuses it.
+        XCTAssertEqual(store.workspace.openIDs, [open[0], closed, open[3]])
+        // Return opens a closed row into the free space, and Return on an open row focuses it.
         store.activateSidebarSelection()
-        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3], closed])
-        XCTAssertEqual(store.workspace.focusedID, closed)
-        XCTAssertNil(store.alert)
+        XCTAssertEqual(store.workspace.openIDs, [open[0], closed, open[3], open[2]])
+        XCTAssertEqual(store.workspace.focusedID, open[2])
         store.sidebarSelection = open[0]
         store.activateSidebarSelection()
         XCTAssertEqual(store.workspace.focusedID, open[0])

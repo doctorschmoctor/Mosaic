@@ -184,6 +184,12 @@ public struct Workspace: Codable, Equatable, Sendable {
         openIDs.removeAll { $0 == id }
         if focusedID == id { focusedID = openIDs.first }
     }
+    /// Puts `id` where `victim` was, focused; the layout keeps its shape.
+    public mutating func replace(_ victim: String, with id: String) {
+        guard let index = openIDs.firstIndex(of: victim), !openIDs.contains(id) else { return }
+        openIDs[index] = id
+        focusedID = id
+    }
     public mutating func reorder(_ source: String, before destination: String) {
         guard source != destination, openIDs.contains(source), openIDs.contains(destination) else { return }
         openIDs.removeAll { $0 == source }

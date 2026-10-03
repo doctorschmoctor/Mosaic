@@ -60,6 +60,10 @@ import MosaicCore
     private(set) var focusToken = 0
 
     // Bookkeeping no view reads.
+    /// When each tile was last used — opened, focused, typed in, sent from — as a running count,
+    /// so a fifth conversation can take the place of the tile used longest ago.
+    @ObservationIgnored private var lastUsed: [String: Int] = [:]
+    @ObservationIgnored private var useCount = 0
     @ObservationIgnored var isRefreshing = false
     @ObservationIgnored private(set) var lastRefreshed: Date?
     @ObservationIgnored private var refreshRequestedWhileBusy = false
@@ -196,11 +200,37 @@ import MosaicCore
 
     func open(_ id: String) {
         var opened = false
-        instantly { mutate { opened = $0.open(id) } }
-        // At capacity, the click does nothing; close a tile to make room.
+        instantly {
+            mutate { opened = $0.open(id) }
+            // Every tile taken: the one used longest ago gives up its place to the new one.
+            if !opened, let victim = tileToReplace() {
+                evict(victim)
+                mutate { $0.replace(victim, with: id) }
+                opened = true
+            }
+        }
         guard opened else { return }
+        noteUse(id)
         markSeen(id)
         if isLive { Task { await refresh() } }
+    }
+    /// Which open tile a new conversation replaces when every tile is taken: the one used longest
+    /// ago (the first on screen among equals). An unsent New Message is kept unless nothing else is open.
+    func tileToReplace() -> String? {
+        let candidates = openIDs.filter { composeDrafts[$0] == nil }
+        let pool = candidates.isEmpty ? openIDs : candidates
+        return pool.min { (lastUsed[$0] ?? 0, openIDs.firstIndex(of: $0) ?? 0) < (lastUsed[$1] ?? 0, openIDs.firstIndex(of: $1) ?? 0) }
+    }
+    /// Lets go of a tile's transient state ahead of its replacement (its draft text is kept, as on close).
+    private func evict(_ victim: String) {
+        if tileDrag?.id == victim { tileDrag = nil }
+        if focusTarget == victim { focusTarget = nil }
+        if composeDrafts[victim] != nil { composeDrafts[victim] = nil; drafts[victim] = nil }
+        outgoing[victim] = nil; outgoingLoading[victim] = nil
+    }
+    private func noteUse(_ id: String) {
+        useCount += 1
+        lastUsed[id] = useCount
     }
     func close(_ id: String) {
         instantly {
@@ -233,6 +263,7 @@ import MosaicCore
     func focus(_ id: String) {
         guard openIDs.contains(id) else { return }
         if focusedID != id { instantly { focusedID = id } }
+        noteUse(id)
         markSeen(id)
     }
     /// Moves keyboard focus to the next (or previous) tile's composer. Returns false when no tile is open.
@@ -288,16 +319,12 @@ import MosaicCore
         }
         if sidebarSelection != rows[target].id { instantly { sidebarSelection = rows[target].id } }
     }
-    /// Return on the keyboard's row (or the first search result): opens it in a tile, or focuses its
-    /// tile when it is already open. With every tile taken, says so instead of doing nothing.
+    /// Return on the keyboard's row (or the first search result): opens it in a tile — taking the
+    /// place of the tile used longest ago when every tile is taken — or focuses its tile when it
+    /// is already open.
     func activateSidebarSelection() {
         guard let id = sidebarSelection ?? (search.isEmpty ? nil : filteredConversations.first?.id) else { return }
         if openIDs.contains(id) { focus(id); return }
-        guard openIDs.count < Workspace.maximumTiles else {
-            alert = WorkspaceAlert(title: "Mosaic shows up to \(Workspace.maximumTiles) conversations",
-                                   message: "Close a tile to open another conversation.")
-            return
-        }
         open(id)
     }
     /// Delete on the keyboard's row: closes that conversation's tile, if it has one. The
@@ -324,7 +351,7 @@ import MosaicCore
         }
     }
     func draft(_ id: String) -> Binding<String> {
-        Binding(get: { self.drafts[id] ?? "" }, set: { if self.drafts[id] ?? "" != $0 { self.drafts[id] = $0 } })
+        Binding(get: { self.drafts[id] ?? "" }, set: { if self.drafts[id] ?? "" != $0 { self.drafts[id] = $0; self.noteUse(id) } })
     }
     func markSeen(_ id: String) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
@@ -464,6 +491,7 @@ import MosaicCore
             }
         }
         guard !delivered.isEmpty else { return }
+        noteUse(id)
         markSeen(id)
         if isLive { lastLoad = nil; await refresh() }
         else if let index = conversations.firstIndex(where: { $0.id == id }) {
@@ -566,18 +594,20 @@ import MosaicCore
     // MARK: New messages
 
     /// Opens a tile for a new message. Recipients are chosen in the tile; the conversation is
-    /// found or created when the first message is sent.
+    /// found or created when the first message is sent. With every tile taken, the tile used
+    /// longest ago gives up its place.
     @discardableResult func beginNewChat() -> String? {
-        guard openIDs.count < Workspace.maximumTiles else {
-            alert = WorkspaceAlert(title: "Mosaic shows up to \(Workspace.maximumTiles) conversations",
-                                   message: "Close a tile to start a new message.")
-            return nil
-        }
         let id = "new-\(UUID().uuidString)"
         instantly {
             composeDrafts[id] = ComposeDraft()
-            mutate { $0.open(id) }
+            var opened = false
+            mutate { opened = $0.open(id) }
+            if !opened, let victim = tileToReplace() {
+                evict(victim)
+                mutate { $0.replace(victim, with: id) }
+            }
         }
+        noteUse(id)
         return id
     }
     func addRecipient(_ recipient: Recipient, to draftID: String) {

@@ -8,7 +8,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 ## Features
 
-- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch.
+- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft is kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
 - **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else, and received pictures can be copied or saved with a right-click.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them.
@@ -61,7 +61,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 
 ## Mouse and trackpad
 
-- Click a conversation to open it or focus its tile; double-click an open one to close the tile. A grid icon marks open conversations. Rows are highlighted only while the keyboard is on the list (⌘L); the pointer highlights nothing.
+- Click a conversation to open it or focus its tile; double-click an open one to close the tile. With four tiles open, the one you used longest ago — opened, focused, typed in or sent from — makes room, in its own place. A grid icon marks open conversations. Rows are highlighted only while the keyboard is on the list (⌘L); the pointer highlights nothing.
 - Swipe a row left (or right-click it) to delete the conversation from Mosaic. It stays in Messages and returns with its next message.
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
