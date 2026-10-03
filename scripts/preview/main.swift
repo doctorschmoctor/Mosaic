@@ -3,10 +3,15 @@ import SwiftUI
 
 // Render the app's own view with fictional demo data. This captures the NSHostingView,
 // never the user's desktop, real conversations, or another application.
-extension Notification.Name { static let focusSearch = Notification.Name("Mosaic.focusSearch") }
+// Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N]
 
 MainActor.assumeIsolated {
     let output = CommandLine.arguments.dropFirst().first ?? "docs/workspace.png"
+    let scale: CGFloat = {
+        guard let index = CommandLine.arguments.firstIndex(of: "--scale"), CommandLine.arguments.indices.contains(index + 1),
+              let value = Double(CommandLine.arguments[index + 1]) else { return 2 }
+        return CGFloat(value)
+    }()
     let app = NSApplication.shared
     app.setActivationPolicy(.prohibited)
     app.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
@@ -26,10 +31,14 @@ MainActor.assumeIsolated {
     @MainActor func capture(_ path: String) {
         hosting.needsLayout = true
         hosting.layoutSubtreeIfNeeded()
-        let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds)
-        guard let bitmap else { fatalError("Cannot render preview") }
-        bitmap.size = hosting.bounds.size
-        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+        // A bitmap at the requested scale (2x by default, a Retina screenshot) whatever display
+        // the renderer runs on; cacheDisplay draws at the bitmap's resolution.
+        let bounds = hosting.bounds
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(bounds.width * scale), pixelsHigh: Int(bounds.height * scale),
+                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { fatalError("Cannot render preview") }
+        bitmap.size = bounds.size
+        hosting.cacheDisplay(in: bounds, to: bitmap)
         guard let png = bitmap.representation(using: .png, properties: [:]) else { fatalError("Cannot encode preview") }
         do { try png.write(to: URL(fileURLWithPath: path)) }
         catch { fatalError(error.localizedDescription) }

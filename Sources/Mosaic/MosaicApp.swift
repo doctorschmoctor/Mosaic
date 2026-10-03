@@ -39,13 +39,6 @@ import SwiftUI
     }
 }
 
-extension Notification.Name {
-    /// Puts the keyboard in the sidebar's search field (⌘F).
-    static let focusSearch = Notification.Name("Mosaic.focusSearch")
-    /// Gives the conversation list the keyboard (⌘L); see `SidebarKeyboard`.
-    static let focusConversationList = Notification.Name("Mosaic.focusConversationList")
-}
-
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // SwiftUI apps abort on any Objective-C exception that reaches the run loop. Mosaic's crashes

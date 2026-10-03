@@ -21,6 +21,13 @@ enum Palette {
     }
 }
 
+extension Notification.Name {
+    /// Puts the keyboard in the sidebar's search field (⌘F).
+    static let focusSearch = Notification.Name("Mosaic.focusSearch")
+    /// Gives the conversation list the keyboard (⌘L); see `SidebarKeyboard`.
+    static let focusConversationList = Notification.Name("Mosaic.focusConversationList")
+}
+
 struct WorkspaceView: View {
     /// Height of the window-control strip (traffic lights). Tiles reach up into it; the window itself
     /// is moved only by `WindowDragRegion` (the empty parts of the strip), never by AppKit's automatic
