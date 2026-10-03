@@ -6,10 +6,14 @@ import AppKit
 final class ThinScroller: NSScroller {
     static let knobWidth: CGFloat = 6
     static let margin: CGFloat = 3
+    /// While the pointer is swiping sideways (a list row's swipe action), the scroller draws nothing:
+    /// AppKit flashes the vertical scroller on any scroll gesture, including horizontal ones.
+    var isSuppressed = false { didSet { if isSuppressed != oldValue { needsDisplay = true } } }
 
     override class var isCompatibleWithOverlayScrollers: Bool { true }
     override func drawKnobSlot(in slotRect: NSRect, highlight flag: Bool) {}
     override func drawKnob() {
+        guard !isSuppressed else { return }
         let knob = rect(for: .knob)
         let vertical = bounds.height >= bounds.width
         let frame = vertical
@@ -140,6 +144,59 @@ final class ScrollPinner: NSObject {
         scroll(toY: flipped ? maximum : 0)
         distanceFromBottom = 0
         isNearBottom = true
+    }
+}
+
+/// Placed inside a SwiftUI ScrollView or List, finds the AppKit scroll view that hosts it and
+/// gives it a ThinScroller. With `hidesForHorizontalSwipes`, a sideways trackpad gesture over the
+/// scroll view (a row's swipe action) keeps the scroller from showing. Invisible and never part
+/// of hit testing or layout.
+struct ThinScrollerInstaller: NSViewRepresentable {
+    var hidesForHorizontalSwipes = false
+
+    func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); view.watchesSwipes = hidesForHorizontalSwipes; return view }
+    func updateNSView(_ view: InstallerView, context: Context) { view.watchesSwipes = hidesForHorizontalSwipes; view.install() }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    final class InstallerView: NSView {
+        var watchesSwipes = false
+        private weak var scrollView: NSScrollView?
+        private var monitor: Any?
+
+        override var isOpaque: Bool { false }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            DispatchQueue.main.async { [weak self] in self?.install() }
+        }
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+
+        func install() {
+            var view: NSView? = superview
+            while let current = view {
+                if let found = current as? NSScrollView {
+                    ThinScroller.install(in: found)
+                    scrollView = found
+                    if watchesSwipes { watchSwipes() }
+                    return
+                }
+                view = current.superview
+            }
+        }
+        private func watchSwipes() {
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self, let scrollView = self.scrollView, let window = scrollView.window, event.window === window,
+                      let scroller = scrollView.verticalScroller as? ThinScroller else { return event }
+                let inside = scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil))
+                if inside, event.phase == .began || event.phase == .changed || event.momentumPhase == .began {
+                    scroller.isSuppressed = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+                }
+                return event
+            }
+        }
     }
 }
 

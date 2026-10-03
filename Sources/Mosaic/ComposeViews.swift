@@ -141,9 +141,9 @@ struct RecipientField: View {
             guard let last = draft.recipients.last else { return false }
             store.removeRecipient(last, from: draftID); return true
         case .cancel:
-            if !query.isEmpty { query = ""; return true }
-            if showsAll { showsAll = false; return true }
-            return false
+            // Esc closes the new message.
+            store.close(draftID)
+            return true
         }
     }
 }

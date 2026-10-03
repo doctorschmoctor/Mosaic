@@ -116,7 +116,8 @@ struct ConversationTile: View {
                     height: $composerHeight,
                     onFocus: { store.focus(conversation.id) },
                     onSend: { Task { await store.send(conversation.id) } },
-                    onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) })
+                    onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
+                    onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil)
                     .frame(height: composerHeight)
                     // The field's corners match the tile's.
                     .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))

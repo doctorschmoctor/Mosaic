@@ -104,7 +104,9 @@ struct WorkspaceView: View {
                     ConversationRow(conversation: conversation)
                         .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
                         .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
+                        // Inside the list's scroll view: gives it the slim scroller the tiles have,
+                        // one that does not thicken under the pointer or appear for a swipe.
+                        .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true))
                         .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                             Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                 .tint(.red)
@@ -278,9 +280,7 @@ struct ConversationRow: View {
                     Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
-                // Rounded on the left, square where it meets the sidebar's edge (and a swipe action).
-                .background(isOpen ? Palette.accent.opacity(0.075) : .clear,
-                            in: UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 10, bottomTrailingRadius: 0, topTrailingRadius: 0))
+                // An open conversation is marked by the grid icon alone; no row shading.
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")

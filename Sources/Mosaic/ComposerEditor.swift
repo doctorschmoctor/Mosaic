@@ -22,6 +22,8 @@ struct ComposerEditor: NSViewRepresentable {
     let onFocus: () -> Void
     let onSend: () -> Void
     var onTab: (Bool) -> Void = { _ in }
+    /// Esc, when the field has a use for it (closing a new-message tile).
+    var onCancel: (() -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -103,6 +105,7 @@ struct ComposerEditor: NSViewRepresentable {
         editor.onFocus = onFocus
         editor.onSend = onSend
         editor.onTab = onTab
+        editor.onCancel = onCancel
         editor.conversationID = conversationID
         DraftTextView.register(editor, for: conversationID)
         if editor.placeholder != placeholder { editor.placeholder = placeholder; editor.needsDisplay = true }
@@ -164,6 +167,7 @@ final class DraftTextView: NSTextView {
     var onFocus: (() -> Void)?
     var onSend: (() -> Void)?
     var onTab: ((Bool) -> Void)?
+    var onCancel: (() -> Void)?
     var onHeightChange: ((CGFloat) -> Void)?
     var conversationID = ""
     var placeholder = ""
@@ -204,6 +208,9 @@ final class DraftTextView: NSTextView {
     // Tab and Shift–Tab move between tiles instead of inserting a tab character.
     override func insertTab(_ sender: Any?) { onTab?(true) }
     override func insertBacktab(_ sender: Any?) { onTab?(false) }
+    override func cancelOperation(_ sender: Any?) {
+        if let onCancel { onCancel() } else { super.cancelOperation(sender) }
+    }
 
     override func didChangeText() {
         super.didChangeText()
