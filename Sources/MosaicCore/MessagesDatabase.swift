@@ -31,11 +31,14 @@ public struct MessagesDatabase: Sendable {
             throw DatabaseError.accessDenied
         }
         defer { sqlite3_close(db) }
-        sqlite3_busy_timeout(db, 1200)
+        // Messages writes to this database while it is read; wait rather than fail when it holds a lock.
+        sqlite3_busy_timeout(db, 3000)
         // A read transaction ensures metadata and tile histories represent the same snapshot.
-        try execute(db, "BEGIN")
+        try execute(db, "BEGIN DEFERRED")
         defer { try? execute(db, "ROLLBACK") }
         let columns = try tableColumns(db, table: "message")
+        // One query for every conversation's members, instead of one query per conversation.
+        let membersByChat = try participantsByChat(db)
         guard columns.contains("is_from_me"), columns.contains("date"), columns.contains("text") else { throw DatabaseError.unsupportedSchema }
         func col(_ name: String, fallback: String = "0") -> String { columns.contains(name) ? "m.\(name)" : fallback }
         let body = col("attributedBody", fallback: "NULL")
@@ -54,7 +57,7 @@ public struct MessagesDatabase: Sendable {
         while status == SQLITE_ROW {
             let rowID = sqlite3_column_int64(statement, 0)
             let guid = string(statement, 1) ?? ""
-            let members = try participants(db, chatID: rowID)
+            let members = membersByChat[rowID] ?? []
             let displayName = string(statement, 2) ?? ""
             let fallback = members.isEmpty ? (string(statement, 3) ?? "Conversation") : members.joined(separator: ", ")
             let name = displayName.isEmpty ? fallback : displayName
@@ -73,7 +76,7 @@ public struct MessagesDatabase: Sendable {
             bind(pinned, 1, id)
             if sqlite3_step(pinned) == SQLITE_ROW {
                 let rowID = sqlite3_column_int64(pinned, 0)
-                let members = try participants(db, chatID: rowID)
+                let members = membersByChat[rowID] ?? []
                 let history = try history(db, chatID: rowID, columns: columns, limit: historyLimit)
                 let display = string(pinned, 1) ?? ""
                 conversations.append(Conversation(id: id, databaseID: rowID,
@@ -186,11 +189,16 @@ public struct MessagesDatabase: Sendable {
         let seconds = raw > 10_000_000_000 || raw < -10_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
         return Date(timeIntervalSinceReferenceDate: seconds)
     }
-    private func participants(_ db: OpaquePointer, chatID: Int64) throws -> [String] {
-        let statement = try prepare(db, "SELECT h.id FROM handle h JOIN chat_handle_join j ON j.handle_id = h.ROWID WHERE j.chat_id = ? ORDER BY h.ROWID")
-        defer { sqlite3_finalize(statement) }; sqlite3_bind_int64(statement, 1, chatID)
-        var result: [String] = []
-        while sqlite3_step(statement) == SQLITE_ROW { if let id = string(statement, 0) { result.append(id) } }
+    private func participantsByChat(_ db: OpaquePointer) throws -> [Int64: [String]] {
+        let statement = try prepare(db, "SELECT j.chat_id, h.id FROM chat_handle_join j JOIN handle h ON h.ROWID = j.handle_id ORDER BY j.chat_id, h.ROWID")
+        defer { sqlite3_finalize(statement) }
+        var result: [Int64: [String]] = [:]
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            if let id = string(statement, 1) { result[sqlite3_column_int64(statement, 0), default: []].append(id) }
+            status = sqlite3_step(statement)
+        }
+        guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
         return result
     }
     private func tableColumns(_ db: OpaquePointer, table: String) throws -> Set<String> {

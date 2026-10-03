@@ -36,6 +36,14 @@ import SwiftUI
 extension Notification.Name { static let focusSearch = Notification.Name("Mosaic.focusSearch") }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // SwiftUI apps abort on any Objective-C exception that reaches the run loop. Mosaic's crashes
+        // were AppKit layout exceptions in a display cycle; an aborted cycle is recoverable, so such an
+        // exception is logged (see Console) and the app keeps running. The causes are fixed too.
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: "NSApplicationCrashOnExceptions")
+        defaults.register(defaults: ["NSApplicationCrashOnExceptions": false, "NSApplicationShowExceptions": true])
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)

@@ -9,13 +9,11 @@ import MosaicCore
     @Published var workspace = Workspace() { didSet { persist() } }
     @Published var search = ""
     @Published var isLive = false
-    @Published var isRefreshing = false
     @Published var connectionError: String?
     @Published var banner: String?
     @Published var sendingIDs = Set<String>()
     @Published var sendErrors: [String: String] = [:]
     @Published var showSetup = false
-    @Published var lastRefreshed: Date?
     @Published var historyLimits: [String: Int] = [:]
     @Published var isLoadingContacts = false
     @Published var contactStatus: String?
@@ -24,7 +22,15 @@ import MosaicCore
     /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
     @Published private(set) var focusTarget: String?
     @Published private(set) var focusToken = 0
-    var openingOrigins: [String: CGPoint] = [:]
+    /// Not published: the periodic poll flips these every few seconds and re-rendering every tile for
+    /// that was a visible source of lag.
+    var isRefreshing = false
+    private(set) var lastRefreshed: Date?
+    private var refreshRequestedWhileBusy = false
+    /// Transient read failures (Messages writing to the database) keep the last good data; the
+    /// connection error only shows once reads keep failing or the first connection never succeeded.
+    private(set) var consecutiveLoadFailures = 0
+    static let failuresBeforeError = 3
     private let defaults: UserDefaults
     private let database: MessagesDatabase
     private var pollTask: Task<Void, Never>?
@@ -110,40 +116,24 @@ import MosaicCore
         return order
     }
 
-    /// Runs a workspace layout change with the shared tile animation, tagged so message lists can skip it.
-    func animateLayout(_ animation: Animation? = Motion.layout, _ changes: () -> Void) {
-        var transaction = Transaction(animation: animation)
-        transaction[TileLayoutTransactionKey.self] = true
-        withTransaction(transaction, changes)
-    }
-
-    func open(_ id: String, from origin: CGPoint? = nil) {
-        if let origin, !workspace.openIDs.contains(id) { openingOrigins[id] = origin }
+    func open(_ id: String) {
         var opened = false
-        animateLayout { opened = workspace.open(id) }
+        instantly { opened = workspace.open(id) }
         // At capacity, the click does nothing; close a tile to make room.
         guard opened else { return }
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
-    /// Forgets where a tile was opened from once it has appeared, so a later re-insertion (switching
-    /// layouts, say) does not replay the sidebar fly-out.
-    func consumeOpeningOrigin(_ id: String) {
-        guard openingOrigins[id] != nil else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in self?.openingOrigins[id] = nil }
-    }
     func close(_ id: String) {
-        animateLayout {
+        instantly {
             if tileDrag?.id == id { tileDrag = nil }
             workspace.close(id)
         }
         if focusTarget == id { focusTarget = nil }
     }
-    func focus(_ id: String, animated: Bool = true) {
+    func focus(_ id: String) {
         guard workspace.openIDs.contains(id) else { return }
-        if workspace.focusedID != id {
-            if animated { animateLayout { workspace.focusedID = id } } else { workspace.focusedID = id }
-        }
+        if workspace.focusedID != id { instantly { workspace.focusedID = id } }
         markSeen(id)
     }
     /// Moves keyboard focus to the next (or previous) tile's composer. Returns false when no tile is open.
@@ -151,7 +141,7 @@ import MosaicCore
         let ids = workspace.openIDs
         guard !ids.isEmpty else { return false }
         // Relative to the composer that has the keyboard, else to the focused tile: one press always moves
-        // to another tile. (It used to spend the first press focusing the current tile's composer.)
+        // to another tile.
         let origin = current.flatMap { ids.contains($0) ? $0 : nil } ?? workspace.focusedID.flatMap { ids.contains($0) ? $0 : nil }
         let target: String
         if let origin, let index = ids.firstIndex(of: origin) {
@@ -165,32 +155,24 @@ import MosaicCore
     /// Focuses a tile and puts the keyboard in its composer in one step.
     func requestComposerFocus(_ id: String) {
         guard workspace.openIDs.contains(id) else { return }
-        focus(id, animated: false)
+        focus(id)
         focusTarget = id
         focusToken += 1
     }
-    func reorder(_ id: String, before destination: String) { animateLayout { workspace.reorder(id, before: destination) } }
-    func setLayout(_ layout: WorkspaceLayout) { animateLayout { tileDrag = nil; workspace.layout = layout } }
+    func reorder(_ id: String, before destination: String) { instantly { workspace.reorder(id, before: destination) } }
+    func setLayout(_ layout: WorkspaceLayout) { instantly { tileDrag = nil; workspace.layout = layout } }
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard workspace.layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).
         if tileDrag?.id != id { tileDrag = TileDragSession(id: id, origin: frame, order: workspace.openIDs) }
         guard var drag = tileDrag else { return }
-        let previousOrder = drag.order
         drag.update(translation: translation, plan: plan)
-        if drag.order != previousOrder {
-            animateLayout { tileDrag = drag }
-        } else {
-            // Follow the pointer exactly; neighbors keep any movement already in flight.
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { tileDrag = drag }
-        }
+        instantly { tileDrag = drag }
     }
     func finishTileDrag(_ id: String? = nil) {
         guard let drag = tileDrag, id == nil || drag.id == id else { return }
         let order = displayOrder
-        animateLayout {
+        instantly {
             if workspace.openIDs != order { workspace.openIDs = order }
             tileDrag = nil
         }
@@ -205,7 +187,7 @@ import MosaicCore
     }
     func setMode(live: Bool) {
         guard live != isLive, sendingIDs.isEmpty else { return }
-        persistNow(); generation += 1; isLive = live; connectedBefore = false
+        persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0
         connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil
         defaults.set(live, forKey: "Mosaic.live")
@@ -220,10 +202,20 @@ import MosaicCore
         loadingState = false
     }
 
+    /// Reloads conversations and open histories. A request that arrives while a load is running is
+    /// not dropped: one more load follows, so a tile opened mid-poll gets its history right away.
     func refresh() async {
-        guard isLive, !isRefreshing else { return }
+        guard isLive else { return }
+        if isRefreshing { refreshRequestedWhileBusy = true; return }
         isRefreshing = true
         defer { isRefreshing = false }
+        repeat {
+            refreshRequestedWhileBusy = false
+            await performRefresh()
+        } while refreshRequestedWhileBusy && isLive
+    }
+
+    private func performRefresh() async {
         let requestGeneration = generation
         let ids = Set(workspace.openIDs)
         let historyLimit = max(100, historyLimits.values.max() ?? 100)
@@ -231,6 +223,7 @@ import MosaicCore
         do {
             var loaded = try await Task.detached(priority: .userInitiated) { try database.load(openIDs: ids, historyLimit: historyLimit) }.value
             guard generation == requestGeneration, isLive else { return }
+            consecutiveLoadFailures = 0
             if connectionError != nil { connectionError = nil }
             connectedBefore = true; lastRefreshed = Date()
             for index in loaded.indices {
@@ -248,19 +241,22 @@ import MosaicCore
                 if ids.contains(id) { loaded[index].unreadCount = 0 }
             }
             // Publishing identical data every three seconds re-rendered every tile; only publish real changes.
-            if loaded != conversations { conversations = loaded }
+            if loaded != conversations { instantly { conversations = loaded } }
             updateContactStatus()
             var reconciledWorkspace = workspace
             reconciledWorkspace.reconcile(availableIDs: Set(loaded.map(\.id)))
-            if reconciledWorkspace != workspace { workspace = reconciledWorkspace }
+            if reconciledWorkspace != workspace { instantly { workspace = reconciledWorkspace } }
             if workspace.openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
                 workspace.open(first.id)
                 defaults.set(true, forKey: "Mosaic.live.hasWorkspace")
-                Task { await self.refresh() }
+                refreshRequestedWhileBusy = true
             }
         } catch {
             guard generation == requestGeneration else { return }
-            connectionError = error.localizedDescription
+            consecutiveLoadFailures += 1
+            if !connectedBefore || consecutiveLoadFailures >= Self.failuresBeforeError {
+                connectionError = error.localizedDescription
+            }
         }
     }
 
@@ -273,7 +269,7 @@ import MosaicCore
         let originalDraft = workspace.drafts[id] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sendingIDs.contains(id), canSend,
-              let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+              conversations.contains(where: { $0.id == id }) else { return }
         sendingIDs.insert(id); sendErrors[id] = nil
         defer { sendingIDs.remove(id) }
         let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
@@ -284,7 +280,7 @@ import MosaicCore
                 pending[id, default: []].append(message)
             } catch { sendErrors[id] = error.localizedDescription; return }
         }
-        withAnimation(Motion.message) {
+        instantly {
             if workspace.drafts[id] == originalDraft { workspace.drafts[id] = "" }
             if let currentIndex = conversations.firstIndex(where: { $0.id == id }) {
                 conversations[currentIndex].messages.append(message)
@@ -294,7 +290,7 @@ import MosaicCore
         }
         markSeen(id)
         if isLive { await refresh() }
-        else {
+        else if let index = conversations.firstIndex(where: { $0.id == id }) {
             // Demo sending stays local. No invented replies or real recipients.
             conversations[index].unreadCount = 0
         }

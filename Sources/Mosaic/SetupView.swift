@@ -21,12 +21,9 @@ struct SetupView: View {
                 HStack { Button("Open Full Disk Access") { store.openPrivacy("Privacy_AllFiles") }; Button("Show Mosaic in Finder") { store.revealApp() } }
             }
             step("2", "Connect to Messages", "Read the conversations already synced to this Mac. Refreshes every three seconds while Mosaic is running.") {
-                HStack {
-                    Button(store.isLive ? "Refresh connection" : "Connect Messages") {
-                        if store.isLive { Task { await store.refresh() } } else { store.setMode(live: true) }
-                    }.buttonStyle(.borderedProminent).tint(Palette.accent)
-                    if store.isRefreshing { ProgressView().controlSize(.small) }
-                }
+                Button(store.isLive ? "Refresh connection" : "Connect Messages") {
+                    if store.isLive { Task { await store.refresh() } } else { store.setMode(live: true) }
+                }.buttonStyle(.borderedProminent).tint(Palette.accent)
             }
             step("3", "Allow sending when prompted", "Your first send asks permission to control Messages. Allow it to send from a tile. You can manage it in Automation settings.") {
                 HStack { Button("Open Automation") { store.openPrivacy("Privacy_Automation") }; Button("Open Messages") { store.openMessages() } }

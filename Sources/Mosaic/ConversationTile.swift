@@ -11,6 +11,7 @@ struct ConversationTile: View {
     var onDragEnded: (() -> Void)? = nil
     @State private var isDropTarget = false
     @State private var composerHeight = ComposerEditor.minimumHeight
+    @State private var closeHovered = false
     private var isFocused: Bool { store.workspace.focusedID == conversation.id }
     private var draft: Binding<String> { store.draft(conversation.id) }
 
@@ -34,8 +35,6 @@ struct ConversationTile: View {
             RoundedRectangle(cornerRadius: 13, style: .continuous)
                 .strokeBorder(isDropTarget ? Palette.accent : isFocused ? Palette.accent.opacity(0.45) : Color.primary.opacity(0.09),
                               lineWidth: isDropTarget || isFocused ? 1.5 : 1)
-                .animation(Motion.control, value: isFocused)
-                .animation(Motion.control, value: isDropTarget)
                 .allowsHitTesting(false)
         }
         .shadow(color: .black.opacity(0.025), radius: 5, y: 2)
@@ -67,12 +66,18 @@ struct ConversationTile: View {
                     .font(.system(size: 10)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 2)
-            Color.clear.frame(width: 22, height: 22) // the close button, drawn by the handle below
+            // The close glyph. Drawn here, in SwiftUI, like the rest of the header; its clicks are
+            // detected by the handle underneath (TileHeaderHandle.closeRect matches this frame).
+            Image(systemName: "xmark").font(.system(size: 11, weight: .medium)).foregroundStyle(.primary)
+                .frame(width: TileHeaderHandle.closeSize, height: TileHeaderHandle.closeSize)
+                .background(closeHovered ? Color.primary.opacity(0.09) : .clear, in: Circle())
+                .accessibilityHidden(true)
         }
-        .font(.system(size: 11)).padding(.leading, 14).padding(.trailing, 10).padding(.vertical, 12)
+        .font(.system(size: 11)).padding(.leading, 14).padding(.trailing, TileHeaderHandle.closeInset).padding(.vertical, 12)
         .background(TileHeaderHandle(draggable: onDragChanged != nil, closeLabel: "Close \(conversation.name) tile",
             onDragChanged: { onDragChanged?($0) }, onDragEnded: { onDragEnded?() },
-            onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) }))
+            onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) },
+            onCloseHover: { hovered in if closeHovered != hovered { closeHovered = hovered } }))
         .help(onDragChanged == nil ? "" : "Drag to move this tile")
         .accessibilityElement(children: .contain)
         .accessibilityLabel(conversation.name)
@@ -88,7 +93,7 @@ struct ConversationTile: View {
                     accessibilityLabel: "Message to \(conversation.name)",
                     focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
                     height: $composerHeight,
-                    onFocus: { store.focus(conversation.id, animated: false) },
+                    onFocus: { store.focus(conversation.id) },
                     onSend: { Task { await store.send(conversation.id) } },
                     onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) })
                     .frame(height: composerHeight)
@@ -114,7 +119,7 @@ struct ConversationTile: View {
     /// Opens Emoji & Symbols for this tile's field. Return sends; there is no send button.
     private var emojiButton: some View {
         Button {
-            store.focus(conversation.id, animated: false)
+            store.focus(conversation.id)
             DraftTextView.editor(for: conversation.id)?.showEmojiPicker()
         } label: {
             if store.sendingIDs.contains(conversation.id) { ProgressView().controlSize(.small).frame(width: 31, height: 31) }
@@ -128,9 +133,6 @@ struct ConversationTile: View {
         .accessibilityLabel("Insert emoji into message to \(conversation.name)").help("Emoji & Symbols")
     }
 }
-
-/// Marks layout changes (tiles opening, closing, moving, resizing) so message content can opt out of them.
-struct TileLayoutTransactionKey: TransactionKey { static let defaultValue = false }
 
 /// The conversation history. It only re-renders when its own inputs change, never during tile drags.
 struct MessageList: View, Equatable {
@@ -147,21 +149,18 @@ struct MessageList: View, Equatable {
 
     /// Scrolls to the newest message. Rows added in the current update have no size yet, so the
     /// scroll is repeated once layout has run; otherwise a freshly loaded history landed mid-way.
-    private func scrollToLatest(_ reader: ScrollViewProxy, animated: Bool) {
-        let scroll = {
-            if animated && !Motion.reduced { withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } }
-            else { reader.scrollTo("bottom", anchor: .bottom) }
-        }
+    private func scrollToLatest(_ reader: ScrollViewProxy) {
+        let scroll = { reader.scrollTo("bottom", anchor: .bottom) }
         scroll()
         DispatchQueue.main.async(execute: scroll)
-        if !animated { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { reader.scrollTo("bottom", anchor: .bottom) } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: scroll)
     }
 
     var body: some View {
         ScrollViewReader { reader in
             ScrollView {
                 // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
-                // and each insertion replayed the new-message animation (the jumping text).
+                // which made rows jump.
                 VStack(alignment: .leading, spacing: 10) {
                     if canLoadMore {
                         Button("Load earlier messages") { followsNewest = false; onLoadMore() }
@@ -183,35 +182,26 @@ struct MessageList: View, Equatable {
                                           showsStatus: message.presentationID == latestOutgoing)
                         }
                         .id(message.presentationID)
-                        .transition(Motion.reduced ? .opacity : .offset(x: message.isFromMe ? 12 : -12, y: 38)
-                            .combined(with: .scale(scale: 0.86, anchor: message.isFromMe ? .bottomTrailing : .bottomLeading))
-                            .combined(with: .opacity))
                     }
                     Color.clear.frame(height: 1).id("bottom")
                 }
                 .padding(16)
                 .background(ThinScrollerInstaller())
-                // Bubbles take their final positions at once during tile animations; the card around them
-                // still grows, shrinks and moves smoothly. Interpolating every bubble made text slide around.
-                .transaction { transaction in
-                    if transaction[TileLayoutTransactionKey.self] && !Motion.animateMessageLayout { transaction.animation = nil }
-                }
             }
             .defaultScrollAnchor(.bottom)
             .task(id: conversation.id) {
                 // Let the tile's first layout settle before following its newest message.
                 try? await Task.sleep(for: .milliseconds(150))
-                if followsNewest { scrollToLatest(reader, animated: false) }
+                guard !Task.isCancelled, followsNewest else { return }
+                scrollToLatest(reader)
             }
-            .onChange(of: conversation.messages.last?.presentationID) { previous, _ in
+            .onChange(of: conversation.messages.last?.presentationID) { _, _ in
                 guard followsNewest else { return }
-                // History arriving in an open tile (previous == nil) jumps straight to the end; a new
-                // message slides in.
-                scrollToLatest(reader, animated: previous != nil)
+                scrollToLatest(reader)
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsNewest {
-                    Button { followsNewest = true; withAnimation(Motion.message) { reader.scrollTo("bottom", anchor: .bottom) } } label: {
+                    Button { followsNewest = true; reader.scrollTo("bottom", anchor: .bottom) } label: {
                         Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                     }.buttonStyle(.plain).padding(12)
                 }

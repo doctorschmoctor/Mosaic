@@ -67,9 +67,16 @@ struct ComposerEditor: NSViewRepresentable {
         ThinScroller.install(in: scroll)
         if let layoutManager = editor.layoutManager, let container = editor.textContainer { layoutManager.ensureLayout(for: container) }
         apply(to: editor, coordinator: context.coordinator)
-        if focusRequest != 0 { editor.requestFocus() }
         context.coordinator.focusRequest = focusRequest
+        if focusRequest != 0 { context.coordinator.requestFocusSoon(editor) }
         return scroll
+    }
+
+    /// The field is exactly as large as the layout around it says (its height comes from the
+    /// `height` binding). SwiftUI must never size it through Auto Layout: a fitting-size query on an
+    /// NSScrollView during the window's constraint pass can make that pass start over.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ComposerScrollView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 240, height: proposal.height ?? Self.minimumHeight)
     }
 
     func updateNSView(_ scroll: ComposerScrollView, context: Context) {
@@ -86,7 +93,9 @@ struct ComposerEditor: NSViewRepresentable {
         }
         if focusRequest != context.coordinator.focusRequest {
             context.coordinator.focusRequest = focusRequest
-            if focusRequest != 0 { editor.requestFocus() }
+            // Never move first responder inside a SwiftUI update: becoming first responder reports
+            // focus back to the store, and changing state mid-update re-runs the update.
+            if focusRequest != 0 { context.coordinator.requestFocusSoon(editor) }
         }
     }
 
@@ -109,6 +118,9 @@ struct ComposerEditor: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
             parent.text = editor.string
+        }
+        func requestFocusSoon(_ editor: DraftTextView) {
+            DispatchQueue.main.async { [weak editor] in editor?.requestFocus() }
         }
         func report(_ value: CGFloat) {
             let clamped = min(max(value.rounded(.up), ComposerEditor.minimumHeight), ComposerEditor.maximumHeight)

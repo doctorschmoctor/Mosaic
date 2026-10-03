@@ -34,6 +34,9 @@ final class ThinScroller: NSScroller {
 struct ThinScrollerInstaller: NSViewRepresentable {
     func makeNSView(context: Context) -> InstallerView { InstallerView() }
     func updateNSView(_ view: InstallerView, context: Context) { view.install() }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
 
     final class InstallerView: NSView {
         override var isOpaque: Bool { false }

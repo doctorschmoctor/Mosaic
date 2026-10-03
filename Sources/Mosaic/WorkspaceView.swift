@@ -51,17 +51,19 @@ struct WorkspaceView: View {
                 ZStack {
                     // Tiles reach up into the title bar strip; their headers handle their own mouse events there.
                     TileWorkspace().padding(Self.tileAreaMargin)
-                    if store.tiles.isEmpty { emptyWorkspace.transition(.opacity) }
+                    if store.tiles.isEmpty { emptyWorkspace }
                 }
             }.background(Palette.canvas)
         }
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(name: "workspace")
         .tint(Palette.accent)
-        // An invisible toolbar item is what makes the window use the taller unified title bar.
-        .toolbar { ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1).accessibilityHidden(true) } }
-        .toolbarBackground(.hidden, for: .windowToolbar)
-        .background(WindowReader { window in keyboard.attach(window: window, store: store) })
+        // No motion anywhere in the workspace: every change lands on the next frame.
+        .transaction { transaction in transaction.animation = nil; transaction.disablesAnimations = true }
+        .background(WindowReader { window in
+            WindowChrome.apply(to: window)
+            keyboard.attach(window: window, store: store)
+        })
         .sheet(isPresented: $store.showSetup) { SetupView().environmentObject(store) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
@@ -100,10 +102,35 @@ struct WorkspaceView: View {
     }
 }
 
+/// The window's title bar, configured in AppKit. An empty toolbar with the unified style is what
+/// gives the bar Messages' height and brings the window controls in from the corner; doing this with
+/// a SwiftUI toolbar item put a nested hosting view in the title bar, and that view's constraint
+/// updates could loop until AppKit raised an exception (the "fails to load history" crash).
+enum WindowChrome {
+    static let toolbarIdentifier = NSToolbar.Identifier("MosaicTitleBarSpacer")
+
+    @MainActor static func apply(to window: NSWindow?) {
+        guard let window else { return }
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.styleMask.insert(.fullSizeContentView)
+        window.isMovableByWindowBackground = false
+        if window.toolbar?.identifier != toolbarIdentifier {
+            let toolbar = NSToolbar(identifier: toolbarIdentifier)
+            toolbar.showsBaselineSeparator = false
+            toolbar.allowsUserCustomization = false
+            toolbar.displayMode = .iconOnly
+            window.toolbar = toolbar
+        }
+        window.toolbarStyle = .unified
+        window.toolbar?.isVisible = true
+    }
+}
+
 struct ConversationRow: View {
     @EnvironmentObject private var store: WorkspaceStore
     let conversation: Conversation
-    @State private var origin = CGPoint.zero
     /// Whether the tile was already open when a click sequence began; a double-click then closes it.
     @State private var wasOpenAtFirstClick = false
     private var isOpen: Bool { store.workspace.openIDs.contains(conversation.id) }
@@ -126,11 +153,6 @@ struct ConversationRow: View {
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
-            .background(GeometryReader { geometry in
-                Color.clear.preference(key: ConversationOriginKey.self,
-                    value: CGPoint(x: geometry.frame(in: .named("workspace")).midX, y: geometry.frame(in: .named("workspace")).midY))
-            })
-            .onPreferenceChange(ConversationOriginKey.self) { origin = $0 }
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }
                 if store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
@@ -147,13 +169,8 @@ struct ConversationRow: View {
             return
         }
         wasOpenAtFirstClick = isOpen
-        store.open(conversation.id, from: origin)
+        store.open(conversation.id)
     }
-}
-
-private struct ConversationOriginKey: PreferenceKey {
-    static var defaultValue = CGPoint.zero
-    static func reduce(value: inout CGPoint, nextValue: () -> CGPoint) { value = nextValue() }
 }
 
 struct Avatar: View {
@@ -169,8 +186,7 @@ struct Avatar: View {
 }
 
 /// Places every tile and divider at its planned frame. Positioning through layout (rather than offsets)
-/// keeps each tile's real frame where it is drawn, so clicks, text carets and cursors always line up,
-/// even after many overlapping animations.
+/// keeps each tile's real frame where it is drawn, so clicks, text carets and cursors always line up.
 struct TileCanvas: Layout {
     static let space = "tileCanvas"
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
@@ -201,12 +217,14 @@ struct TileWorkspace: View {
         GeometryReader { geometry in
             let layout = store.workspace.layout
             let order = layout == .focus ? store.focused.map { [$0.id] } ?? [] : store.displayOrder
-            let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? 44 : 0))
+            let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? FocusChipBar.height + 8 : 0))
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
             VStack(spacing: 8) {
                 if layout == .focus {
-                    focusPicker.frame(height: 36).transition(.move(edge: .top).combined(with: .opacity))
+                    FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.focus(id) }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: FocusChipBar.height)
                 }
                 if layout == .columns {
                     // Only Columns can outgrow the window, sideways. Grid and Focus always fit it.
@@ -214,7 +232,7 @@ struct TileWorkspace: View {
                         ScrollView(.horizontal) { canvas(plan) }
                             .onChange(of: store.focusToken) { _, _ in
                                 guard let id = store.focusTarget else { return }
-                                withAnimation(Motion.layout) { scroller.scrollTo(id) }
+                                scroller.scrollTo(id)
                             }
                     }
                 } else {
@@ -223,32 +241,29 @@ struct TileWorkspace: View {
             }
         }
         .onChange(of: store.workspace.openIDs.count) { _, _ in
-            store.animateLayout { gridFractions = [:]; rowWeights = []; columnWeights = [] }
+            gridFractions = [:]; rowWeights = []; columnWeights = []
             resizeStart = nil
         }
     }
 
     private func canvas(_ plan: TilePlan) -> some View {
-        GeometryReader { canvas in
-            TileCanvas {
-                ForEach(store.tiles) { chat in
-                    if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, canvas: canvas) }
-                }
-                ForEach(plan.dividers) { divider in
-                    DividerHandle(divider: divider, enabled: store.tileDrag == nil,
-                        onChanged: { translation in resize(divider, translation: translation, plan: plan) },
-                        onEnded: { resizeStart = nil })
-                        .zIndex(2)
-                        .tileFrame(divider.frame)
-                }
+        TileCanvas {
+            ForEach(store.tiles) { chat in
+                if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan) }
             }
-            .frame(width: plan.size.width, height: plan.size.height, alignment: .topLeading)
-            .coordinateSpace(name: TileCanvas.space)
+            ForEach(plan.dividers) { divider in
+                DividerHandle(divider: divider, enabled: store.tileDrag == nil,
+                    onChanged: { translation in resize(divider, translation: translation, plan: plan) },
+                    onEnded: { resizeStart = nil })
+                    .zIndex(2)
+                    .tileFrame(divider.frame)
+            }
         }
-        .frame(width: plan.size.width, height: plan.size.height)
+        .frame(width: plan.size.width, height: plan.size.height, alignment: .topLeading)
+        .coordinateSpace(name: TileCanvas.space)
     }
 
-    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, canvas: GeometryProxy) -> some View {
+    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan) -> some View {
         let dragging = store.tileDrag?.id == chat.id
         let frame = dragging ? (store.tileDrag?.frame ?? slot) : slot
         let movable = store.workspace.layout != .focus && store.tiles.count > 1
@@ -259,38 +274,9 @@ struct TileWorkspace: View {
             .shadow(color: .black.opacity(dragging ? 0.2 : 0), radius: dragging ? 22 : 0, y: dragging ? 10 : 0)
             .id(chat.id)
             .zIndex(dragging ? 100 : 1)
-            .transition(tileTransition(chat.id, target: slot, canvas: canvas))
-            .onAppear { store.consumeOpeningOrigin(chat.id) }
             .tileFrame(frame)
     }
 
-    private var focusPicker: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(store.tiles) { chat in
-                    // The chip's whole box is one AppKit click target (see ClickHandle), so it works on the
-                    // title bar row like the tile headers do; the SwiftUI content above it is only drawing.
-                    HStack(spacing: 7) { Avatar(conversation: chat, size: 22); Text(chat.name).font(.system(size: 12, weight: .medium)).lineLimit(1) }
-                        .padding(.horizontal, 10).frame(height: 36)
-                        .background(store.focused?.id == chat.id ? Palette.surface : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .background(ClickHandle(label: "Show \(chat.name)") { store.focus(chat.id) })
-                }
-            }
-        }
-    }
-    private func tileTransition(_ id: String, target: CGRect, canvas: GeometryProxy) -> AnyTransition {
-        guard !Motion.reduced else { return .opacity }
-        let origin = canvas.frame(in: .named("workspace")).origin
-        // A tile grows out of the sidebar row that opened it. Focus mode swaps tiles in place, so
-        // every conversation there grows from the same spot at the left edge.
-        let sidebar = store.workspace.layout == .focus ? nil : store.openingOrigins[id]
-        let source = sidebar ?? CGPoint(x: origin.x - 60, y: origin.y + target.midY)
-        let insertion = AnyTransition.scale(scale: 0.06)
-            .combined(with: .offset(x: source.x - origin.x - target.midX, y: source.y - origin.y - target.midY))
-            .combined(with: .opacity).animation(Motion.layout)
-        let removal = AnyTransition.scale(scale: 0.03).combined(with: .opacity).animation(Motion.close)
-        return .asymmetric(insertion: insertion, removal: removal)
-    }
     private func resize(_ divider: TileDivider, translation: CGSize, plan: TilePlan) {
         // A cancelled gesture may never report its end; a different handle always starts fresh.
         if resizeStart?.divider != divider.kind { resizeStart = (divider.kind, plan) }
@@ -357,11 +343,14 @@ struct DividerHandle: View {
     }
 }
 
-/// Reports the hosting window without taking part in hit testing.
+/// Reports the hosting window without taking part in hit testing or layout.
 struct WindowReader: NSViewRepresentable {
     let onChange: (NSWindow?) -> Void
     func makeNSView(context: Context) -> ReaderView { let view = ReaderView(); view.onChange = onChange; return view }
     func updateNSView(_ view: ReaderView, context: Context) { view.onChange = onChange }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: ReaderView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
     final class ReaderView: NSView {
         var onChange: ((NSWindow?) -> Void)?
         override func viewDidMoveToWindow() {
