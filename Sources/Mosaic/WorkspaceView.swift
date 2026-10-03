@@ -356,18 +356,10 @@ struct TileWorkspace: View {
         }
     }
 
-    /// Where Focus layout keeps the tiles it does not show: far outside the window, at the shown
-    /// tile's size. They stay alive, so switching back to Grid or Columns (or to another chip)
-    /// only moves them, instead of rebuilding hundreds of bubbles and three composers.
-    static func parkedFrame(in plan: TilePlan) -> CGRect? {
-        plan.frames.values.first.map { CGRect(x: -100_000, y: 0, width: $0.width, height: $0.height) }
-    }
-
     private func canvas(_ plan: TilePlan) -> some View {
         TileCanvas {
             ForEach(store.tiles) { chat in
                 if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan) }
-                else if let parked = Self.parkedFrame(in: plan) { tile(chat, slot: parked, plan: plan, parked: true) }
             }
             ForEach(plan.dividers) { divider in
                 DividerHandle(divider: divider, enabled: store.tileDrag == nil,
@@ -381,7 +373,7 @@ struct TileWorkspace: View {
         .coordinateSpace(name: TileCanvas.space)
     }
 
-    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, parked: Bool = false) -> some View {
+    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan) -> some View {
         let dragging = store.tileDrag?.id == chat.id
         let frame = dragging ? (store.tileDrag?.frame ?? slot) : slot
         let movable = store.layout != .focus && store.tiles.count > 1
@@ -390,9 +382,6 @@ struct TileWorkspace: View {
             onDragEnded: { store.finishTileDrag(chat.id) })
             .frame(width: frame.width, height: frame.height)
             .shadow(color: .black.opacity(dragging ? 0.2 : 0), radius: dragging ? 22 : 0, y: dragging ? 10 : 0)
-            .opacity(parked ? 0 : 1)
-            .allowsHitTesting(!parked)
-            .accessibilityHidden(parked)
             .id(chat.id)
             .zIndex(dragging ? 100 : 1)
             .tileFrame(frame)
