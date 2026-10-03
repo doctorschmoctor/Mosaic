@@ -121,7 +121,8 @@ import MosaicCore
         if let origin, !workspace.openIDs.contains(id) { openingOrigins[id] = origin }
         var opened = false
         animateLayout { opened = workspace.open(id) }
-        guard opened else { banner = "Four chats are open. Close a tile to make room for another."; return }
+        // At capacity, the click does nothing; close a tile to make room.
+        guard opened else { return }
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
