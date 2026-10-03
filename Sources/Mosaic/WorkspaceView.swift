@@ -201,14 +201,12 @@ struct TileWorkspace: View {
         GeometryReader { geometry in
             let layout = store.workspace.layout
             let order = layout == .focus ? store.focused.map { [$0.id] } ?? [] : store.displayOrder
-            // The focus chips are SwiftUI buttons, so they stay below the title bar strip.
-            let pickerInset = max(0, WorkspaceView.titleBarHeight - WorkspaceView.tileAreaMargin)
-            let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? 44 + pickerInset : 0))
+            let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? 44 : 0))
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
             VStack(spacing: 8) {
                 if layout == .focus {
-                    focusPicker.frame(height: 36).padding(.top, pickerInset).transition(.move(edge: .top).combined(with: .opacity))
+                    focusPicker.frame(height: 36).transition(.move(edge: .top).combined(with: .opacity))
                 }
                 if layout == .columns {
                     // Only Columns can outgrow the window, sideways. Grid and Focus always fit it.
@@ -270,16 +268,12 @@ struct TileWorkspace: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(store.tiles) { chat in
-                    Button { store.focus(chat.id) } label: {
-                        HStack(spacing: 7) { Avatar(conversation: chat, size: 22); Text(chat.name).font(.system(size: 12, weight: .medium)).lineLimit(1) }
-                            .padding(.horizontal, 10).frame(height: 36)
-                            .background(store.focused?.id == chat.id ? Palette.surface : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            // The whole chip, padding and background included, takes the click.
-                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    .buttonStyle(TileControlStyle())
-                    .hoverCursor(.pointingHand)
-                    .accessibilityLabel("Show \(chat.name)")
+                    // The chip's whole box is one AppKit click target (see ClickHandle), so it works on the
+                    // title bar row like the tile headers do; the SwiftUI content above it is only drawing.
+                    HStack(spacing: 7) { Avatar(conversation: chat, size: 22); Text(chat.name).font(.system(size: 12, weight: .medium)).lineLimit(1) }
+                        .padding(.horizontal, 10).frame(height: 36)
+                        .background(store.focused?.id == chat.id ? Palette.surface : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .background(ClickHandle(label: "Show \(chat.name)") { store.focus(chat.id) })
                 }
             }
         }

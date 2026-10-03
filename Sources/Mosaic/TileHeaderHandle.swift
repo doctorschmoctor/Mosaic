@@ -91,3 +91,40 @@ struct TileHeaderHandle: NSViewRepresentable {
         }
     }
 }
+
+/// A click target backed by AppKit, for controls that must work inside the title bar strip (the
+/// focus-mode chips). It covers the whole frame it is given, declines window dragging, and shows a
+/// pointing hand.
+struct ClickHandle: NSViewRepresentable {
+    var label: String
+    let onClick: () -> Void
+
+    func makeNSView(context: Context) -> HandleView { let view = HandleView(); apply(view); return view }
+    func updateNSView(_ view: HandleView, context: Context) { apply(view) }
+    private func apply(_ view: HandleView) {
+        view.onClick = onClick
+        view.setAccessibilityLabel(label)
+    }
+
+    final class HandleView: NSView {
+        var onClick: (() -> Void)?
+        private var pressed = false
+
+        override init(frame: NSRect) {
+            super.init(frame: frame)
+            setAccessibilityElement(true)
+            setAccessibilityRole(.button)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+        override func accessibilityPerformPress() -> Bool { onClick?(); return true }
+        override func mouseDown(with event: NSEvent) { pressed = true }
+        override func mouseUp(with event: NSEvent) {
+            defer { pressed = false }
+            guard pressed, bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            onClick?()
+        }
+    }
+}
