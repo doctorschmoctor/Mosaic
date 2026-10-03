@@ -115,25 +115,4 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(store.conversations[0].preview, "Photo")
         XCTAssertNil(store.outgoing[id])
     }
-
-    /// Tenor's v2 response, reduced to what the grid and the send need.
-    func testTenorResponseParsing() throws {
-        let json = """
-        {"results": [
-          {"id": "1", "content_description": "happy dance",
-           "media_formats": {"tinygif": {"url": "https://media.tenor.com/a/tiny.gif", "dims": [220, 160]},
-                             "gif": {"url": "https://media.tenor.com/a/full.gif", "dims": [498, 362]}}},
-          {"id": "2", "media_formats": {"gif": {"url": "https://media.tenor.com/b/full.gif"}}},
-          {"id": "3", "media_formats": {"mp4": {"url": "https://media.tenor.com/c/full.mp4"}}}
-        ], "next": "abc"}
-        """
-        let gifs = try TenorClient.parse(Data(json.utf8))
-        XCTAssertEqual(gifs.map(\.id), ["1", "2"], "a result without a GIF rendition is skipped")
-        XCTAssertEqual(gifs[0].description, "happy dance")
-        XCTAssertEqual(gifs[0].previewURL.absoluteString, "https://media.tenor.com/a/tiny.gif")
-        XCTAssertEqual(gifs[0].fullURL.absoluteString, "https://media.tenor.com/a/full.gif")
-        XCTAssertEqual(gifs[0].previewSize, CGSize(width: 220, height: 160))
-        XCTAssertEqual(gifs[1].previewURL, gifs[1].fullURL, "the full GIF stands in for a missing preview")
-        XCTAssertEqual(gifs[1].description, "GIF")
-    }
 }

@@ -179,34 +179,27 @@ struct OutgoingThumbnail: View {
 // MARK: - The + button
 
 /// The round + button at the left of a composer, as in Messages. Its menu offers the Photos
-/// library (the system picker, in a popover), a GIF search, and a file chooser. An AppKit view,
-/// so the pickers have a real view to anchor their popovers to.
+/// library (the system picker, in a popover card) and a file chooser. An AppKit view, so the
+/// picker has a real view to anchor its popover to.
 struct AttachmentMenuButton: NSViewRepresentable {
     let conversationName: String
-    let tenorKey: String
     /// Files ready to attach: already in Mosaic's outgoing folder, or chosen by the user.
     let onFiles: ([URL]) -> Void
-    let onOpenSettings: () -> Void
 
     func makeNSView(context: Context) -> PlusButtonView { let view = PlusButtonView(); configure(view); return view }
     func updateNSView(_ view: PlusButtonView, context: Context) { configure(view) }
     private func configure(_ view: PlusButtonView) {
         view.onFiles = onFiles
-        view.onOpenSettings = onOpenSettings
-        view.tenorKey = tenorKey
-        view.setAccessibilityLabel("Add a photo, GIF or file to the message to \(conversationName)")
-        view.toolTip = "Photos, GIFs and files"
+        view.setAccessibilityLabel("Add a photo or file to the message to \(conversationName)")
+        view.toolTip = "Photos and files"
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: PlusButtonView, context: Context) -> CGSize? { CGSize(width: 31, height: 31) }
 
-    final class PlusButtonView: NSView, PHPickerViewControllerDelegate, NSPopoverDelegate {
+    final class PlusButtonView: NSView, PHPickerViewControllerDelegate {
         var onFiles: (([URL]) -> Void)?
-        var onOpenSettings: (() -> Void)?
-        var tenorKey = ""
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
-        private var gifPopover: NSPopover?
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -244,8 +237,6 @@ struct AttachmentMenuButton: NSViewRepresentable {
         private func showMenu() {
             let menu = NSMenu()
             menu.addItem(item("Photos…", symbol: "photo.on.rectangle", #selector(pickPhotos)))
-            menu.addItem(item("GIFs…", symbol: "gift", #selector(pickGIF)))
-            menu.addItem(.separator())
             menu.addItem(item("Choose File…", symbol: "doc", #selector(chooseFile)))
             // The last item sits just above the button, so the menu opens upward, as in Messages.
             menu.popUp(positioning: menu.items.last, at: NSPoint(x: 0, y: bounds.height + 6), in: self)
@@ -257,23 +248,26 @@ struct AttachmentMenuButton: NSViewRepresentable {
             return item
         }
 
-        /// The system Photos picker, in a popover from this button. It runs out of process and
-        /// needs no library permission; chosen items arrive as temporary files, which are copied
-        /// into Mosaic's outgoing folder before they vanish.
+        /// The system Photos picker, in a popover card from this button, as in Messages. It runs
+        /// out of process and needs no library permission; chosen items arrive as temporary files,
+        /// which are copied into Mosaic's outgoing folder before they vanish. The picker sits in a
+        /// host controller of a fixed size: on its own, the popover shrank to the remote view's
+        /// minimal fitting size.
         @objc private func pickPhotos() {
-            guard let host = window?.contentViewController else { return }
+            guard let presenter = window?.contentViewController else { return }
             var configuration = PHPickerConfiguration()
             configuration.selectionLimit = 0
             configuration.filter = .any(of: [.images, .videos])
             configuration.preferredAssetRepresentationMode = .current
             let picker = PHPickerViewController(configuration: configuration)
             picker.delegate = self
-            picker.preferredContentSize = NSSize(width: 440, height: 540)
-            host.present(picker, asPopoverRelativeTo: bounds, of: self, preferredEdge: .maxY, behavior: .transient)
+            let host = PhotosPickerCard(picker: picker)
+            presenter.present(host, asPopoverRelativeTo: bounds, of: self, preferredEdge: .maxY, behavior: .transient)
         }
         nonisolated func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
             Task { @MainActor in
-                picker.presentingViewController?.dismiss(picker)
+                if let card = picker.parent as? PhotosPickerCard { card.presentingViewController?.dismiss(card) }
+                else { picker.presentingViewController?.dismiss(picker) }
                 guard !results.isEmpty else { return }
                 let urls = await Self.copies(of: results)
                 if !urls.isEmpty { self.onFiles?(urls) }
@@ -295,22 +289,6 @@ struct AttachmentMenuButton: NSViewRepresentable {
             return urls
         }
 
-        /// A GIF search (Tenor) in a popover from this button.
-        @objc private func pickGIF() {
-            gifPopover?.close()
-            let popover = NSPopover()
-            popover.behavior = .transient
-            popover.delegate = self
-            popover.contentSize = NSSize(width: 380, height: 460)
-            let view = GifSearchView(apiKey: tenorKey,
-                onPick: { [weak self, weak popover] url in popover?.close(); self?.onFiles?([url]) },
-                onOpenSettings: { [weak self, weak popover] in popover?.close(); self?.onOpenSettings?() })
-            popover.contentViewController = NSHostingController(rootView: view)
-            popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
-            gifPopover = popover
-        }
-        func popoverDidClose(_ notification: Notification) { gifPopover = nil }
-
         @objc private func chooseFile() {
             guard let window else { return }
             let panel = NSOpenPanel()
@@ -322,6 +300,25 @@ struct AttachmentMenuButton: NSViewRepresentable {
                 self?.onFiles?(panel.urls)
             }
         }
+    }
+}
+
+/// The Photos picker's popover card: a fixed-size host whose only child is the picker.
+final class PhotosPickerCard: NSViewController {
+    static let size = NSSize(width: 420, height: 580)
+    private let picker: PHPickerViewController
+    init(picker: PHPickerViewController) {
+        self.picker = picker
+        super.init(nibName: nil, bundle: nil)
+        preferredContentSize = Self.size
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func loadView() {
+        view = NSView(frame: NSRect(origin: .zero, size: Self.size))
+        addChild(picker)
+        picker.view.frame = view.bounds
+        picker.view.autoresizingMask = [.width, .height]
+        view.addSubview(picker.view)
     }
 }
 

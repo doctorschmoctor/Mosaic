@@ -28,13 +28,7 @@ final class ThinScroller: NSScroller {
     /// has left its action showing. It ends when the swipe is closed again (a sideways gesture
     /// back, or one too short to have opened the action), or with the next click, key press or
     /// vertical scroll. Reported through `onSwipeModeChange`.
-    private(set) var isSwiping = false {
-        didSet {
-            guard isSwiping != oldValue else { return }
-            onSwipeModeChange?(isSwiping)
-            if !isSwiping { NotificationCenter.default.post(name: .thinScrollerSwipeEnded, object: self) }
-        }
-    }
+    private(set) var isSwiping = false { didSet { if isSwiping != oldValue { onSwipeModeChange?(isSwiping) } } }
     var onSwipeModeChange: ((Bool) -> Void)?
     /// A sideways gesture that travels less than this to the left is taken to have snapped back
     /// without opening the action.
@@ -221,32 +215,20 @@ final class ScrollPinner: NSObject {
     }
 }
 
-extension Notification.Name {
-    /// A ThinScroller's sideways swipe ended (the row's action closed); rows re-check the pointer.
-    static let thinScrollerSwipeEnded = Notification.Name("Mosaic.thinScrollerSwipeEnded")
-}
-
 /// Placed inside a SwiftUI ScrollView or List, finds the AppKit scroll view that hosts it and
 /// gives it a ThinScroller. With `hidesForHorizontalSwipes`, a sideways trackpad gesture over the
-/// scroll view (a row's swipe action) keeps the scroller from showing. As a list row's background
-/// it also reports whether the pointer is over the row (`onPointer`), from AppKit tracking of the
-/// row's own frame: SwiftUI's hover tracking lives on the row content, which a swipe slides away
-/// from under the pointer and does not always report again. Invisible and never part of hit
-/// testing or layout.
+/// scroll view (a row's swipe action) keeps the scroller from showing. Invisible and never part
+/// of hit testing or layout.
 struct ThinScrollerInstaller: NSViewRepresentable {
     var hidesForHorizontalSwipes = false
     /// Called as a sideways swipe over the scroll view begins and ends (see `ThinScroller.isSwiping`).
     var onSwipeModeChange: ((Bool) -> Void)? = nil
-    /// Called as the pointer enters (true) and leaves (false) the view's frame, and again when a
-    /// swipe ends, so the row under the pointer is known the moment the swipe closes.
-    var onPointer: ((Bool) -> Void)? = nil
 
     func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); configure(view); return view }
     func updateNSView(_ view: InstallerView, context: Context) { configure(view); view.install() }
     private func configure(_ view: InstallerView) {
         view.watchesSwipes = hidesForHorizontalSwipes
         view.onSwipeModeChange = onSwipeModeChange
-        view.onPointer = onPointer
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
@@ -255,41 +237,13 @@ struct ThinScrollerInstaller: NSViewRepresentable {
     final class InstallerView: NSView {
         var watchesSwipes = false
         var onSwipeModeChange: ((Bool) -> Void)?
-        var onPointer: ((Bool) -> Void)?
         private weak var scrollView: NSScrollView?
-        private var trackingArea: NSTrackingArea?
-        private var swipeObserver: NSObjectProtocol?
 
         override var isOpaque: Bool { false }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             DispatchQueue.main.async { [weak self] in self?.install() }
-            if let swipeObserver { NotificationCenter.default.removeObserver(swipeObserver); self.swipeObserver = nil }
-            guard window != nil else { return }
-            swipeObserver = NotificationCenter.default.addObserver(forName: .thinScrollerSwipeEnded, object: nil, queue: nil) { [weak self] notification in
-                MainActor.assumeIsolated {
-                    guard let self, let scroller = notification.object as? NSScroller, scroller.window === self.window else { return }
-                    self.reportPointer()
-                }
-            }
-        }
-        deinit { if let swipeObserver { NotificationCenter.default.removeObserver(swipeObserver) } }
-
-        override func updateTrackingAreas() {
-            super.updateTrackingAreas()
-            if let trackingArea { removeTrackingArea(trackingArea) }
-            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self, userInfo: nil)
-            addTrackingArea(area)
-            trackingArea = area
-        }
-        override func mouseEntered(with event: NSEvent) { onPointer?(true) }
-        override func mouseExited(with event: NSEvent) { onPointer?(false) }
-        /// Tells the row whether the pointer is over it right now.
-        func reportPointer() {
-            guard let window else { return }
-            let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            onPointer?(bounds.contains(local))
         }
 
         func install() {

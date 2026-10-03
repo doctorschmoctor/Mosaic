@@ -48,13 +48,6 @@ struct SetupView: View {
                     Text(status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
-            step("+", "Search GIFs", "The + button in a composer searches Tenor for GIFs with your own API key, which Google provides free. Searches go to Tenor only while the GIF panel is open.") {
-                HStack {
-                    TextField("Tenor API key", text: Binding(get: { store.tenorKey }, set: { store.tenorKey = $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
-                        .textFieldStyle(.roundedBorder).frame(width: 300)
-                    Link("Get a key", destination: TenorClient.keyHelpURL)
-                }
-            }
             if let error = store.connectionError { Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
             Divider()
             HStack {

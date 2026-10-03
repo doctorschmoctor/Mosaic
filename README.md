@@ -10,7 +10,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 - **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
-- **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, search GIFs, or choose a file. They go out through Messages like anything else.
+- **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them.
 - **Media and links** — Photo and video thumbnails, file chips, and link previews, all sized before they load so nothing jumps.
 - **Contact names** — Phone numbers and addresses become names with Contacts access. Names stay in memory.
@@ -38,7 +38,6 @@ Mosaic launches with an empty workspace. Press **Connect Messages** there (or op
 2. **Connect** — Mosaic reads the conversations synced to Messages on this Mac and follows the database for changes.
 3. **Sending** — Your first send asks permission to control Messages. Allow it, or enable Mosaic › Messages under Privacy & Security › Automation.
 4. **Contacts** (optional) — Allow Contacts access to see names instead of numbers.
-5. **GIFs** (optional) — Paste a free [Tenor API key](https://developers.google.com/tenor/guides/quickstart) into Settings to search GIFs from the + button.
 
 Messages must already be signed in. SMS/RCS availability follows your Messages setup.
 
@@ -48,7 +47,7 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 |---|---|
 | **⌘N** | New message |
 | **⌘F** | Find a conversation — **Return** opens the first match, **↓** moves into the list, **Esc** clears |
-| **⌘L** | Conversation list — **↑ ↓** move, **Return** opens or focuses, **⌫** closes the row's tile, **Esc** back to the composer |
+| **⌘L** | Conversation list — **↑ ↓** move the highlight, **Return** opens or focuses, **⌫** closes the row's tile, **Esc** back to the composer |
 | **Tab / ⇧Tab** | Next / previous tile |
 | **Return** | Send · **⇧Return** inserts a line break |
 | **Esc** | Close a New Message tile |
@@ -61,11 +60,11 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 
 ## Mouse and trackpad
 
-- Click a conversation to open it or focus its tile; double-click an open one to close the tile. A grid icon marks open conversations. One row is highlighted at a time — the one under the pointer, or the keyboard's.
+- Click a conversation to open it or focus its tile; double-click an open one to close the tile. A grid icon marks open conversations. Rows are highlighted only while the keyboard is on the list (⌘L); the pointer highlights nothing.
 - Swipe a row left (or right-click it) to delete the conversation from Mosaic. It stays in Messages and returns with its next message.
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
-- The **+** button at the left of the composer offers Photos, GIFs and files; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
+- The **+** button at the left of the composer opens your Photos library or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
 - Click a photo or video to open it; right-click for Finder. Right-click a bubble to copy its text or open its links.
 - **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
 
@@ -83,7 +82,7 @@ Mosaic covers existing conversations and text replies. It reads `~/Library/Messa
 
 ## Privacy
 
-Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts, locally, in UserDefaults; pictures you paste wait in `~/Library/Application Support/Mosaic/Outgoing` until sent. Mosaic's only network requests are link previews and, if you add a Tenor key, GIF searches while the GIF panel is open. There is no analytics, backend or upload code. The demo workspace uses fictional data.
+Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts, locally, in UserDefaults; pictures you paste wait in `~/Library/Application Support/Mosaic/Outgoing` until sent. Fetching a link preview is the only network request it makes. There is no analytics, backend or upload code. The demo workspace uses fictional data.
 
 ## Development
 

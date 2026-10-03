@@ -6,8 +6,8 @@ import MosaicCore
 
 /// The To field of a new-message tile: chosen people as chips, a text field that suggests contacts
 /// and existing conversations (including groups) as you type, and the suggestions below it. The
-/// list is driven by the mouse (hover highlights, click chooses) and the keyboard (arrows move,
-/// Return chooses, Backspace in an empty field removes the last person).
+/// list is driven by the keyboard (arrows move the highlight, Return chooses, Backspace in an empty
+/// field removes the last person) and the mouse (click chooses; no hover highlight).
 struct RecipientField: View {
     static let lineHeight: CGFloat = 22
     @Environment(WorkspaceStore.self) private var store
@@ -103,7 +103,6 @@ struct RecipientField: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { inside in if inside { selection = index } }
     }
 
     /// The typed text in blue inside a name, as Messages does.

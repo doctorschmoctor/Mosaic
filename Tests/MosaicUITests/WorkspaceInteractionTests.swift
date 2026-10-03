@@ -187,33 +187,15 @@ final class WorkspaceInteractionTests: XCTestCase {
         store.activateSidebarSelection()
         XCTAssertEqual(store.workspace.focusedID, open[0])
         XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
-        // One highlight: the pointer's row, which also becomes the keyboard's row while the list
-        // has the keyboard; a swipe that starts on the highlighted row hides its highlight until
-        // the swipe is closed.
-        var pointer = NSPoint(x: 123.5, y: 456.25)
-        store.pointerLocation = { pointer }
-        store.hoverSidebarRow(rows[2])
-        XCTAssertEqual(store.sidebarSelection, rows[2])
-        XCTAssertEqual(store.highlightedSidebarRow, rows[2])
-        store.moveSidebarSelection(by: 1)
-        XCTAssertEqual(store.highlightedSidebarRow, rows[3], "the keyboard's row is the one highlight, not the pointer's")
-        store.hoverSidebarRow(rows[2])
-        XCTAssertEqual(store.sidebarSelection, rows[3], "the pointer has not moved since the keyboard chose a row: the list scrolled under it")
-        pointer.x += 1
-        store.hoverSidebarRow(rows[2])
-        XCTAssertEqual(store.sidebarSelection, rows[2], "once the pointer moves, its row is the keyboard's row")
+        // The one highlight is the keyboard's row; a swipe hides it until the swipe is closed.
+        XCTAssertEqual(store.highlightedSidebarRow, open[0])
         store.setSidebarSwiping(true)
-        XCTAssertEqual(store.sidebarSwipedRow, rows[2])
-        store.sidebarSelection = nil
-        XCTAssertNil(store.highlightedSidebarRow, "the swiped row shows no highlight")
-        store.hoverSidebarRow(rows[1])
-        XCTAssertEqual(store.highlightedSidebarRow, rows[1], "other rows still highlight under the pointer")
+        XCTAssertNil(store.highlightedSidebarRow, "no highlight sits against a row's swipe action")
+        XCTAssertEqual(store.sidebarSelection, open[0], "the keyboard's row itself is kept")
         store.setSidebarSwiping(false)
-        store.hoverSidebarRow(rows[2])
-        XCTAssertEqual(store.highlightedSidebarRow, rows[2], "the swipe closed: the row highlights again")
-        store.leaveSidebarRow(rows[2])
+        XCTAssertEqual(store.highlightedSidebarRow, open[0], "the swipe closed: the highlight is back")
+        store.sidebarSelection = nil
         XCTAssertNil(store.highlightedSidebarRow)
-        XCTAssertNil(store.sidebarSelection, "the pointer never gives the list the keyboard by itself")
         // A search narrows the rows the keyboard moves through; Return in search opens the first match.
         store.sidebarSelection = nil
         store.search = "Riley"

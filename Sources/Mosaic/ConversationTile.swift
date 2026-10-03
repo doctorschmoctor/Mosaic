@@ -110,10 +110,8 @@ struct ConversationTile: View {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                // Photos, GIFs and files, as in Messages.
-                AttachmentMenuButton(conversationName: conversation.name, tenorKey: store.tenorKey,
-                    onFiles: { urls in store.attach(urls, to: conversation.id) },
-                    onOpenSettings: { store.showSetup = true })
+                // Photos and files, as in Messages.
+                AttachmentMenuButton(conversationName: conversation.name, onFiles: { urls in store.attach(urls, to: conversation.id) })
                     .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
                 VStack(spacing: 0) {
                     if let files = store.outgoing[conversation.id], !files.isEmpty {

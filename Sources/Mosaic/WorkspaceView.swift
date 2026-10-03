@@ -105,11 +105,10 @@ struct WorkspaceView: View {
                             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
                             .listRowSeparator(.hidden)
                             // Inside the list's scroll view: gives it the slim scroller the tiles have,
-                            // one that does not thicken under the pointer or appear for a swipe, tells
-                            // the rows while a swipe is under way, and tracks the pointer over the row.
+                            // one that does not thicken under the pointer or appear for a swipe, and
+                            // tells the rows while a swipe is under way.
                             .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true,
-                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
-                                onPointer: { inside in inside ? store.hoverSidebarRow(conversation.id) : store.leaveSidebarRow(conversation.id) }))
+                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) }))
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                     .tint(.red)
@@ -287,7 +286,7 @@ struct ConversationRow: View {
     private var isOpen: Bool { store.openIDs.contains(conversation.id) }
     /// The keyboard is on this row (the list has keyboard focus: ⌘L or ↓ from the search field).
     private var isSelected: Bool { store.sidebarSelection == conversation.id }
-    /// The one highlighted row: the pointer's, or the keyboard's (see `WorkspaceStore.highlightedSidebarRow`).
+    /// The one highlighted row: the keyboard's, except during a swipe. The pointer highlights nothing.
     private var isHighlighted: Bool { store.highlightedSidebarRow == conversation.id }
 
     var body: some View {
@@ -304,9 +303,9 @@ struct ConversationRow: View {
                     Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
-                // An open conversation is marked by the grid icon alone. The highlighted row — the
-                // one under the pointer, or the keyboard's — gets a light wash, rounded like a
-                // Messages row and reaching a little past the row's content on the trailing side.
+                // An open conversation is marked by the grid icon alone. The keyboard's row gets a
+                // light wash, rounded like a Messages row and reaching a little past the row's
+                // content on the trailing side.
                 .background {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(isHighlighted ? Color.primary.opacity(0.06) : Color.clear)
