@@ -38,6 +38,7 @@ Mosaic launches with an empty workspace. Press **Connect Messages** there (or op
 2. **Connect** — Mosaic reads the conversations synced to Messages on this Mac and follows the database for changes.
 3. **Sending** — Your first send asks permission to control Messages. Allow it, or enable Mosaic › Messages under Privacy & Security › Automation.
 4. **Contacts** (optional) — Allow Contacts access to see names instead of numbers.
+5. **Photos** (optional) — The first time you open the + button's Photos grid, macOS asks to let Mosaic see your library.
 
 Messages must already be signed in. SMS/RCS availability follows your Messages setup.
 
@@ -64,7 +65,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 - Swipe a row left (or right-click it) to delete the conversation from Mosaic. It stays in Messages and returns with its next message.
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
-- The **+** button at the left of the composer opens your Photos library or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
+- The **+** button at the left of the composer opens a grid of your Photos library (newest first; click to choose, **Add** to attach) or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
 - Click a photo or video to open it; right-click to copy it, save it to Downloads or elsewhere, or show it in Finder. Right-click a bubble to copy its text or open its links.
 - **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
 

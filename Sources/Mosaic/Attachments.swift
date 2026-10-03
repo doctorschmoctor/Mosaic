@@ -1,7 +1,7 @@
 import SwiftUI
 import AppKit
 import ImageIO
-import PhotosUI
+import Photos
 import QuickLookThumbnailing
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
@@ -135,7 +135,7 @@ enum OutgoingFiles {
         case files([URL])
         case picture(Data, UTType)
     }
-    private static func stamp() -> String {
+    static func stamp() -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss.SSS"
         return formatter.string(from: Date())
@@ -211,7 +211,7 @@ struct OutgoingThumbnail: View {
 // MARK: - The + button
 
 /// The round + button at the left of a composer, as in Messages. Its menu offers the Photos
-/// library (the system picker, in a popover card) and a file chooser. An AppKit view, so the
+/// library (Mosaic's own grid, in a popover card) and a file chooser. An AppKit view, so the
 /// picker has a real view to anchor its popover to.
 struct AttachmentMenuButton: NSViewRepresentable {
     let conversationName: String
@@ -233,13 +233,14 @@ struct AttachmentMenuButton: NSViewRepresentable {
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: PlusButtonView, context: Context) -> CGSize? { CGSize(width: 31, height: 31) }
 
-    final class PlusButtonView: NSView, PHPickerViewControllerDelegate {
+    final class PlusButtonView: NSView, NSPopoverDelegate {
         var onFiles: (([URL]) -> Void)?
         var onBeginAdding: ((Int) -> Void)?
         var onAdded: ((URL?) -> Void)?
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
+        private var photosPopover: NSPopover?
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -288,47 +289,32 @@ struct AttachmentMenuButton: NSViewRepresentable {
             return item
         }
 
-        /// The system Photos picker, in a popover card from this button, as in Messages. It runs
-        /// out of process and needs no library permission; chosen items arrive as temporary files,
-        /// which are copied into Mosaic's outgoing folder before they vanish. The picker sits in a
-        /// host controller of a fixed size: on its own, the popover shrank to the remote view's
-        /// minimal fitting size.
+        /// Mosaic's Photos grid, in a popover card from this button. Chosen pictures show up in the
+        /// composer behind placeholders at once and are written out all at the same time.
         @objc private func pickPhotos() {
-            guard let presenter = window?.contentViewController else { return }
-            var configuration = PHPickerConfiguration()
-            configuration.selectionLimit = 0
-            configuration.filter = .any(of: [.images, .videos])
-            configuration.preferredAssetRepresentationMode = .current
-            let picker = PHPickerViewController(configuration: configuration)
-            picker.delegate = self
-            let host = PhotosPickerCard(picker: picker)
-            presenter.present(host, asPopoverRelativeTo: bounds, of: self, preferredEdge: .maxY, behavior: .transient)
+            photosPopover?.close()
+            let popover = NSPopover()
+            popover.behavior = .transient
+            popover.delegate = self
+            popover.contentSize = PhotoLibraryPickerView.size
+            let view = PhotoLibraryPickerView(
+                onCancel: { [weak popover] in popover?.close() },
+                onAdd: { [weak self, weak popover] assets in
+                    popover?.close()
+                    guard let self, !assets.isEmpty else { return }
+                    self.onBeginAdding?(assets.count)
+                    Task { @MainActor in
+                        await withTaskGroup(of: URL?.self) { group in
+                            for asset in assets { group.addTask { await PhotoLibraryExport.file(for: asset) } }
+                            for await url in group { self.onAdded?(url) }
+                        }
+                    }
+                })
+            popover.contentViewController = NSHostingController(rootView: view)
+            popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
+            photosPopover = popover
         }
-        nonisolated func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-            Task { @MainActor in
-                if let card = picker.parent as? PhotosPickerCard { card.presentingViewController?.dismiss(card) }
-                else { picker.presentingViewController?.dismiss(picker) }
-                guard !results.isEmpty else { return }
-                // Placeholders at once; the files are fetched all at the same time and each shows
-                // up as soon as it lands.
-                self.onBeginAdding?(results.count)
-                await withTaskGroup(of: URL?.self) { group in
-                    for result in results { group.addTask { await Self.file(for: result) } }
-                    for await url in group { self.onAdded?(url) }
-                }
-            }
-        }
-        /// A picked item's file, kept while its representation exists (it is only valid inside the
-        /// handler). The current representation is asked for, so nothing is transcoded.
-        nonisolated private static func file(for result: PHPickerResult) async -> URL? {
-            let provider = result.itemProvider
-            let type = [UTType.image, .movie].first { provider.hasItemConformingToTypeIdentifier($0.identifier) } ?? .data
-            return await withCheckedContinuation { continuation in
-                provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
-                    continuation.resume(returning: url.flatMap { try? OutgoingFiles.keep($0) })
-                }
-            }
-        }
+        func popoverDidClose(_ notification: Notification) { photosPopover = nil }
 
         @objc private func chooseFile() {
             guard let window else { return }
@@ -341,27 +327,6 @@ struct AttachmentMenuButton: NSViewRepresentable {
                 self?.onFiles?(panel.urls)
             }
         }
-    }
-}
-
-/// The Photos picker's popover card: a fixed-size host whose only child is the picker. The card
-/// is as narrow as Messages' — the picker adds a sidebar of albums once it is wider, which
-/// squeezes the grid and its buttons.
-final class PhotosPickerCard: NSViewController {
-    static let size = NSSize(width: 356, height: 560)
-    private let picker: PHPickerViewController
-    init(picker: PHPickerViewController) {
-        self.picker = picker
-        super.init(nibName: nil, bundle: nil)
-        preferredContentSize = Self.size
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    override func loadView() {
-        view = NSView(frame: NSRect(origin: .zero, size: Self.size))
-        addChild(picker)
-        picker.view.frame = view.bounds
-        picker.view.autoresizingMask = [.width, .height]
-        view.addSubview(picker.view)
     }
 }
 

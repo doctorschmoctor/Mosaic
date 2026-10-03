@@ -15,4 +15,5 @@
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSAppleEventsUsageDescription</key><string>Mosaic controls Messages to send the text you write to the conversation you choose.</string>
     <key>NSContactsUsageDescription</key><string>Mosaic uses contact names to label your conversations. Names remain on your Mac.</string>
+    <key>NSPhotoLibraryUsageDescription</key><string>Mosaic shows your photo library so you can add pictures to a message. Nothing in Photos is changed.</string>
 </dict></plist>

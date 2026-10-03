@@ -143,6 +143,21 @@ final class AttachmentTests: XCTestCase {
         XCTAssertNil(store.outgoingLoading["not-open"])
     }
 
+    /// The Photos grid's selection keeps the order chosen, and a video's length reads as in Photos.
+    @MainActor func testPhotoLibrarySelectionOrderAndDurations() {
+        let model = PhotoLibraryModel()
+        XCTAssertTrue(model.selectedIDs.isEmpty)
+        model.toggle("b"); model.toggle("a"); model.toggle("c")
+        XCTAssertEqual(model.selectedIDs, ["b", "a", "c"])
+        XCTAssertTrue(model.isSelected("a"))
+        model.toggle("a")
+        XCTAssertEqual(model.selectedIDs, ["b", "c"])
+        XCTAssertFalse(model.isSelected("a"))
+        XCTAssertEqual(PhotoLibraryModel.duration(9), "0:09")
+        XCTAssertEqual(PhotoLibraryModel.duration(754), "12:34")
+        XCTAssertEqual(PhotoLibraryModel.duration(3725), "1:02:05")
+    }
+
     /// Saving a received picture to Downloads never overwrites: the name gets a number.
     func testSavedAttachmentNamesDoNotCollide() throws {
         let folder = try temporaryDirectory()
