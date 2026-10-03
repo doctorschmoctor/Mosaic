@@ -72,6 +72,30 @@ final class ChromeAndHandleTests: XCTestCase {
         }
     }
 
+    @MainActor func testWindowDragRegionMovesANonMovableWindowByThePointersTravel() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isMovable = false
+        let region = WindowDragRegion.DragView(frame: NSRect(x: 0, y: 0, width: 600, height: 52))
+        window.contentView?.addSubview(region)
+        region.beginManualDrag(from: NSPoint(x: 500, y: 500))
+        region.moveWindow(to: NSPoint(x: 520, y: 480))
+        XCTAssertEqual(window.frame.origin, NSPoint(x: 120, y: 80))
+        region.moveWindow(to: NSPoint(x: 400, y: 600))
+        XCTAssertEqual(window.frame.origin, NSPoint(x: 0, y: 200))
+        XCTAssertEqual(window.frame.size, NSSize(width: 600, height: 400))
+    }
+
+    @MainActor func testHeaderHandleTrackingEndsOnRelease() {
+        let handle = TileHeaderHandle.HandleView()
+        let window = makeWindow(handle, size: NSSize(width: 320, height: 54))
+        XCTAssertFalse(handle.isTracking)
+        click(handle, at: CGPoint(x: 60, y: 27), in: window, drag: CGPoint(x: 120, y: 27))
+        XCTAssertFalse(handle.isTracking, "a release ends the press whether or not it dragged")
+        click(handle, at: CGPoint(x: 60, y: 27), in: window)
+        XCTAssertFalse(handle.isTracking)
+    }
+
     @MainActor func testTileHeaderHandleTellsCloseClicksFromFocusClicksAndDrags() {
         let handle = TileHeaderHandle.HandleView()
         let window = makeWindow(handle, size: NSSize(width: 320, height: 54))

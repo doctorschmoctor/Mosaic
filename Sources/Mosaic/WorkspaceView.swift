@@ -36,7 +36,7 @@ struct WorkspaceView: View {
         HStack(spacing: 0) {
             sidebar.frame(width: 256)
                 // The strip above the sidebar (where the window controls are) moves the window.
-                .overlay(alignment: .top) { WindowDragRegion().frame(height: Self.titleBarHeight) }
+                .overlay(alignment: .top) { TitleBarDragArea().frame(height: Self.titleBarHeight) }
             Divider()
             VStack(spacing: 0) {
                 if let banner = store.banner {
@@ -58,8 +58,11 @@ struct WorkspaceView: View {
                     TileWorkspace().padding(Self.tileAreaMargin)
                     if store.tiles.isEmpty { emptyWorkspace }
                 }
-                .background(WindowDragRegion(limitedToTitleBar: true))
-            }.background(Palette.canvas)
+            }
+            // Behind everything in the right pane, only as tall as the strip: a press there that no
+            // tile header, chip or divider takes moves the window.
+            .background(alignment: .top) { TitleBarDragArea().frame(height: Self.titleBarHeight) }
+            .background(Palette.canvas)
         }
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(name: "workspace")
@@ -140,11 +143,19 @@ enum WindowChrome {
     }
 }
 
-/// A transparent view that moves the window when dragged and zooms it on a double-click, standing in
-/// for the automatic title-bar dragging that `WindowChrome` turns off. With `limitedToTitleBar`, only
-/// presses within the window's top `titleBarHeight` points are taken; elsewhere the view is
-/// invisible to hit testing, so tile content below the strip is untouched. Views stacked above it
-/// (tile header handles, focus chips) keep their own presses.
+/// The part of the title-bar strip that moves the window, standing in for the automatic dragging
+/// that `WindowChrome` turns off. It is an AppKit view (`WindowDragRegion`) so that it takes only
+/// presses no tile header handle or focus chip above it claims.
+struct TitleBarDragArea: View {
+    var body: some View { WindowDragRegion() }
+}
+
+/// A transparent AppKit view that moves the window when dragged and zooms it on a double-click.
+/// With `limitedToTitleBar`, only presses within the window's top `titleBarHeight` points are taken;
+/// elsewhere the view is invisible to hit testing, so content below the strip is untouched.
+/// AppKit's own `performDrag(with:)` is tried first (it snaps to screen edges); if the system
+/// declines it because the window is not user-movable, the frame is moved directly, which Apple
+/// documents as the way to drag a non-movable window.
 struct WindowDragRegion: NSViewRepresentable {
     var limitedToTitleBar = false
 
@@ -174,11 +185,44 @@ struct WindowDragRegion: NSViewRepresentable {
             if limitedToTitleBar && !isInTitleBarStrip(local) { return nil }
             return self
         }
+        private var monitor: Any?
+        private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+
         override func mouseDown(with event: NSEvent) {
             guard let window else { return }
+            endTracking()
             if event.clickCount == 2 { Self.performTitleBarDoubleClick(on: window); return }
+            let before = window.frame.origin
             window.performDrag(with: event)
+            // performDrag runs until the mouse is released when AppKit honors it. If it returned at
+            // once with the button still down, it was declined: follow the press ourselves.
+            guard NSEvent.pressedMouseButtons & 1 != 0, window.frame.origin == before else { return }
+            beginManualDrag(from: NSEvent.mouseLocation)
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+                guard let self else { return event }
+                if event.type == .leftMouseUp { self.endTracking(); return event }
+                self.moveWindow(to: NSEvent.mouseLocation)
+                return event
+            }
         }
+        override func mouseDragged(with event: NSEvent) { if dragStart != nil { moveWindow(to: NSEvent.mouseLocation) } }
+        override func mouseUp(with event: NSEvent) { endTracking() }
+        /// Starts following the pointer (screen coordinates) with the window's current origin.
+        func beginManualDrag(from mouse: NSPoint) {
+            guard let window else { return }
+            dragStart = (mouse, window.frame.origin)
+        }
+        /// Moves the window by the pointer's travel since the press (screen coordinates).
+        func moveWindow(to mouse: NSPoint) {
+            guard let window, let start = dragStart else { return }
+            window.setFrameOrigin(NSPoint(x: start.origin.x + mouse.x - start.mouse.x, y: start.origin.y + mouse.y - start.mouse.y))
+        }
+        private func endTracking() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            dragStart = nil
+        }
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
         /// The action System Settings assigns to a double-click on a title bar.
         static func performTitleBarDoubleClick(on window: NSWindow, action: String? = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick")) {
             switch action {

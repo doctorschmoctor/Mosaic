@@ -99,15 +99,51 @@ struct TileHeaderHandle: NSViewRepresentable {
 
         /// True when the point (in this view's coordinates) is on the close target.
         func isOnClose(_ point: NSPoint) -> Bool { closeRect.contains(point) }
+        /// True between a press and its release.
+        var isTracking: Bool { pressOrigin != nil }
+
+        // The press is followed with a local event monitor rather than mouseDragged/mouseUp alone:
+        // raising the dragged tile re-inserts this view in the window's view tree, and AppKit stops
+        // delivering drag events to a view that left the window mid-press. The monitor keeps
+        // receiving them, so the first tiles in the order drag as freely as the last one.
+        private var monitor: Any?
+        private weak var pressWindow: NSWindow?
+        private weak var handledEvent: NSEvent?
 
         override func mouseDown(with event: NSEvent) {
             if dragging { dragging = false; NSCursor.pop(); onDragEnded?() } // a release that never arrived
+            endTracking()
             pressOrigin = event.locationInWindow
+            pressWindow = event.window ?? window
             pressedClose = isOnClose(convert(event.locationInWindow, from: nil))
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
+                guard let self, event.window === self.pressWindow else { return event }
+                self.handledEvent = event
+                switch event.type {
+                case .leftMouseDragged: self.drag(to: event.locationInWindow)
+                case .leftMouseUp: self.release(at: event.locationInWindow)
+                default: break
+                }
+                return event
+            }
         }
         override func mouseDragged(with event: NSEvent) {
+            guard event !== handledEvent else { return }
+            drag(to: event.locationInWindow)
+        }
+        override func mouseUp(with event: NSEvent) {
+            guard event !== handledEvent else { return }
+            release(at: event.locationInWindow)
+        }
+        private func endTracking() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            pressWindow = nil
+        }
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+
+        private func drag(to location: NSPoint) {
             guard let origin = pressOrigin, !pressedClose else { return }
-            let location = event.locationInWindow
             // Window coordinates grow upward; the tile canvas grows downward.
             let translation = CGSize(width: location.x - origin.x, height: origin.y - location.y)
             if !dragging {
@@ -117,11 +153,11 @@ struct TileHeaderHandle: NSViewRepresentable {
             }
             onDragChanged?(translation)
         }
-        override func mouseUp(with event: NSEvent) {
-            defer { pressOrigin = nil; pressedClose = false }
+        private func release(at location: NSPoint) {
+            defer { pressOrigin = nil; pressedClose = false; endTracking() }
             if dragging { dragging = false; NSCursor.pop(); onDragEnded?(); return }
             guard pressOrigin != nil else { return }
-            let point = convert(event.locationInWindow, from: nil)
+            let point = convert(location, from: nil)
             if pressedClose {
                 // Like a button: the press must end on the target to count.
                 if isOnClose(point) { onClose?() }
