@@ -74,7 +74,10 @@ struct ConversationTile: View {
                 .accessibilityHidden(true)
         }
         .font(.system(size: 11)).padding(.leading, 14).padding(.trailing, TileHeaderHandle.closeInset).padding(.vertical, 12)
-        .background(TileHeaderHandle(draggable: onDragChanged != nil, closeLabel: "Close \(conversation.name) tile",
+        // The handle is an overlay, not a background: SwiftUI content above an AppKit view takes the
+        // clicks (and, on the title-bar strip, lets the window move). Covering the whole header with
+        // the transparent handle makes every press — on the name, the avatar or the × — reach it.
+        .overlay(TileHeaderHandle(draggable: onDragChanged != nil, closeLabel: "Close \(conversation.name) tile",
             onDragChanged: { onDragChanged?($0) }, onDragEnded: { onDragEnded?() },
             onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) },
             onCloseHover: { hovered in if closeHovered != hovered { closeHovered = hovered } }))

@@ -4,8 +4,10 @@ import AppKit
 /// The tile header's mouse handling, done in AppKit so it keeps working inside the window's title
 /// bar strip. macOS asks the view under the pointer whether a press should move the window; this view
 /// says no, so presses reach it (the same mechanism Electron apps use to put controls on the row with
-/// the window buttons). It drags the tile, focuses it on a click, and owns the close button's hit area;
-/// the × glyph itself is drawn by SwiftUI on top, so it always looks like the rest of the header.
+/// the window buttons). It drags the tile, focuses it on a click, and owns the close button's hit area.
+/// It is laid over the header (transparent, drawing nothing): SwiftUI content stacked above an AppKit
+/// view takes the clicks itself, so the × glyph and the name are drawn underneath and only the
+/// handle is hit-tested. The glyph's frame matches `closeRect`.
 struct TileHeaderHandle: NSViewRepresentable {
     /// Size of the close target and its distance from the header's trailing edge; the SwiftUI glyph
     /// uses the same numbers so the hit area and the drawing coincide.
