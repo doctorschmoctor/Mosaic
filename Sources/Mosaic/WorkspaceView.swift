@@ -82,6 +82,7 @@ struct WorkspaceView: View {
             keyboard.attach(window: window, store: store)
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
+        .alert(item: $store.alert) { alert in Alert(title: Text(alert.title), message: Text(alert.message)) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
 

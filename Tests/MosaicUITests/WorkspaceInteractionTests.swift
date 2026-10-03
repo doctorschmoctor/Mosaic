@@ -97,7 +97,7 @@ final class WorkspaceInteractionTests: XCTestCase {
         // A full workspace cannot start a new message.
         for id in store.conversations.map(\.id) where !store.workspace.openIDs.contains(id) && store.workspace.openIDs.count < Workspace.maximumTiles { store.open(id) }
         XCTAssertNil(store.beginNewChat())
-        XCTAssertNotNil(store.banner)
+        XCTAssertNotNil(store.alert, "a full workspace explains itself in an alert")
     }
 
     @MainActor func testKeyboardTraversalSkipsNothingAndWrapsAround() {

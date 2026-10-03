@@ -28,6 +28,8 @@ import MosaicCore
     var isLive = false
     var connectionError: String?
     var banner: String?
+    /// A modal message for something that cannot be done right now.
+    var alert: WorkspaceAlert?
     var sendingIDs = Set<String>()
     var sendErrors: [String: String] = [:]
     var showSetup = false
@@ -408,7 +410,8 @@ import MosaicCore
     /// found or created when the first message is sent.
     @discardableResult func beginNewChat() -> String? {
         guard openIDs.count < Workspace.maximumTiles else {
-            banner = "Close a tile to start a new message."
+            alert = WorkspaceAlert(title: "Mosaic shows up to \(Workspace.maximumTiles) conversations",
+                                   message: "Close a tile to start a new message.")
             return nil
         }
         let id = "new-\(UUID().uuidString)"
@@ -671,6 +674,12 @@ import MosaicCore
         if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id))) }
         workspace = state
     }
+}
+
+struct WorkspaceAlert: Identifiable, Equatable {
+    let title: String
+    let message: String
+    var id: String { title + message }
 }
 
 /// A message being addressed in a new-message tile.
