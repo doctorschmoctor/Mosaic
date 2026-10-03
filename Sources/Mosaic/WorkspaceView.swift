@@ -22,11 +22,11 @@ enum Palette {
 }
 
 struct WorkspaceView: View {
-    /// Height of the window-control strip (traffic lights). The tile area starts below it, so no tile
-    /// header sits in the draggable title-bar region — that is what made a header drag move the whole
-    /// window and swallow clicks on the × and focus chips.
+    /// Height of the window-control strip (traffic lights). Tiles reach up into it; the window itself
+    /// is moved only by `WindowDragRegion` (the empty parts of the strip), never by AppKit's automatic
+    /// title-bar dragging, which is off (`WindowChrome`).
     static let titleBarHeight: CGFloat = 52
-    /// Space between the tile area's edges and the tiles, the same on every side.
+    /// Space between the window edge and the tile area, the same on every side.
     static let tileAreaMargin: CGFloat = 8
     @EnvironmentObject private var store: WorkspaceStore
     @FocusState private var searchFocused: Bool
@@ -35,14 +35,13 @@ struct WorkspaceView: View {
     var body: some View {
         HStack(spacing: 0) {
             sidebar.frame(width: 256)
+                // The strip above the sidebar (where the window controls are) moves the window.
+                .overlay(alignment: .top) { WindowDragRegion().frame(height: Self.titleBarHeight) }
             Divider()
             VStack(spacing: 0) {
-                // The title-bar strip: window background, nothing over it, so dragging it moves the
-                // window as a title bar should. Tiles live below it.
-                Color.clear.frame(height: Self.titleBarHeight)
                 if let banner = store.banner {
                     HStack { Text(banner).font(.callout); Spacer(); Button { store.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
-                        .padding(12).background(Palette.accent.opacity(0.08))
+                        .padding(12).padding(.top, Self.titleBarHeight - 12).background(Palette.accent.opacity(0.08))
                 }
                 if let error = store.connectionError {
                     HStack(spacing: 12) {
@@ -51,12 +50,15 @@ struct WorkspaceView: View {
                         Spacer()
                         Button("Set up") { store.showSetup = true }
                         Button("Retry") { Task { await store.refresh() } }
-                    }.padding(14).background(Color.orange.opacity(0.08))
+                    }.padding(14).padding(.top, Self.titleBarHeight - 14).background(Color.orange.opacity(0.08))
                 }
                 ZStack {
-                    TileWorkspace().padding([.horizontal, .bottom], Self.tileAreaMargin).padding(.top, Self.tileAreaMargin)
+                    // Tiles reach up into the title-bar strip; their headers handle their own mouse
+                    // events there. The empty parts of the strip (margins, gaps) move the window.
+                    TileWorkspace().padding(Self.tileAreaMargin)
                     if store.tiles.isEmpty { emptyWorkspace }
                 }
+                .background(WindowDragRegion(limitedToTitleBar: true))
             }.background(Palette.canvas)
         }
         .ignoresSafeArea(.container, edges: .top)
@@ -110,6 +112,11 @@ struct WorkspaceView: View {
 /// gives the bar Messages' height and brings the window controls in from the corner; doing this with
 /// a SwiftUI toolbar item put a nested hosting view in the title bar, and that view's constraint
 /// updates could loop until AppKit raised an exception (the "fails to load history" crash).
+///
+/// AppKit's automatic dragging is turned off (`isMovable = false`): in the title-bar region macOS
+/// otherwise moves the window on any press, whatever the view under the pointer says, which is what
+/// made a tile-header drag move the whole window. `WindowDragRegion` moves the window instead, from
+/// the parts of the strip that hold no tile.
 enum WindowChrome {
     static let toolbarIdentifier = NSToolbar.Identifier("MosaicTitleBarSpacer")
 
@@ -119,6 +126,7 @@ enum WindowChrome {
         window.titlebarAppearsTransparent = true
         window.titlebarSeparatorStyle = .none
         window.styleMask.insert(.fullSizeContentView)
+        window.isMovable = false
         window.isMovableByWindowBackground = false
         if window.toolbar?.identifier != toolbarIdentifier {
             let toolbar = NSToolbar(identifier: toolbarIdentifier)
@@ -129,6 +137,56 @@ enum WindowChrome {
         }
         window.toolbarStyle = .unified
         window.toolbar?.isVisible = true
+    }
+}
+
+/// A transparent view that moves the window when dragged and zooms it on a double-click, standing in
+/// for the automatic title-bar dragging that `WindowChrome` turns off. With `limitedToTitleBar`, only
+/// presses within the window's top `titleBarHeight` points are taken; elsewhere the view is
+/// invisible to hit testing, so tile content below the strip is untouched. Views stacked above it
+/// (tile header handles, focus chips) keep their own presses.
+struct WindowDragRegion: NSViewRepresentable {
+    var limitedToTitleBar = false
+
+    func makeNSView(context: Context) -> DragView { let view = DragView(); view.limitedToTitleBar = limitedToTitleBar; return view }
+    func updateNSView(_ view: DragView, context: Context) { view.limitedToTitleBar = limitedToTitleBar }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: DragView, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    final class DragView: NSView {
+        var limitedToTitleBar = false
+
+        override var isFlipped: Bool { true }
+        override var mouseDownCanMoveWindow: Bool { false }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        /// Whether a point (in this view's coordinates) is within the window's title-bar strip.
+        func isInTitleBarStrip(_ local: NSPoint) -> Bool {
+            guard let content = window?.contentView else { return false }
+            let inContent = convert(local, to: content)
+            let fromTop = content.isFlipped ? inContent.y : content.bounds.height - inContent.y
+            return fromTop <= WorkspaceView.titleBarHeight
+        }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            let local = superview.map { convert(point, from: $0) } ?? point
+            guard bounds.contains(local) else { return nil }
+            if limitedToTitleBar && !isInTitleBarStrip(local) { return nil }
+            return self
+        }
+        override func mouseDown(with event: NSEvent) {
+            guard let window else { return }
+            if event.clickCount == 2 { Self.performTitleBarDoubleClick(on: window); return }
+            window.performDrag(with: event)
+        }
+        /// The action System Settings assigns to a double-click on a title bar.
+        static func performTitleBarDoubleClick(on window: NSWindow, action: String? = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick")) {
+            switch action {
+            case "Minimize": window.miniaturize(nil)
+            case "None": break
+            default: window.performZoom(nil)
+            }
+        }
     }
 }
 

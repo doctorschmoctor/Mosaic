@@ -41,11 +41,35 @@ final class ChromeAndHandleTests: XCTestCase {
         XCTAssertEqual(window.titleVisibility, .hidden)
         XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
+        XCTAssertFalse(window.isMovable, "AppKit's title-bar dragging is off; WindowDragRegion moves the window")
         XCTAssertFalse(window.isMovableByWindowBackground)
         let toolbar = window.toolbar
         WindowChrome.apply(to: window)
         XCTAssertTrue(window.toolbar === toolbar, "applying twice keeps the same toolbar")
         XCTAssertNoThrow(WindowChrome.apply(to: nil))
+    }
+
+    @MainActor func testWindowDragRegionTakesOnlyTitleBarStripPressesWhenLimited() {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        window.contentView = content
+        let region = WindowDragRegion.DragView(frame: content.bounds)
+        region.limitedToTitleBar = true
+        content.addSubview(region)
+        XCTAssertFalse(region.mouseDownCanMoveWindow)
+        // Points are in the superview's (unflipped) coordinates: y = 390 is 10 points from the top.
+        XCTAssertTrue(region.hitTest(NSPoint(x: 300, y: 390)) === region, "the strip moves the window")
+        XCTAssertTrue(region.hitTest(NSPoint(x: 300, y: 400 - WorkspaceView.titleBarHeight + 1)) === region)
+        XCTAssertNil(region.hitTest(NSPoint(x: 300, y: 400 - WorkspaceView.titleBarHeight - 1)), "below the strip, content gets the press")
+        XCTAssertNil(region.hitTest(NSPoint(x: 300, y: 100)))
+        XCTAssertNil(region.hitTest(NSPoint(x: 700, y: 390)), "outside its own bounds")
+        region.limitedToTitleBar = false
+        XCTAssertTrue(region.hitTest(NSPoint(x: 300, y: 100)) === region, "an unlimited region (the sidebar strip) takes every press in its frame")
+        // Double-click actions never trap, whatever System Settings says.
+        for action in ["None", "Minimize", "Maximize", "Fill", nil] {
+            WindowDragRegion.DragView.performTitleBarDoubleClick(on: window, action: action)
+        }
     }
 
     @MainActor func testTileHeaderHandleTellsCloseClicksFromFocusClicksAndDrags() {
