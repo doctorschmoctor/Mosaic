@@ -93,10 +93,16 @@ final class ThinScroller: NSScroller {
         // The knob is drawn into a layer that some scroll views (a List's) do not invalidate when
         // their content moves, which left the scroller invisible while scrolling. Redraw on every
         // scroll of the clip view.
+        // The knob is also shown for a moment on each scroll, whichever way the content moved (a
+        // wheel, a trackpad, the keyboard, a scrollTo): overlay scrollers otherwise show only for
+        // scroll events the scroll view itself handled, and some SwiftUI scroll views take those.
         let clip = scrollView.contentView
         clip.postsBoundsChangedNotifications = true
-        scroller.observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak scroller] _ in
-            scroller?.needsDisplay = true
+        scroller.observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak scroller, weak scrollView] _ in
+            MainActor.assumeIsolated {
+                scroller?.needsDisplay = true
+                scrollView?.flashScrollers()
+            }
         }
     }
 }
