@@ -276,14 +276,25 @@ struct MessageBubble: View {
             }
             ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment) }
             if showsText {
-                Text(MessageText.attributed(message.text)).font(.system(size: 12)).lineSpacing(2)
+                // Plain Text, not selectable: on macOS a selectable Text is a full text view (it
+                // supports mouse range selection), and three or four hundred of them made opening
+                // or resizing tiles visibly slow. Copy is in the context menu instead.
+                bubbleText.font(.system(size: 12)).lineSpacing(2)
                     .foregroundStyle(fromMe ? Color.white : Color.primary)
                     .tint(fromMe ? Color.white : Palette.accent)
                     .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(fromMe ? Palette.outgoing(service: service) : Palette.incoming,
                                 in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                    .contextMenu {
+                        Button("Copy") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(message.text, forType: .string)
+                        }
+                        ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
+                            Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
+                        }
+                    }
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
             HStack(spacing: 4) {
@@ -300,4 +311,9 @@ struct MessageBubble: View {
         .padding(fromMe ? .leading : .trailing, 36)
     }
 
+    /// Attributed (clickable links) only when the message has a link; plain text lays out faster.
+    @ViewBuilder private var bubbleText: some View {
+        if LinkDetector.links(in: message.text).isEmpty { Text(verbatim: message.text) }
+        else { Text(MessageText.attributed(message.text)) }
+    }
 }
