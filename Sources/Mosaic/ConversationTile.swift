@@ -5,15 +5,14 @@ import MosaicCore
 #endif
 
 struct ConversationTile: View {
-    @EnvironmentObject private var store: WorkspaceStore
+    @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
     var onDragChanged: ((CGSize) -> Void)? = nil
     var onDragEnded: (() -> Void)? = nil
     @State private var isDropTarget = false
     @State private var composerHeight = ComposerEditor.minimumHeight
     @State private var closeHovered = false
-    private var isFocused: Bool { store.workspace.focusedID == conversation.id }
-    private var draft: Binding<String> { store.draft(conversation.id) }
+    private var isFocused: Bool { store.focusedID == conversation.id }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -92,7 +91,7 @@ struct ConversationTile: View {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                ComposerEditor(text: draft, placeholder: placeholder, conversationID: conversation.id,
+                ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
                     accessibilityLabel: "Message to \(conversation.name)",
                     focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
                     height: $composerHeight,
@@ -138,78 +137,123 @@ struct ConversationTile: View {
 }
 
 /// The conversation history. It only re-renders when its own inputs change, never during tile drags.
+/// Its scroll position is kept by `ScrollPinner` in AppKit: a list showing the newest message stays
+/// on it through resizes, layout switches and new messages, and a list the reader scrolled up stays
+/// on the same rows when older messages load above them.
 struct MessageList: View, Equatable {
     let conversation: Conversation
     let isLive: Bool
     let canLoadMore: Bool
     let senderNames: [String: String]
     let onLoadMore: () -> Void
-    @State private var followsNewest = true
+    @State private var isNearBottom = true
+    @State private var latestRequest = 0
 
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
         lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore && lhs.senderNames == rhs.senderNames
     }
 
-    /// Scrolls to the newest message. Rows added in the current update have no size yet, so the
-    /// scroll is repeated once layout has run; otherwise a freshly loaded history landed mid-way.
-    private func scrollToLatest(_ reader: ScrollViewProxy) {
-        let scroll = { reader.scrollTo("bottom", anchor: .bottom) }
-        scroll()
-        DispatchQueue.main.async(execute: scroll)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: scroll)
-    }
-
     var body: some View {
-        ScrollViewReader { reader in
-            ScrollView {
-                // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
-                // which made rows jump.
-                VStack(alignment: .leading, spacing: 10) {
-                    if canLoadMore {
-                        Button("Load earlier messages") { followsNewest = false; onLoadMore() }
-                            .font(.caption).frame(maxWidth: .infinity)
-                    }
-                    if conversation.messages.isEmpty {
-                        Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity).padding(.top, 24)
-                    }
-                    let latestOutgoing = conversation.messages.last(where: \.isFromMe)?.presentationID
-                    ForEach(Array(conversation.messages.enumerated()), id: \.element.presentationID) { index, message in
-                        VStack(spacing: 10) {
-                            if index == 0 || !Calendar.current.isDate(message.date, inSameDayAs: conversation.messages[index - 1].date) {
-                                Text(message.date.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
-                            }
-                            MessageBubble(message: message, group: conversation.isGroup,
-                                          senderName: message.sender.map { senderNames[$0] ?? $0 }, live: isLive, service: conversation.service,
-                                          showsStatus: message.presentationID == latestOutgoing)
+        let rows = MessageRow.rows(for: conversation)
+        ScrollView {
+            // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
+            // which made rows jump.
+            VStack(alignment: .leading, spacing: 10) {
+                if canLoadMore {
+                    Button("Load earlier messages", action: onLoadMore).font(.caption).frame(maxWidth: .infinity)
+                }
+                if conversation.messages.isEmpty {
+                    Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity).padding(.top, 24)
+                }
+                ForEach(rows) { row in
+                    VStack(spacing: 10) {
+                        if let day = row.dayLabel {
+                            Text(day).font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                         }
-                        .id(message.presentationID)
+                        MessageBubble(message: row.message, group: conversation.isGroup,
+                                      senderName: row.message.sender.map { senderNames[$0] ?? $0 }, live: isLive, service: conversation.service,
+                                      showsStatus: row.showsStatus)
                     }
-                    Color.clear.frame(height: 1).id("bottom")
                 }
-                .padding(16)
-                .background(ThinScrollerInstaller())
             }
-            .defaultScrollAnchor(.bottom)
-            .task(id: conversation.id) {
-                // Let the tile's first layout settle before following its newest message.
-                try? await Task.sleep(for: .milliseconds(150))
-                guard !Task.isCancelled, followsNewest else { return }
-                scrollToLatest(reader)
-            }
-            .onChange(of: conversation.messages.last?.presentationID) { _, _ in
-                guard followsNewest else { return }
-                scrollToLatest(reader)
-            }
-            .overlay(alignment: .bottomTrailing) {
-                if !followsNewest {
-                    Button { followsNewest = true; reader.scrollTo("bottom", anchor: .bottom) } label: {
-                        Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
-                    }.buttonStyle(.plain).padding(12)
-                }
+            .padding(16)
+            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest) { near in
+                if isNearBottom != near { isNearBottom = near }
+            })
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !isNearBottom {
+                Button { latestRequest += 1 } label: {
+                    Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
+                }.buttonStyle(.plain).padding(12)
             }
         }
+    }
+}
+
+/// One message with everything the list needs precomputed (day separators, which sent message shows
+/// its status), so the per-row work is done once per conversation change rather than per render.
+struct MessageRow: Identifiable {
+    let message: Message
+    let dayLabel: String?
+    let showsStatus: Bool
+    var id: String { message.presentationID }
+
+    static func rows(for conversation: Conversation) -> [MessageRow] {
+        let latestOutgoing = conversation.messages.last(where: \.isFromMe)?.presentationID
+        var rows: [MessageRow] = []
+        rows.reserveCapacity(conversation.messages.count)
+        var previousDay: Int?
+        for message in conversation.messages {
+            let day = MessageText.dayOrdinal(message.date)
+            rows.append(MessageRow(message: message, dayLabel: day == previousDay ? nil : MessageText.day(message.date),
+                                   showsStatus: message.presentationID == latestOutgoing))
+            previousDay = day
+        }
+        return rows
+    }
+}
+
+/// Formatted strings for bubbles, cached: `Date.formatted` and attributed-string construction are
+/// the slow parts of drawing a conversation, and the same values are needed on every render.
+enum MessageText {
+    private static let calendar = Calendar.autoupdatingCurrent
+    private static let timeFormatter: DateFormatter = { let f = DateFormatter(); f.dateStyle = .none; f.timeStyle = .short; return f }()
+    private static let dayFormatter: DateFormatter = { let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none; return f }()
+    private static let times = NSCache<NSNumber, NSString>()
+    private static let days = NSCache<NSNumber, NSString>()
+    private static let attributed: NSCache<NSString, AttributedBox> = { let c = NSCache<NSString, AttributedBox>(); c.countLimit = 4000; return c }()
+    private final class AttributedBox { let value: AttributedString; init(_ value: AttributedString) { self.value = value } }
+
+    static func dayOrdinal(_ date: Date) -> Int { calendar.ordinality(of: .day, in: .era, for: date) ?? 0 }
+    static func time(_ date: Date) -> String {
+        let key = NSNumber(value: Int(date.timeIntervalSinceReferenceDate / 60))
+        if let hit = times.object(forKey: key) { return hit as String }
+        let value = timeFormatter.string(from: date)
+        times.setObject(value as NSString, forKey: key)
+        return value
+    }
+    static func day(_ date: Date) -> String {
+        let key = NSNumber(value: dayOrdinal(date))
+        if let hit = days.object(forKey: key) { return hit as String }
+        let value = dayFormatter.string(from: date)
+        days.setObject(value as NSString, forKey: key)
+        return value
+    }
+    /// Message text with web links made clickable.
+    static func attributed(_ text: String) -> AttributedString {
+        if let hit = attributed.object(forKey: text as NSString) { return hit.value }
+        var value = AttributedString(text)
+        for match in LinkDetector.links(in: text) {
+            guard let range = Range(match.range, in: text),
+                  let lower = AttributedString.Index(range.lowerBound, within: value),
+                  let upper = AttributedString.Index(range.upperBound, within: value) else { continue }
+            value[lower..<upper].link = match.url
+        }
+        attributed.setObject(AttributedBox(value), forKey: text as NSString)
+        return value
     }
 }
 
@@ -232,7 +276,7 @@ struct MessageBubble: View {
             }
             ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment) }
             if showsText {
-                Text(attributedText).font(.system(size: 12)).lineSpacing(2)
+                Text(MessageText.attributed(message.text)).font(.system(size: 12)).lineSpacing(2)
                     .foregroundStyle(fromMe ? Color.white : Color.primary)
                     .tint(fromMe ? Color.white : Palette.accent)
                     .fixedSize(horizontal: false, vertical: true)
@@ -243,7 +287,7 @@ struct MessageBubble: View {
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
             HStack(spacing: 4) {
-                Text(message.date.formatted(date: .omitted, time: .shortened))
+                Text(MessageText.time(message.date))
                 if fromMe {
                     // A sent message shows only its time until Messages reports delivery.
                     if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
@@ -256,15 +300,4 @@ struct MessageBubble: View {
         .padding(fromMe ? .leading : .trailing, 36)
     }
 
-    /// Message text with web links made clickable.
-    private var attributedText: AttributedString {
-        var attributed = AttributedString(message.text)
-        for match in LinkDetector.links(in: message.text) {
-            guard let range = Range(match.range, in: message.text),
-                  let lower = AttributedString.Index(range.lowerBound, within: attributed),
-                  let upper = AttributedString.Index(range.upperBound, within: attributed) else { continue }
-            attributed[lower..<upper].link = match.url
-        }
-        return attributed
-    }
 }

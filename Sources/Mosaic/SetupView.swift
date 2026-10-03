@@ -2,7 +2,7 @@ import SwiftUI
 import Contacts
 
 struct SetupView: View {
-    @EnvironmentObject private var store: WorkspaceStore
+    @Environment(WorkspaceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {

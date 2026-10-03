@@ -28,11 +28,12 @@ struct WorkspaceView: View {
     static let titleBarHeight: CGFloat = 52
     /// Space between the window edge and the tile area, the same on every side.
     static let tileAreaMargin: CGFloat = 8
-    @EnvironmentObject private var store: WorkspaceStore
+    @Environment(WorkspaceStore.self) private var store
     @FocusState private var searchFocused: Bool
-    @StateObject private var keyboard = KeyboardRouter()
+    @State private var keyboard = KeyboardRouter()
 
     var body: some View {
+        @Bindable var store = store
         HStack(spacing: 0) {
             sidebar.frame(width: 256)
                 // The strip above the sidebar (where the window controls are) moves the window.
@@ -73,12 +74,13 @@ struct WorkspaceView: View {
             WindowChrome.apply(to: window)
             keyboard.attach(window: window, store: store)
         })
-        .sheet(isPresented: $store.showSetup) { SetupView().environmentObject(store) }
+        .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
     }
 
     private var sidebar: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        @Bindable var store = store
+        return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Find a conversation", text: $store.search).textFieldStyle(.plain).focused($searchFocused)
@@ -235,11 +237,11 @@ struct WindowDragRegion: NSViewRepresentable {
 }
 
 struct ConversationRow: View {
-    @EnvironmentObject private var store: WorkspaceStore
+    @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
     /// Whether the tile was already open when a click sequence began; a double-click then closes it.
     @State private var wasOpenAtFirstClick = false
-    private var isOpen: Bool { store.workspace.openIDs.contains(conversation.id) }
+    private var isOpen: Bool { store.openIDs.contains(conversation.id) }
 
     var body: some View {
         Button(action: activate) {
@@ -313,7 +315,7 @@ extension View {
 }
 
 struct TileWorkspace: View {
-    @EnvironmentObject private var store: WorkspaceStore
+    @Environment(WorkspaceStore.self) private var store
     @State private var gridFractions: [Int: CGFloat] = [:]
     @State private var rowWeights: [CGFloat] = []
     @State private var columnWeights: [CGFloat] = []
@@ -321,7 +323,7 @@ struct TileWorkspace: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let layout = store.workspace.layout
+            let layout = store.layout
             let order = layout == .focus ? store.focused.map { [$0.id] } ?? [] : store.displayOrder
             let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? FocusChipBar.height + 8 : 0))
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
@@ -332,21 +334,23 @@ struct TileWorkspace: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(height: FocusChipBar.height)
                 }
-                if layout == .columns {
-                    // Only Columns can outgrow the window, sideways. Grid and Focus always fit it.
-                    ScrollViewReader { scroller in
-                        ScrollView(.horizontal) { canvas(plan) }
-                            .onChange(of: store.focusToken) { _, _ in
-                                guard let id = store.focusTarget else { return }
-                                scroller.scrollTo(id)
-                            }
-                    }
-                } else {
-                    canvas(plan)
+                // The same view structure in every layout, so switching layouts resizes the tiles
+                // instead of rebuilding them (which reset every conversation's scroll position and
+                // composer). Only Columns can outgrow the window, sideways; the scroll view is
+                // inert in Grid and Focus, whose plans always fit it.
+                ScrollViewReader { scroller in
+                    ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan) }
+                        .scrollDisabled(layout != .columns)
+                        // Grid and Focus never scroll, so a dragged tile may draw over the margins.
+                        .scrollClipDisabled(layout != .columns)
+                        .onChange(of: store.focusToken) { _, _ in
+                            guard layout == .columns, let id = store.focusTarget else { return }
+                            scroller.scrollTo(id)
+                        }
                 }
             }
         }
-        .onChange(of: store.workspace.openIDs.count) { _, _ in
+        .onChange(of: store.openIDs.count) { _, _ in
             gridFractions = [:]; rowWeights = []; columnWeights = []
             resizeStart = nil
         }
@@ -372,7 +376,7 @@ struct TileWorkspace: View {
     @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan) -> some View {
         let dragging = store.tileDrag?.id == chat.id
         let frame = dragging ? (store.tileDrag?.frame ?? slot) : slot
-        let movable = store.workspace.layout != .focus && store.tiles.count > 1
+        let movable = store.layout != .focus && store.tiles.count > 1
         ConversationTile(conversation: chat,
             onDragChanged: movable ? { (translation: CGSize) in store.dragTile(chat.id, translation: translation, plan: plan) } : nil,
             onDragEnded: { store.finishTileDrag(chat.id) })
@@ -422,7 +426,7 @@ struct DividerHandle: View {
 }
 
 /// Routes Tab and Shift–Tab to tile traversal while the workspace window is key.
-@MainActor final class KeyboardRouter: ObservableObject {
+@MainActor final class KeyboardRouter {
     private weak var window: NSWindow?
     private weak var store: WorkspaceStore?
     private var monitor: Any?

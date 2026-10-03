@@ -1,12 +1,12 @@
 import SwiftUI
 
 @main struct MosaicApp: App {
-    @StateObject private var store = WorkspaceStore()
+    @State private var store = WorkspaceStore()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
         Window("Mosaic", id: "workspace") {
-            WorkspaceView().environmentObject(store)
+            WorkspaceView().environment(store)
                 .frame(minWidth: 940, minHeight: 620)
         }
         .defaultSize(width: 1320, height: 860)
@@ -29,7 +29,7 @@ import SwiftUI
                 Button("Connect Messages…") { store.showSetup = true }
             }
         }
-        Settings { SetupView().environmentObject(store) }
+        Settings { SetupView().environment(store) }
     }
 }
 

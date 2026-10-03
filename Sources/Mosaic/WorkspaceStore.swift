@@ -1,48 +1,64 @@
 import SwiftUI
+import Observation
 import Contacts
 #if SWIFT_PACKAGE
 import MosaicCore
 #endif
 
-@MainActor final class WorkspaceStore: ObservableObject {
-    @Published var conversations: [Conversation] = []
-    @Published var workspace = Workspace() { didSet { persist() } }
-    @Published var search = ""
-    @Published var isLive = false
-    @Published var connectionError: String?
-    @Published var banner: String?
-    @Published var sendingIDs = Set<String>()
-    @Published var sendErrors: [String: String] = [:]
-    @Published var showSetup = false
-    @Published var historyLimits: [String: Int] = [:]
-    @Published var isLoadingContacts = false
-    @Published var contactStatus: String?
-    @Published private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
-    @Published var tileDrag: TileDragSession?
+/// The workspace model. It is `@Observable` rather than an `ObservableObject`: a view re-renders
+/// only when something it actually read changes, so a keystroke in one composer no longer
+/// re-renders every sidebar row and every tile, and the periodic poll touches nothing a view reads
+/// unless the database changed.
+@MainActor @Observable final class WorkspaceStore {
+    var conversations: [Conversation] = []
+    // The persisted workspace, as separate fields so that typing a draft invalidates only the views
+    // that read drafts. `workspace` assembles them for persistence and for tests.
+    var openIDs: [String] = [] { didSet { if openIDs != oldValue { persist() } } }
+    var focusedID: String? { didSet { if focusedID != oldValue { persist() } } }
+    var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
+    var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist() } } }
+    var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
+    var search = ""
+    var isLive = false
+    var connectionError: String?
+    var banner: String?
+    var sendingIDs = Set<String>()
+    var sendErrors: [String: String] = [:]
+    var showSetup = false
+    var historyLimits: [String: Int] = [:]
+    var isLoadingContacts = false
+    var contactStatus: String?
+    private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
+    var tileDrag: TileDragSession?
     /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
-    @Published private(set) var focusTarget: String?
-    @Published private(set) var focusToken = 0
-    /// Not published: the periodic poll flips these every few seconds and re-rendering every tile for
-    /// that was a visible source of lag.
-    var isRefreshing = false
-    private(set) var lastRefreshed: Date?
-    private var refreshRequestedWhileBusy = false
+    private(set) var focusTarget: String?
+    private(set) var focusToken = 0
+
+    // Bookkeeping no view reads.
+    @ObservationIgnored var isRefreshing = false
+    @ObservationIgnored private(set) var lastRefreshed: Date?
+    @ObservationIgnored private var refreshRequestedWhileBusy = false
     /// Transient read failures (Messages writing to the database) keep the last good data; the
     /// connection error only shows once reads keep failing or the first connection never succeeded.
-    private(set) var consecutiveLoadFailures = 0
+    @ObservationIgnored private(set) var consecutiveLoadFailures = 0
     static let failuresBeforeError = 3
     private let defaults: UserDefaults
     private let database: MessagesDatabase
-    private var pollTask: Task<Void, Never>?
-    private var persistTask: Task<Void, Never>?
-    private var contactNames = ContactNames()
-    private var originalTitles: [String: String] = [:]
-    private var observers: [NSObjectProtocol] = []
-    private var generation = 0
-    private var loadingState = true
+    @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var persistTask: Task<Void, Never>?
+    @ObservationIgnored private var watcher: FileChangeWatcher?
+    @ObservationIgnored private var watchRefreshTask: Task<Void, Never>?
+    /// What the last successful load covered; a poll skips the load when the database's fingerprint
+    /// still matches and the request (open tiles, history depth) is the same.
+    @ObservationIgnored private var lastLoad: (fingerprint: DatabaseFingerprint, ids: Set<String>, historyLimit: Int)?
+    @ObservationIgnored private var contactNames = ContactNames()
+    @ObservationIgnored private var originalTitles: [String: String] = [:]
+    @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var loadingState = true
     // Submitted sends are held in memory until the database reports them; never auto-retry a send.
-    private var pending: [String: [Message]] = [:]
-    private var connectedBefore = false
+    @ObservationIgnored private var pending: [String: [Message]] = [:]
+    @ObservationIgnored private var connectedBefore = false
     private let forcedDemo: Bool
 
     init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false) {
@@ -80,6 +96,7 @@ import MosaicCore
         observers.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.persistNow() }
         })
+        // The poll is a fallback: changes are normally picked up within a moment by the file watcher.
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3))
@@ -92,7 +109,31 @@ import MosaicCore
     deinit {
         pollTask?.cancel()
         persistTask?.cancel()
+        watchRefreshTask?.cancel()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// The persisted shape of the workspace (open tiles, focus, layout, drafts, seen messages).
+    var workspace: Workspace {
+        get {
+            var state = Workspace()
+            state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
+            state.drafts = drafts; state.seenMessageIDs = seenMessageIDs
+            return state
+        }
+        set {
+            if openIDs != newValue.openIDs { openIDs = newValue.openIDs }
+            if focusedID != newValue.focusedID { focusedID = newValue.focusedID }
+            if layout != newValue.layout { layout = newValue.layout }
+            if drafts != newValue.drafts { drafts = newValue.drafts }
+            if seenMessageIDs != newValue.seenMessageIDs { seenMessageIDs = newValue.seenMessageIDs }
+        }
+    }
+    /// Applies a `Workspace` mutation, writing back only the fields it changed.
+    private func mutate(_ body: (inout Workspace) -> Void) {
+        var state = workspace
+        body(&state)
+        workspace = state
     }
 
     var filteredConversations: [Conversation] {
@@ -102,23 +143,23 @@ import MosaicCore
             $0.participants.contains { $0.localizedCaseInsensitiveContains(search) }
         }
     }
-    var tiles: [Conversation] { workspace.openIDs.compactMap { id in conversations.first { $0.id == id } } }
-    var focused: Conversation? { tiles.first { $0.id == workspace.focusedID } ?? tiles.first }
+    var tiles: [Conversation] { openIDs.compactMap { id in conversations.first { $0.id == id } } }
+    var focused: Conversation? { tiles.first { $0.id == focusedID } ?? tiles.first }
     var canSend: Bool { !isLive || (connectedBefore && connectionError == nil) }
     func name(for address: String) -> String { contactNames.name(for: address) ?? address }
 
     /// Tile order shown on screen: the drag preview while a tile is held, always covering every open tile.
     var displayOrder: [String] {
-        guard let drag = tileDrag else { return workspace.openIDs }
-        let open = Set(workspace.openIDs)
+        guard let drag = tileDrag else { return openIDs }
+        let open = Set(openIDs)
         var order = drag.order.filter { open.contains($0) }
-        order += workspace.openIDs.filter { !order.contains($0) }
+        order += openIDs.filter { !order.contains($0) }
         return order
     }
 
     func open(_ id: String) {
         var opened = false
-        instantly { opened = workspace.open(id) }
+        instantly { mutate { opened = $0.open(id) } }
         // At capacity, the click does nothing; close a tile to make room.
         guard opened else { return }
         markSeen(id)
@@ -127,22 +168,22 @@ import MosaicCore
     func close(_ id: String) {
         instantly {
             if tileDrag?.id == id { tileDrag = nil }
-            workspace.close(id)
+            mutate { $0.close(id) }
         }
         if focusTarget == id { focusTarget = nil }
     }
     func focus(_ id: String) {
-        guard workspace.openIDs.contains(id) else { return }
-        if workspace.focusedID != id { instantly { workspace.focusedID = id } }
+        guard openIDs.contains(id) else { return }
+        if focusedID != id { instantly { focusedID = id } }
         markSeen(id)
     }
     /// Moves keyboard focus to the next (or previous) tile's composer. Returns false when no tile is open.
     @discardableResult func moveFocus(forward: Bool, from current: String?) -> Bool {
-        let ids = workspace.openIDs
+        let ids = openIDs
         guard !ids.isEmpty else { return false }
         // Relative to the composer that has the keyboard, else to the focused tile: one press always moves
         // to another tile.
-        let origin = current.flatMap { ids.contains($0) ? $0 : nil } ?? workspace.focusedID.flatMap { ids.contains($0) ? $0 : nil }
+        let origin = current.flatMap { ids.contains($0) ? $0 : nil } ?? focusedID.flatMap { ids.contains($0) ? $0 : nil }
         let target: String
         if let origin, let index = ids.firstIndex(of: origin) {
             target = ids[(index + (forward ? 1 : ids.count - 1)) % ids.count]
@@ -154,17 +195,17 @@ import MosaicCore
     }
     /// Focuses a tile and puts the keyboard in its composer in one step.
     func requestComposerFocus(_ id: String) {
-        guard workspace.openIDs.contains(id) else { return }
+        guard openIDs.contains(id) else { return }
         focus(id)
         focusTarget = id
         focusToken += 1
     }
-    func reorder(_ id: String, before destination: String) { instantly { workspace.reorder(id, before: destination) } }
-    func setLayout(_ layout: WorkspaceLayout) { instantly { tileDrag = nil; workspace.layout = layout } }
+    func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
+    func setLayout(_ layout: WorkspaceLayout) { instantly { tileDrag = nil; self.layout = layout } }
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
-        guard workspace.layout != .focus, let frame = plan.frames[id] else { return }
+        guard layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).
-        if tileDrag?.id != id { tileDrag = TileDragSession(id: id, origin: frame, order: workspace.openIDs) }
+        if tileDrag?.id != id { tileDrag = TileDragSession(id: id, origin: frame, order: openIDs) }
         guard var drag = tileDrag else { return }
         drag.update(translation: translation, plan: plan)
         instantly { tileDrag = drag }
@@ -173,21 +214,21 @@ import MosaicCore
         guard let drag = tileDrag, id == nil || drag.id == id else { return }
         let order = displayOrder
         instantly {
-            if workspace.openIDs != order { workspace.openIDs = order }
+            if openIDs != order { openIDs = order }
             tileDrag = nil
         }
     }
     func draft(_ id: String) -> Binding<String> {
-        Binding(get: { self.workspace.drafts[id] ?? "" }, set: { self.workspace.drafts[id] = $0 })
+        Binding(get: { self.drafts[id] ?? "" }, set: { if self.drafts[id] ?? "" != $0 { self.drafts[id] = $0 } })
     }
     func markSeen(_ id: String) {
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         if conversations[index].unreadCount != 0 { conversations[index].unreadCount = 0 }
-        if let last = conversations[index].messages.last, workspace.seenMessageIDs[id] != last.id { workspace.seenMessageIDs[id] = last.id }
+        if let last = conversations[index].messages.last, seenMessageIDs[id] != last.id { seenMessageIDs[id] = last.id }
     }
     func setMode(live: Bool) {
         guard live != isLive, sendingIDs.isEmpty else { return }
-        persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0
+        persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; banner = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil
         defaults.set(live, forKey: "Mosaic.live")
@@ -196,6 +237,7 @@ import MosaicCore
             conversations = []; restore()
             Task { await loadContacts(requestPermission: contactAuthorization == .notDetermined); await refresh() }
         } else {
+            watcher = nil
             conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
         }
@@ -217,37 +259,45 @@ import MosaicCore
 
     private func performRefresh() async {
         let requestGeneration = generation
-        let ids = Set(workspace.openIDs)
+        let ids = Set(openIDs)
         let historyLimit = max(100, historyLimits.values.max() ?? 100)
         let database = self.database
+        // The same request as last time may skip the load if nothing in the database moved.
+        let known = lastLoad.flatMap { $0.ids == ids && $0.historyLimit == historyLimit ? $0.fingerprint : nil }
         do {
-            var loaded = try await Task.detached(priority: .userInitiated) { try database.load(openIDs: ids, historyLimit: historyLimit) }.value
+            let snapshot = try await Task.detached(priority: .userInitiated) {
+                try database.snapshot(openIDs: ids, historyLimit: historyLimit, unlessUnchangedFrom: known)
+            }.value
             guard generation == requestGeneration, isLive else { return }
             consecutiveLoadFailures = 0
             if connectionError != nil { connectionError = nil }
             connectedBefore = true; lastRefreshed = Date()
+            startWatchingDatabase()
+            guard let snapshot else { return } // unchanged since the last load
+            lastLoad = (snapshot.fingerprint, ids, historyLimit)
+            var loaded = snapshot.conversations
+            let previousByID = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             for index in loaded.indices {
                 let id = loaded[index].id
                 originalTitles[id] = loaded[index].name
                 loaded[index].name = contactNames.title(for: loaded[index])
+                let previous = previousByID[id]
                 // Remove a submitted bubble when an outgoing row with the same text and a recent date appears.
-                let reconciled = MessageReconciler.merge(loaded: loaded[index].messages,
-                    previous: conversations.first(where: { $0.id == id })?.messages ?? [], pending: pending[id] ?? [])
+                let reconciled = MessageReconciler.merge(loaded: loaded[index].messages, previous: previous?.messages ?? [], pending: pending[id] ?? [])
                 pending[id] = reconciled.pending
                 loaded[index].messages = reconciled.messages
-                if let previous = conversations.first(where: { $0.id == id }),
-                   previous.preview != loaded[index].preview, !ids.contains(id) { loaded[index].unreadCount = previous.unreadCount + 1 }
-                else { loaded[index].unreadCount = conversations.first(where: { $0.id == id })?.unreadCount ?? 0 }
+                if let previous, previous.preview != loaded[index].preview, !ids.contains(id) { loaded[index].unreadCount = previous.unreadCount + 1 }
+                else { loaded[index].unreadCount = previous?.unreadCount ?? 0 }
                 if ids.contains(id) { loaded[index].unreadCount = 0 }
             }
-            // Publishing identical data every three seconds re-rendered every tile; only publish real changes.
+            // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
             updateContactStatus()
             var reconciledWorkspace = workspace
             reconciledWorkspace.reconcile(availableIDs: Set(loaded.map(\.id)))
             if reconciledWorkspace != workspace { instantly { workspace = reconciledWorkspace } }
-            if workspace.openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
-                workspace.open(first.id)
+            if openIDs.isEmpty && !defaults.bool(forKey: "Mosaic.live.hasWorkspace"), let first = loaded.first {
+                mutate { $0.open(first.id) }
                 defaults.set(true, forKey: "Mosaic.live.hasWorkspace")
                 refreshRequestedWhileBusy = true
             }
@@ -260,13 +310,28 @@ import MosaicCore
         }
     }
 
+    /// Refreshes within a moment of Messages writing to its database, instead of at the next poll.
+    private func startWatchingDatabase() {
+        guard watcher == nil else { return }
+        watcher = FileChangeWatcher(paths: database.watchedPaths) { [weak self] in
+            guard let self else { return }
+            self.watchRefreshTask?.cancel()
+            // Messages writes in bursts; one refresh after the burst settles.
+            self.watchRefreshTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(120))
+                guard !Task.isCancelled, let self, self.isLive else { return }
+                await self.refresh()
+            }
+        }
+    }
+
     func loadMore(_ id: String) {
         historyLimits[id] = min(1000, (historyLimits[id] ?? 100) + 100)
         Task { await refresh() }
     }
 
     func send(_ id: String) async {
-        let originalDraft = workspace.drafts[id] ?? ""
+        let originalDraft = drafts[id] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !sendingIDs.contains(id), canSend,
               conversations.contains(where: { $0.id == id }) else { return }
@@ -281,7 +346,7 @@ import MosaicCore
             } catch { sendErrors[id] = error.localizedDescription; return }
         }
         instantly {
-            if workspace.drafts[id] == originalDraft { workspace.drafts[id] = "" }
+            if drafts[id] == originalDraft { drafts[id] = "" }
             if let currentIndex = conversations.firstIndex(where: { $0.id == id }) {
                 conversations[currentIndex].messages.append(message)
                 conversations[currentIndex].preview = text
@@ -289,7 +354,7 @@ import MosaicCore
             }
         }
         markSeen(id)
-        if isLive { await refresh() }
+        if isLive { lastLoad = nil; await refresh() }
         else if let index = conversations.firstIndex(where: { $0.id == id }) {
             // Demo sending stays local. No invented replies or real recipients.
             conversations[index].unreadCount = 0
@@ -349,13 +414,15 @@ import MosaicCore
     /// Apply immediately, even when a Messages refresh is already in flight.
     func applyContactNames(_ names: ContactNames) {
         contactNames = names
-        for index in conversations.indices {
-            var original = conversations[index]
+        var renamed = conversations
+        for index in renamed.indices {
+            var original = renamed[index]
             if originalTitles[original.id] == nil { originalTitles[original.id] = original.name }
             original.name = originalTitles[original.id] ?? original.name
             let title = names.title(for: original)
-            if conversations[index].name != title { conversations[index].name = title }
+            if renamed[index].name != title { renamed[index].name = title }
         }
+        if renamed != conversations { conversations = renamed }
         if names.contactCount == 0 { contactStatus = "No named contacts were found. Check that your contacts appear in the Mac's Contacts app." }
         updateContactStatus()
     }
@@ -399,8 +466,61 @@ import MosaicCore
         defaults.set(data, forKey: stateKey)
     }
     private func restore(defaultIDs: [String] = []) {
-        if !forcedDemo, let data = defaults.data(forKey: stateKey), let saved = try? JSONDecoder().decode(Workspace.self, from: data) { workspace = saved }
-        else { workspace = Workspace(openIDs: defaultIDs) }
-        if !isLive { workspace.reconcile(availableIDs: Set(conversations.map(\.id))) }
+        var state: Workspace
+        if !forcedDemo, let data = defaults.data(forKey: stateKey), let saved = try? JSONDecoder().decode(Workspace.self, from: data) { state = saved }
+        else { state = Workspace(openIDs: defaultIDs) }
+        if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id))) }
+        workspace = state
+    }
+}
+
+/// Calls back on the main thread when any of the given files is written, replaced or removed. The
+/// write-ahead log Messages appends to is recreated on checkpoints, so a vanished file is watched
+/// again as soon as it exists.
+@MainActor final class FileChangeWatcher {
+    private let paths: [String]
+    private let onChange: () -> Void
+    private var sources: [String: DispatchSourceFileSystemObject] = [:]
+    private var retry: Task<Void, Never>?
+
+    init(paths: [String], onChange: @escaping () -> Void) {
+        self.paths = paths
+        self.onChange = onChange
+        watchAll()
+    }
+    deinit {
+        for source in sources.values { source.cancel() }
+        retry?.cancel()
+    }
+    private func watchAll() {
+        var missing = false
+        for path in paths where sources[path] == nil {
+            let descriptor = open(path, O_EVTONLY)
+            guard descriptor >= 0 else { missing = true; continue }
+            let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .extend, .delete, .rename, .revoke], queue: .main)
+            source.setEventHandler { [weak self, weak source] in
+                guard let self, let source else { return }
+                let events = source.data
+                if !events.intersection([.delete, .rename, .revoke]).isEmpty {
+                    source.cancel()
+                    self.sources[path] = nil
+                    self.scheduleRewatch()
+                }
+                self.onChange()
+            }
+            source.setCancelHandler { close(descriptor) }
+            source.resume()
+            sources[path] = source
+        }
+        if missing { scheduleRewatch() }
+    }
+    private func scheduleRewatch() {
+        guard retry == nil else { return }
+        retry = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard let self else { return }
+            self.retry = nil
+            self.watchAll()
+        }
     }
 }

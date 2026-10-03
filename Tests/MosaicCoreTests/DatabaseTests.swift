@@ -19,13 +19,14 @@ final class DatabaseTests: XCTestCase {
         CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
         CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
         CREATE TABLE message (text TEXT, attributedBody BLOB, date INTEGER, is_from_me INTEGER, handle_id INTEGER,
-          is_delivered INTEGER, is_read INTEGER, error INTEGER, cache_has_attachments INTEGER, associated_message_type INTEGER, item_type INTEGER);
+          is_delivered INTEGER, is_read INTEGER, error INTEGER, cache_has_attachments INTEGER, associated_message_type INTEGER, item_type INTEGER,
+          date_read INTEGER DEFAULT 0);
         INSERT INTO handle VALUES ('alex@example.test'), ('jamie@example.test');
         INSERT INTO chat VALUES ('iMessage;-;alex@example.test', '', 'alex@example.test', 'iMessage'), ('iMessage;+;group', 'Friends', 'group', 'iMessage');
         INSERT INTO chat_handle_join VALUES (1,1),(2,1),(2,2);
-        INSERT INTO message VALUES ('First',NULL,700000000000000000,0,1,0,0,0,0,0,0),
-          ('Second',NULL,700000001000000000,1,0,1,0,0,0,0,0),
-          (NULL,NULL,700000002000000000,0,2,0,0,0,1,0,0);
+        INSERT INTO message VALUES ('First',NULL,700000000000000000,0,1,0,0,0,0,0,0,0),
+          ('Second',NULL,700000001000000000,1,0,1,0,0,0,0,0,0),
+          (NULL,NULL,700000002000000000,0,2,0,0,0,1,0,0,0);
         INSERT INTO chat_message_join VALUES (1,1),(1,2),(2,3);
         """
         XCTAssertEqual(sqlite3_exec(db, schema, nil, nil, nil), SQLITE_OK)
@@ -63,11 +64,27 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(MessagesDatabase.appleDate(700000000), MessagesDatabase.appleDate(700000000000000000))
         _ = MessagesDatabase.appleDate(Int64.min) // malformed values must not trap
     }
+    func testUnchangedDatabaseIsSkippedByItsFingerprint() throws {
+        let database = MessagesDatabase(path: path)
+        let first = try XCTUnwrap(try database.snapshot(openIDs: ["iMessage;-;alex@example.test"], unlessUnchangedFrom: nil))
+        XCTAssertEqual(first.conversations.count, 2)
+        XCTAssertNil(try database.snapshot(openIDs: ["iMessage;-;alex@example.test"], unlessUnchangedFrom: first.fingerprint),
+                     "nothing changed, so the poll has nothing to load")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, "UPDATE message SET is_read = 1, date_read = 700000005000000000 WHERE ROWID = 2", nil, nil, nil), SQLITE_OK)
+        let second = try XCTUnwrap(try database.snapshot(openIDs: ["iMessage;-;alex@example.test"], unlessUnchangedFrom: first.fingerprint),
+                                   "a read receipt changes the fingerprint")
+        XCTAssertNotEqual(second.fingerprint, first.fingerprint)
+        XCTAssertTrue(second.conversations.first { $0.databaseID == 1 }?.messages.last?.isRead ?? false)
+        XCTAssertEqual(database.watchedPaths, [path, path + "-wal"])
+    }
     func testWALContentIsVisibleWithoutCopyingDatabase() throws {
         var db: OpaquePointer?
         XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
         defer { sqlite3_close(db) }
-        XCTAssertEqual(sqlite3_exec(db, "INSERT INTO message VALUES ('In the WAL',NULL,700000003000000000,0,1,0,0,0,0,0,0); INSERT INTO chat_message_join VALUES (1,4);", nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "INSERT INTO message VALUES ('In the WAL',NULL,700000003000000000,0,1,0,0,0,0,0,0,0); INSERT INTO chat_message_join VALUES (1,4);", nil, nil, nil), SQLITE_OK)
         let result = try MessagesDatabase(path: path).load(openIDs: ["iMessage;-;alex@example.test"])
         XCTAssertEqual(result.first { $0.databaseID == 1 }?.messages.last?.text, "In the WAL")
     }

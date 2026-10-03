@@ -96,6 +96,60 @@ final class ChromeAndHandleTests: XCTestCase {
         XCTAssertFalse(handle.isTracking)
     }
 
+    private final class FlippedDocument: NSView { override var isFlipped: Bool { true } }
+
+    @MainActor func testScrollPinnerKeepsTheDistanceFromTheBottomThroughSizeChanges() {
+        _ = NSApplication.shared
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let document = FlippedDocument(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+        scroll.documentView = document
+        let pinner = ScrollPinner()
+        pinner.attach(to: scroll)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 800, accuracy: 0.5, "a fresh list shows its newest message")
+        XCTAssertTrue(pinner.isNearBottom)
+        // A new message: the content grows and the list stays on the end.
+        document.setFrameSize(NSSize(width: 300, height: 1200))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1000, accuracy: 0.5)
+        // The tile grows (layout switch): still on the end, no interim position.
+        scroll.setFrameSize(NSSize(width: 300, height: 400))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 800, accuracy: 0.5)
+        // The tile shrinks again.
+        scroll.setFrameSize(NSSize(width: 300, height: 200))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1000, accuracy: 0.5)
+        // The reader scrolls up 300 points.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 700))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertEqual(pinner.distanceFromBottom, 300, accuracy: 0.5)
+        XCTAssertFalse(pinner.isNearBottom)
+        // Older messages load above: the same rows stay in view.
+        document.setFrameSize(NSSize(width: 300, height: 1600))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1100, accuracy: 0.5)
+        // A resize while scrolled up also keeps the distance.
+        scroll.setFrameSize(NSSize(width: 300, height: 300))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1000, accuracy: 0.5)
+        pinner.scrollToBottom()
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1300, accuracy: 0.5)
+        XCTAssertTrue(pinner.isNearBottom)
+        // Shorter content than the viewport sits at the top without going negative.
+        document.setFrameSize(NSSize(width: 300, height: 100))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 0, accuracy: 0.5)
+    }
+
+    @MainActor func testMessageRowsPrecomputeDaySeparatorsAndStatusOnce() {
+        let base = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        let messages = [Message(id: "1", text: "a", date: base, isFromMe: false),
+                        Message(id: "2", text: "b", date: base.addingTimeInterval(60), isFromMe: true),
+                        Message(id: "3", text: "c", date: base.addingTimeInterval(86_400 * 2), isFromMe: true),
+                        Message(id: "4", text: "d https://example.com", date: base.addingTimeInterval(86_400 * 2 + 5), isFromMe: false)]
+        let rows = MessageRow.rows(for: Conversation(id: "c", name: "C", participants: ["x"], messages: messages))
+        XCTAssertEqual(rows.map { $0.dayLabel != nil }, [true, false, true, false])
+        XCTAssertEqual(rows.map(\.showsStatus), [false, false, true, false], "only the latest sent message shows Delivered/Read")
+        XCTAssertEqual(MessageText.time(base), MessageText.time(base.addingTimeInterval(20)), "cached per minute")
+        XCTAssertEqual(MessageText.day(base), MessageText.day(base.addingTimeInterval(3600)))
+        let attributed = MessageText.attributed("d https://example.com")
+        XCTAssertEqual(attributed.runs.compactMap(\.link).map(\.absoluteString), ["https://example.com"])
+    }
+
     @MainActor func testTileHeaderHandleTellsCloseClicksFromFocusClicksAndDrags() {
         let handle = TileHeaderHandle.HandleView()
         let window = makeWindow(handle, size: NSSize(width: 320, height: 54))

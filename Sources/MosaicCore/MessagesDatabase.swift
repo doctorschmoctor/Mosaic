@@ -13,6 +13,19 @@ public enum DatabaseError: LocalizedError {
     }
 }
 
+/// A cheap summary of everything in the database that Mosaic displays. Two equal fingerprints mean
+/// a full load would produce the same conversations, so the poll can skip it.
+public struct DatabaseFingerprint: Equatable, Sendable {
+    public let values: [Int64]
+    public init(values: [Int64]) { self.values = values }
+}
+
+/// The result of a load: the conversations and the fingerprint they correspond to.
+public struct DatabaseSnapshot: Sendable {
+    public let conversations: [Conversation]
+    public let fingerprint: DatabaseFingerprint
+}
+
 public struct MessagesDatabase: Sendable {
     public let path: String
     /// Messages stores attachment paths relative to the user's home ("~/Library/Messages/Attachments/…").
@@ -22,8 +35,18 @@ public struct MessagesDatabase: Sendable {
         self.path = path
         self.home = home
     }
+    /// Files whose changes mean the database content changed (the write-ahead log is where new
+    /// messages land first).
+    public var watchedPaths: [String] { [path, path + "-wal"] }
 
     public func load(openIDs: Set<String>, limit: Int = 500, historyLimit: Int = 100) throws -> [Conversation] {
+        try snapshot(openIDs: openIDs, limit: limit, historyLimit: historyLimit, unlessUnchangedFrom: nil)!.conversations
+    }
+
+    /// Loads conversations, or returns nil when `unlessUnchangedFrom` matches the database's current
+    /// fingerprint (nothing that Mosaic shows has changed since that load).
+    public func snapshot(openIDs: Set<String>, limit: Int = 500, historyLimit: Int = 100,
+                         unlessUnchangedFrom known: DatabaseFingerprint?) throws -> DatabaseSnapshot? {
         var connection: OpaquePointer?
         guard sqlite3_open_v2(path, &connection, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
               let db = connection else {
@@ -37,6 +60,8 @@ public struct MessagesDatabase: Sendable {
         try execute(db, "BEGIN DEFERRED")
         defer { try? execute(db, "ROLLBACK") }
         let columns = try tableColumns(db, table: "message")
+        let fingerprint = try fingerprint(db, messageColumns: columns)
+        if let known, known == fingerprint { return nil }
         // One query for every conversation's members, instead of one query per conversation.
         let membersByChat = try participantsByChat(db)
         guard columns.contains("is_from_me"), columns.contains("date"), columns.contains("text") else { throw DatabaseError.unsupportedSchema }
@@ -85,7 +110,25 @@ public struct MessagesDatabase: Sendable {
                     lastActivity: history.last?.date ?? .distantPast, messages: history))
             }
         }
-        return conversations.filter { !$0.id.isEmpty }
+        return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, fingerprint: fingerprint)
+    }
+
+    /// Counts and maxima over the tables Mosaic reads: new or deleted rows, new dates, delivery and
+    /// read receipts, edits, retractions and attachment transfers all move at least one of them.
+    private func fingerprint(_ db: OpaquePointer, messageColumns: Set<String>) throws -> DatabaseFingerprint {
+        func max(_ column: String) -> String { messageColumns.contains(column) ? "(SELECT MAX(\(column)) FROM message)" : "0" }
+        var parts = ["(SELECT COUNT(*) FROM message)", "(SELECT MAX(ROWID) FROM message)", max("date"), max("date_delivered"),
+                     max("date_read"), max("date_edited"), max("date_retracted"), "(SELECT COUNT(*) FROM chat)",
+                     "(SELECT MAX(ROWID) FROM chat_message_join)"]
+        let attachmentColumns = try tableColumns(db, table: "attachment")
+        if !attachmentColumns.isEmpty {
+            parts.append("(SELECT COUNT(*) FROM attachment)")
+            if attachmentColumns.contains("transfer_state") { parts.append("(SELECT SUM(transfer_state) FROM attachment)") }
+        }
+        let statement = try prepare(db, "SELECT " + parts.joined(separator: ", "))
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        return DatabaseFingerprint(values: (0..<Int32(parts.count)).map { sqlite3_column_int64(statement, $0) })
     }
 
     private func history(_ db: OpaquePointer, chatID: Int64, columns: Set<String>, limit: Int) throws -> [Message] {
