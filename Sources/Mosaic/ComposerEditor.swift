@@ -192,7 +192,10 @@ final class DraftTextView: NSTextView {
         return accepted
     }
     override func keyDown(with event: NSEvent) {
-        if (event.keyCode == 36 || event.keyCode == 76), !event.modifierFlags.contains(.shift), !hasMarkedText() {
+        if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText() {
+            // Shift–Return is a line break; Return sends. Inserting the break here (rather than through
+            // key-event interpretation) makes it the same in every input context.
+            if event.modifierFlags.contains(.shift) { insertNewline(nil); return }
             if !event.isARepeat { onSend?() }
             return
         }
