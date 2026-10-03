@@ -65,7 +65,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
 - The **+** button at the left of the composer opens your Photos library or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text and go out with the next Return.
-- Click a photo or video to open it; right-click for Finder. Right-click a bubble to copy its text or open its links.
+- Click a photo or video to open it; right-click to copy it, save it to Downloads or elsewhere, or show it in Finder. Right-click a bubble to copy its text or open its links.
 - **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
 
 ## Scope

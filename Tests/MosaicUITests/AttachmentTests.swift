@@ -142,4 +142,16 @@ final class AttachmentTests: XCTestCase {
         store.beginAddingAttachments(1, to: "not-open")
         XCTAssertNil(store.outgoingLoading["not-open"])
     }
+
+    /// Saving a received picture to Downloads never overwrites: the name gets a number.
+    func testSavedAttachmentNamesDoNotCollide() throws {
+        let folder = try temporaryDirectory()
+        XCTAssertEqual(AttachmentView.freeName(for: "IMG_1.jpg", in: folder).lastPathComponent, "IMG_1.jpg")
+        try Data().write(to: folder.appending(path: "IMG_1.jpg"))
+        XCTAssertEqual(AttachmentView.freeName(for: "IMG_1.jpg", in: folder).lastPathComponent, "IMG_1 2.jpg")
+        try Data().write(to: folder.appending(path: "IMG_1 2.jpg"))
+        XCTAssertEqual(AttachmentView.freeName(for: "IMG_1.jpg", in: folder).lastPathComponent, "IMG_1 3.jpg")
+        try Data().write(to: folder.appending(path: "notes"))
+        XCTAssertEqual(AttachmentView.freeName(for: "notes", in: folder).lastPathComponent, "notes 2")
+    }
 }

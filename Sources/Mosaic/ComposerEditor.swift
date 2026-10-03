@@ -231,6 +231,14 @@ final class DraftTextView: NSTextView {
     /// Pasting a picture or a file attaches it to the message; anything else pastes as text.
     override func paste(_ sender: Any?) { if !attach(from: NSPasteboard.general) { super.paste(sender) } }
     override func pasteAsPlainText(_ sender: Any?) { if !attach(from: NSPasteboard.general) { super.pasteAsPlainText(sender) } }
+    /// Paste (the Edit menu item, and so ⌘V) stays enabled when the pasteboard holds a picture or
+    /// a file. NSTextView otherwise disables it for anything it cannot read as text, and a
+    /// disabled item never sends `paste:`.
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(NSText.paste(_:)) || item.action == #selector(pasteAsPlainText(_:)),
+           NSPasteboard.general.availableType(from: Self.attachmentTypes) != nil { return true }
+        return super.validateUserInterfaceItem(item)
+    }
     /// Takes the files or picture a pasteboard carries, if any.
     @discardableResult func attach(from pasteboard: NSPasteboard) -> Bool {
         switch OutgoingFiles.contents(of: pasteboard) {

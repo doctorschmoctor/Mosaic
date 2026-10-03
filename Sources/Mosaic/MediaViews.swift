@@ -150,14 +150,60 @@ struct AttachmentView: View {
         .contextMenu { menu }
     }
     @ViewBuilder private var menu: some View {
-        if attachment.path != nil {
+        if let path = attachment.path {
             Button("Open") { open() }
-            Button("Show in Finder") { if let path = attachment.path { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) } }
+            Button(attachment.kind == .image ? "Copy Image" : "Copy") { copy() }
+            Button("Save to Downloads") { saveToDownloads() }
+            Button("Save As…") { saveAs() }
+            Divider()
+            Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
         }
     }
     private func open() {
         guard let path = attachment.path else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: path))
+    }
+    /// Puts the file on the pasteboard — as a file, and for a picture as image data too, so it
+    /// pastes into another Mosaic composer, Messages, Mail or an image editor alike.
+    private func copy() {
+        guard let path = attachment.path else { return }
+        let url = URL(fileURLWithPath: path)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        var items: [NSPasteboardWriting] = [url as NSURL]
+        if attachment.kind == .image, let image = NSImage(contentsOf: url) { items.append(image) }
+        pasteboard.writeObjects(items)
+    }
+    private func saveToDownloads() {
+        guard let path = attachment.path, let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return }
+        let destination = Self.freeName(for: attachment.name, in: downloads)
+        do {
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destination)
+            NSWorkspace.shared.activateFileViewerSelecting([destination])
+        } catch { NSSound.beep() }
+    }
+    private func saveAs() {
+        guard let path = attachment.path else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = attachment.name
+        panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+            try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destination)
+        } catch { NSSound.beep() }
+    }
+    /// `name`, or `name 2`, `name 3`… when the folder already has one.
+    static func freeName(for name: String, in folder: URL) -> URL {
+        let base = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        var candidate = folder.appending(path: name)
+        var index = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = folder.appending(path: ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)")
+            index += 1
+        }
+        return candidate
     }
 }
 
