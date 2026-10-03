@@ -41,9 +41,22 @@ import MosaicCore
     /// The sidebar row the keyboard is on, while the conversation list has keyboard focus (⌘L, or
     /// an arrow key from the search field). Nil whenever the list does not have the keyboard.
     var sidebarSelection: String?
-    /// Whether a sideways swipe (a row's Delete action) is under way in the sidebar; row highlights
-    /// stay off until the next click or vertical scroll, so none sits against the action.
-    var sidebarSwiping = false
+    /// The sidebar row under the pointer.
+    var sidebarHover: String?
+    /// The row a sideways swipe (its Delete action) started on. Its highlight stays off until the
+    /// swipe is closed again or something is clicked, so no highlight sits against the action.
+    var sidebarSwipedRow: String?
+    /// The one highlighted sidebar row: the keyboard's row while the list has the keyboard, else
+    /// the row under the pointer. The pointer moves the keyboard's row too, so they never differ.
+    var highlightedSidebarRow: String? {
+        let id = sidebarSelection ?? sidebarHover
+        return id == sidebarSwipedRow ? nil : id
+    }
+    /// Where the pointer was when the keyboard last moved the sidebar row: a hover that arrives
+    /// with the pointer still there is the list scrolling under it, not the pointer choosing a row.
+    @ObservationIgnored private var pointerAtKeyboardMove: NSPoint?
+    /// The pointer's screen location; tests stand in for the real pointer.
+    @ObservationIgnored var pointerLocation: () -> NSPoint = { NSEvent.mouseLocation }
     /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
     private(set) var focusTarget: String?
     private(set) var focusToken = 0
@@ -257,7 +270,28 @@ import MosaicCore
         let target = id.flatMap { candidate in rows.contains { $0.id == candidate } ? candidate : nil }
             ?? focusedID.flatMap { focused in rows.contains { $0.id == focused } ? focused : nil }
             ?? rows.first?.id
+        pointerAtKeyboardMove = pointerLocation()
         if sidebarSelection != target { instantly { sidebarSelection = target } }
+    }
+    /// The pointer entered a row: it is the highlighted row, and the keyboard's row while the list
+    /// has the keyboard — unless the pointer has not moved since the keyboard last chose a row,
+    /// in which case the list scrolled under a resting pointer and the keyboard's choice stands.
+    func hoverSidebarRow(_ id: String) {
+        instantly {
+            if sidebarHover != id { sidebarHover = id }
+            guard sidebarSelection != nil, sidebarSelection != id else { return }
+            if let resting = pointerAtKeyboardMove, resting == pointerLocation() { return }
+            sidebarSelection = id
+        }
+    }
+    /// The pointer left a row.
+    func leaveSidebarRow(_ id: String) {
+        if sidebarHover == id { instantly { sidebarHover = nil } }
+    }
+    /// A sideways swipe began (on the row under the pointer) or ended.
+    func setSidebarSwiping(_ swiping: Bool) {
+        let row = swiping ? sidebarHover : nil
+        if sidebarSwipedRow != row { instantly { sidebarSwipedRow = row } }
     }
     /// Moves the keyboard's row down (positive) or up, stopping at the ends. Without a current row
     /// the first press lands on the first (moving down) or last (moving up) row.
@@ -270,6 +304,7 @@ import MosaicCore
         } else {
             target = offset >= 0 ? 0 : rows.count - 1
         }
+        pointerAtKeyboardMove = pointerLocation()
         if sidebarSelection != rows[target].id { instantly { sidebarSelection = rows[target].id } }
     }
     /// Return on the keyboard's row (or the first search result): opens it in a tile, or focuses its

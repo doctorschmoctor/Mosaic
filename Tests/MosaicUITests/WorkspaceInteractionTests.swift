@@ -158,6 +158,33 @@ final class WorkspaceInteractionTests: XCTestCase {
         store.activateSidebarSelection()
         XCTAssertEqual(store.workspace.focusedID, open[0])
         XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
+        // One highlight: the pointer's row, which also becomes the keyboard's row while the list
+        // has the keyboard; a swipe that starts on the highlighted row hides its highlight until
+        // the swipe is closed.
+        var pointer = NSPoint(x: 123.5, y: 456.25)
+        store.pointerLocation = { pointer }
+        store.hoverSidebarRow(rows[2])
+        XCTAssertEqual(store.sidebarSelection, rows[2])
+        XCTAssertEqual(store.highlightedSidebarRow, rows[2])
+        store.moveSidebarSelection(by: 1)
+        XCTAssertEqual(store.highlightedSidebarRow, rows[3], "the keyboard's row is the one highlight, not the pointer's")
+        store.hoverSidebarRow(rows[2])
+        XCTAssertEqual(store.sidebarSelection, rows[3], "the pointer has not moved since the keyboard chose a row: the list scrolled under it")
+        pointer.x += 1
+        store.hoverSidebarRow(rows[2])
+        XCTAssertEqual(store.sidebarSelection, rows[2], "once the pointer moves, its row is the keyboard's row")
+        store.setSidebarSwiping(true)
+        XCTAssertEqual(store.sidebarSwipedRow, rows[2])
+        store.sidebarSelection = nil
+        XCTAssertNil(store.highlightedSidebarRow, "the swiped row shows no highlight")
+        store.hoverSidebarRow(rows[1])
+        XCTAssertEqual(store.highlightedSidebarRow, rows[1], "other rows still highlight under the pointer")
+        store.setSidebarSwiping(false)
+        store.hoverSidebarRow(rows[2])
+        XCTAssertEqual(store.highlightedSidebarRow, rows[2], "the swipe closed: the row highlights again")
+        store.leaveSidebarRow(rows[2])
+        XCTAssertNil(store.highlightedSidebarRow)
+        XCTAssertNil(store.sidebarSelection, "the pointer never gives the list the keyboard by itself")
         // A search narrows the rows the keyboard moves through; Return in search opens the first match.
         store.sidebarSelection = nil
         store.search = "Riley"
@@ -225,13 +252,29 @@ final class WorkspaceInteractionTests: XCTestCase {
         scroller.track(phase: .changed, momentumPhase: [], deltaX: -2, deltaY: 5)
         XCTAssertTrue(scroller.isSwiping, "a finger that wanders keeps the gesture's direction")
         scroller.track(phase: .ended, momentumPhase: [], deltaX: 0, deltaY: 0)
-        XCTAssertTrue(scroller.isSwiping, "the revealed action outlives the gesture")
+        XCTAssertFalse(scroller.isSwiping, "a swipe too short to open the action snaps back")
+        // A long swipe opens the action, which outlives the gesture; a swipe back closes it.
+        scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: -50, deltaY: 2)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: -30, deltaY: -1)
+        scroller.track(phase: .ended, momentumPhase: [], deltaX: 0, deltaY: 0)
+        XCTAssertTrue(scroller.isSwiping, "the opened action outlives the gesture")
+        scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: 25, deltaY: 0)
+        XCTAssertTrue(scroller.isSwiping, "still sideways while the swipe back is under way")
+        scroller.track(phase: .ended, momentumPhase: [], deltaX: 0, deltaY: 0)
+        XCTAssertFalse(scroller.isSwiping, "a swipe back to the right closes the action")
+        // An opened action also ends with a vertical scroll, and a mouse wheel is never a swipe.
+        scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: -80, deltaY: 0)
+        scroller.track(phase: .ended, momentumPhase: [], deltaX: 0, deltaY: 0)
+        XCTAssertTrue(scroller.isSwiping)
         scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
         scroller.track(phase: .changed, momentumPhase: [], deltaX: 1, deltaY: -30)
         XCTAssertFalse(scroller.isSwiping, "a vertical scroll ends swipe mode")
         XCTAssertFalse(scroller.isSuppressed)
         scroller.track(phase: [], momentumPhase: [], deltaX: 0, deltaY: -3)
         XCTAssertFalse(scroller.isSwiping, "a mouse wheel is never a swipe")
-        XCTAssertEqual(reports, [true, false])
+        XCTAssertEqual(reports, [true, false, true, false, true, false])
     }
 }

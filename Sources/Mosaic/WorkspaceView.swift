@@ -113,9 +113,7 @@ struct WorkspaceView: View {
                             // Inside the list's scroll view: gives it the slim scroller the tiles have,
                             // one that does not thicken under the pointer or appear for a swipe, and
                             // tells the rows while a swipe is under way.
-                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true) { swiping in
-                                if store.sidebarSwiping != swiping { store.sidebarSwiping = swiping }
-                            })
+                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true) { swiping in store.setSidebarSwiping(swiping) })
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                     .tint(.red)
@@ -279,15 +277,13 @@ struct ConversationRow: View {
     let conversation: Conversation
     /// Whether the tile was already open when a click sequence began; a double-click then closes it.
     @State private var wasOpenAtFirstClick = false
-    @State private var hovering = false
     private var isOpen: Bool { store.openIDs.contains(conversation.id) }
     /// The keyboard is on this row (the list has keyboard focus: ⌘L or ↓ from the search field).
     private var isSelected: Bool { store.sidebarSelection == conversation.id }
-    /// Row highlights stay off during a swipe, so none sits against the row's Delete action.
-    private var showsHighlight: Bool { !store.sidebarSwiping }
+    /// The one highlighted row: the pointer's, or the keyboard's (see `WorkspaceStore.highlightedSidebarRow`).
+    private var isHighlighted: Bool { store.highlightedSidebarRow == conversation.id }
 
     var body: some View {
-        let selected = isSelected && showsHighlight
         Button(action: activate) {
             HStack(spacing: 10) {
                 Avatar(conversation: conversation, size: 36)
@@ -295,25 +291,24 @@ struct ConversationRow: View {
                     HStack(spacing: 4) {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         Spacer(minLength: 0)
-                        if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(selected ? Color.white : Palette.accent) }
-                        else if conversation.unreadCount > 0 { Circle().fill(selected ? Color.white : Palette.accent).frame(width: 6, height: 6) }
+                        if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
+                        else if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
                     }
-                    Text(conversation.preview).font(.system(size: 11)).foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary).lineLimit(1)
+                    Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 }
             }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
-                .foregroundStyle(selected ? Color.white : Color.primary)
-                // An open conversation is marked by the grid icon alone. The keyboard's row is
-                // drawn in the accent color and the row under the pointer in a light wash, rounded
-                // like a Messages row and clear of the scroller at the trailing edge.
+                // An open conversation is marked by the grid icon alone. The highlighted row — the
+                // one under the pointer, or the keyboard's — gets a light wash, rounded like a
+                // Messages row and reaching a little past the row's content on the trailing side.
                 .background {
                     RoundedRectangle(cornerRadius: 8)
-                        .fill(selected ? Palette.accent : hovering && showsHighlight ? Color.primary.opacity(0.06) : Color.clear)
-                        .padding(.trailing, 8)
+                        .fill(isHighlighted ? Color.primary.opacity(0.06) : Color.clear)
+                        .padding(.trailing, -4)
                 }
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .accessibilityAddTraits(isSelected ? .isSelected : [])
-            .onHover { hovering = $0 }
+            .onHover { inside in inside ? store.hoverSidebarRow(conversation.id) : store.leaveSidebarRow(conversation.id) }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }

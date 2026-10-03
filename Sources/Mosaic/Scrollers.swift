@@ -24,16 +24,23 @@ final class ThinScroller: NSScroller {
         NSBezierPath(roundedRect: frame, xRadius: Self.knobWidth / 2, yRadius: Self.knobWidth / 2).fill()
     }
 
-    /// Whether a sideways swipe (a list row's swipe action) is under way over the scroll view; it
-    /// ends with the next click, key press or vertical scroll. Reported through `onSwipeModeChange`.
+    /// Whether a sideways swipe (a list row's swipe action) is under way over the scroll view, or
+    /// has left its action showing. It ends when the swipe is closed again (a sideways gesture
+    /// back, or one too short to have opened the action), or with the next click, key press or
+    /// vertical scroll. Reported through `onSwipeModeChange`.
     private(set) var isSwiping = false { didSet { if isSwiping != oldValue { onSwipeModeChange?(isSwiping) } } }
     var onSwipeModeChange: ((Bool) -> Void)?
+    /// A sideways gesture that travels less than this to the left is taken to have snapped back
+    /// without opening the action.
+    static let swipeOpenTravel: CGFloat = 40
 
     private var observer: NSObjectProtocol?
     private var swipeMonitor: Any?
     /// The direction a trackpad gesture settled on, held for the rest of that gesture: a finger
     /// that wanders a little during a sideways swipe must not flip the state back and forth.
     private var gestureIsSideways: Bool?
+    /// The gesture's horizontal travel so far (negative to the left).
+    private var gestureTravelX: CGFloat = 0
     deinit {
         if let observer { NotificationCenter.default.removeObserver(observer) }
         if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
@@ -59,13 +66,17 @@ final class ThinScroller: NSScroller {
         track(phase: event.phase, momentumPhase: event.momentumPhase, deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
     }
     func track(phase: NSEvent.Phase, momentumPhase: NSEvent.Phase, deltaX: CGFloat, deltaY: CGFloat) {
-        if phase == .began { gestureIsSideways = nil }
+        if phase == .began { gestureIsSideways = nil; gestureTravelX = 0 }
         let inGesture = phase == .began || phase == .changed || momentumPhase == .began
         if inGesture {
+            gestureTravelX += deltaX
             if gestureIsSideways == nil, deltaX != 0 || deltaY != 0 { gestureIsSideways = abs(deltaX) > abs(deltaY) }
             guard let sideways = gestureIsSideways else { return }
             isSuppressed = sideways
             isSwiping = sideways
+        } else if phase == .ended || phase == .cancelled {
+            // A sideways gesture back to the right closes the action; a short one never opened it.
+            if gestureIsSideways == true, gestureTravelX > -Self.swipeOpenTravel { isSwiping = false }
         } else if phase.isEmpty, momentumPhase.isEmpty {
             // A mouse wheel: no gesture, nothing sideways.
             isSuppressed = false
