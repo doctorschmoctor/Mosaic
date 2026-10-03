@@ -112,4 +112,126 @@ final class WorkspaceInteractionTests: XCTestCase {
         for id in ids { store.close(id) }
         XCTAssertFalse(store.moveFocus(forward: true, from: nil))
     }
+
+    /// The conversation list on the keyboard (⌘L, or ↓ from search): entering lands on the focused
+    /// tile's row, the arrow keys move and stop at the ends, Return opens or focuses, Delete closes
+    /// the row's tile, and a full workspace says so.
+    @MainActor func testSidebarKeyboardMovesOpensAndUntilesRows() {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let rows = store.filteredConversations.map(\.id)
+        let open = store.workspace.openIDs
+        XCTAssertEqual(open.count, Workspace.maximumTiles)
+        XCTAssertGreaterThan(rows.count, open.count)
+        store.focus(open[2])
+        store.selectSidebarRow(nil)
+        XCTAssertEqual(store.sidebarSelection, open[2], "entering the list lands on the focused tile's row")
+        store.sidebarSelection = nil
+        store.moveSidebarSelection(by: 1)
+        XCTAssertEqual(store.sidebarSelection, rows[0], "↓ with no row starts at the top")
+        store.moveSidebarSelection(by: -1)
+        XCTAssertEqual(store.sidebarSelection, rows[0], "the first row stops ↑")
+        store.sidebarSelection = nil
+        store.moveSidebarSelection(by: -1)
+        XCTAssertEqual(store.sidebarSelection, rows.last, "↑ with no row starts at the bottom")
+        store.moveSidebarSelection(by: 1)
+        XCTAssertEqual(store.sidebarSelection, rows.last, "the last row stops ↓")
+        // Return on a closed row with every tile taken: an alert, nothing opens.
+        let closed = rows.first { !open.contains($0) }!
+        store.sidebarSelection = closed
+        store.activateSidebarSelection()
+        XCTAssertEqual(store.workspace.openIDs, open)
+        XCTAssertNotNil(store.alert)
+        store.alert = nil
+        // Delete on an open row closes its tile; on a closed row it does nothing.
+        store.sidebarSelection = open[1]
+        store.untileSidebarSelection()
+        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3]])
+        store.sidebarSelection = closed
+        store.untileSidebarSelection()
+        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3]])
+        // Return now opens the closed row, and Return on an open row focuses it.
+        store.activateSidebarSelection()
+        XCTAssertEqual(store.workspace.openIDs, [open[0], open[2], open[3], closed])
+        XCTAssertEqual(store.workspace.focusedID, closed)
+        XCTAssertNil(store.alert)
+        store.sidebarSelection = open[0]
+        store.activateSidebarSelection()
+        XCTAssertEqual(store.workspace.focusedID, open[0])
+        XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
+        // A search narrows the rows the keyboard moves through; Return in search opens the first match.
+        store.sidebarSelection = nil
+        store.search = "Riley"
+        let matches = store.filteredConversations.map(\.id)
+        XCTAssertFalse(matches.isEmpty)
+        store.moveSidebarSelection(by: 1)
+        XCTAssertEqual(store.sidebarSelection, matches[0])
+        store.sidebarSelection = nil
+        store.close(open[0])
+        store.activateSidebarSelection()
+        XCTAssertTrue(store.workspace.openIDs.contains(matches[0]), "Return in search opens the first match")
+    }
+
+    /// The invisible view that holds the keyboard for the list: taking the keyboard marks a row,
+    /// the keys move, open and close, and giving the keyboard up clears the mark.
+    @MainActor func testSidebarKeyFocusViewHandlesTheKeysAndClearsOnResign() {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let rows = store.filteredConversations.map(\.id)
+        XCTAssertTrue(store.workspace.openIDs.contains(rows[0]), "the demo workspace opens the first rows")
+        let keyboard = SidebarKeyboard()
+        let view = SidebarKeyFocus.CatcherView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        view.store = store
+        keyboard.view = view
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView?.addSubview(view)
+        XCTAssertFalse(keyboard.hasKeyboard)
+        XCTAssertNil(view.hitTest(NSPoint(x: 0.5, y: 0.5)), "invisible to the mouse")
+        XCTAssertTrue(keyboard.focusList(.first))
+        XCTAssertTrue(keyboard.hasKeyboard)
+        XCTAssertEqual(store.sidebarSelection, rows[0])
+        func press(_ keyCode: UInt16) {
+            let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                                         context: nil, characters: "", charactersIgnoringModifiers: "", isARepeat: false, keyCode: keyCode)!
+            view.keyDown(with: event)
+        }
+        press(125); XCTAssertEqual(store.sidebarSelection, rows[1], "↓")
+        press(126); XCTAssertEqual(store.sidebarSelection, rows[0], "↑")
+        press(119); XCTAssertEqual(store.sidebarSelection, rows.last, "End")
+        press(115); XCTAssertEqual(store.sidebarSelection, rows[0], "Home")
+        press(51); XCTAssertFalse(store.workspace.openIDs.contains(rows[0]), "Delete closes the row's tile")
+        XCTAssertEqual(store.sidebarSelection, rows[0], "the row stays marked")
+        press(36); XCTAssertTrue(store.workspace.openIDs.contains(rows[0]), "Return opens it again")
+        XCTAssertTrue(keyboard.hasKeyboard, "opening a tile from the list keeps the keyboard in the list")
+        XCTAssertTrue(keyboard.focusList(.current), "focusing the list again, while it has the keyboard, is a no-op that succeeds")
+        XCTAssertEqual(store.sidebarSelection, rows[0])
+        window.makeFirstResponder(nil)
+        XCTAssertFalse(keyboard.hasKeyboard)
+        XCTAssertNil(store.sidebarSelection, "giving up the keyboard clears the mark")
+        XCTAssertTrue(keyboard.focusList(.last))
+        XCTAssertEqual(store.sidebarSelection, rows.last)
+    }
+
+    /// The sidebar's scroller tells a sideways swipe (a row's Delete action) from a scroll: the
+    /// knob hides and swipe mode starts, and the direction a gesture settles on holds for the rest
+    /// of that gesture.
+    @MainActor func testThinScrollerTellsSidewaysSwipesFromScrolls() {
+        let scroller = ThinScroller()
+        var reports: [Bool] = []
+        scroller.onSwipeModeChange = { reports.append($0) }
+        scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
+        XCTAssertFalse(scroller.isSwiping, "nothing is known at the start of a gesture")
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: -12, deltaY: 1)
+        XCTAssertTrue(scroller.isSwiping)
+        XCTAssertTrue(scroller.isSuppressed)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: -2, deltaY: 5)
+        XCTAssertTrue(scroller.isSwiping, "a finger that wanders keeps the gesture's direction")
+        scroller.track(phase: .ended, momentumPhase: [], deltaX: 0, deltaY: 0)
+        XCTAssertTrue(scroller.isSwiping, "the revealed action outlives the gesture")
+        scroller.track(phase: .began, momentumPhase: [], deltaX: 0, deltaY: 0)
+        scroller.track(phase: .changed, momentumPhase: [], deltaX: 1, deltaY: -30)
+        XCTAssertFalse(scroller.isSwiping, "a vertical scroll ends swipe mode")
+        XCTAssertFalse(scroller.isSuppressed)
+        scroller.track(phase: [], momentumPhase: [], deltaX: 0, deltaY: -3)
+        XCTAssertFalse(scroller.isSwiping, "a mouse wheel is never a swipe")
+        XCTAssertEqual(reports, [true, false])
+    }
 }

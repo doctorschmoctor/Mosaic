@@ -24,8 +24,54 @@ final class ThinScroller: NSScroller {
         NSBezierPath(roundedRect: frame, xRadius: Self.knobWidth / 2, yRadius: Self.knobWidth / 2).fill()
     }
 
+    /// Whether a sideways swipe (a list row's swipe action) is under way over the scroll view; it
+    /// ends with the next click, key press or vertical scroll. Reported through `onSwipeModeChange`.
+    private(set) var isSwiping = false { didSet { if isSwiping != oldValue { onSwipeModeChange?(isSwiping) } } }
+    var onSwipeModeChange: ((Bool) -> Void)?
+
     private var observer: NSObjectProtocol?
-    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+    private var swipeMonitor: Any?
+    /// The direction a trackpad gesture settled on, held for the rest of that gesture: a finger
+    /// that wanders a little during a sideways swipe must not flip the state back and forth.
+    private var gestureIsSideways: Bool?
+    deinit {
+        if let observer { NotificationCenter.default.removeObserver(observer) }
+        if let swipeMonitor { NSEvent.removeMonitor(swipeMonitor) }
+    }
+
+    /// Watches the gestures over `scrollView` (the sidebar list): a sideways swipe hides the knob
+    /// and starts swipe mode; a click, a key or a vertical scroll ends it.
+    func watchSwipes(in scrollView: NSScrollView) {
+        guard swipeMonitor == nil else { return }
+        swipeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel, .leftMouseDown, .rightMouseDown, .otherMouseDown, .keyDown]) {
+            [weak self, weak scrollView] event in
+            guard let self, let scrollView, let window = scrollView.window, event.window === window else { return event }
+            guard event.type == .scrollWheel else { self.isSwiping = false; return event }
+            let inside = scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil))
+            guard inside else { return event }
+            self.track(event)
+            self.needsDisplay = true
+            return event
+        }
+    }
+    /// Classifies one scroll event of a gesture over the watched scroll view.
+    func track(_ event: NSEvent) {
+        track(phase: event.phase, momentumPhase: event.momentumPhase, deltaX: event.scrollingDeltaX, deltaY: event.scrollingDeltaY)
+    }
+    func track(phase: NSEvent.Phase, momentumPhase: NSEvent.Phase, deltaX: CGFloat, deltaY: CGFloat) {
+        if phase == .began { gestureIsSideways = nil }
+        let inGesture = phase == .began || phase == .changed || momentumPhase == .began
+        if inGesture {
+            if gestureIsSideways == nil, deltaX != 0 || deltaY != 0 { gestureIsSideways = abs(deltaX) > abs(deltaY) }
+            guard let sideways = gestureIsSideways else { return }
+            isSuppressed = sideways
+            isSwiping = sideways
+        } else if phase.isEmpty, momentumPhase.isEmpty {
+            // A mouse wheel: no gesture, nothing sideways.
+            isSuppressed = false
+            isSwiping = false
+        }
+    }
 
     static func install(in scrollView: NSScrollView) {
         guard !(scrollView.verticalScroller is ThinScroller) else { return }
@@ -164,17 +210,23 @@ final class ScrollPinner: NSObject {
 /// of hit testing or layout.
 struct ThinScrollerInstaller: NSViewRepresentable {
     var hidesForHorizontalSwipes = false
+    /// Called as a sideways swipe over the scroll view begins and ends (see `ThinScroller.isSwiping`).
+    var onSwipeModeChange: ((Bool) -> Void)? = nil
 
-    func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); view.watchesSwipes = hidesForHorizontalSwipes; return view }
-    func updateNSView(_ view: InstallerView, context: Context) { view.watchesSwipes = hidesForHorizontalSwipes; view.install() }
+    func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); configure(view); return view }
+    func updateNSView(_ view: InstallerView, context: Context) { configure(view); view.install() }
+    private func configure(_ view: InstallerView) {
+        view.watchesSwipes = hidesForHorizontalSwipes
+        view.onSwipeModeChange = onSwipeModeChange
+    }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
     }
 
     final class InstallerView: NSView {
         var watchesSwipes = false
+        var onSwipeModeChange: ((Bool) -> Void)?
         private weak var scrollView: NSScrollView?
-        private var monitor: Any?
 
         override var isOpaque: Bool { false }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -182,7 +234,6 @@ struct ThinScrollerInstaller: NSViewRepresentable {
             super.viewDidMoveToWindow()
             DispatchQueue.main.async { [weak self] in self?.install() }
         }
-        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 
         func install() {
             var view: NSView? = superview
@@ -190,23 +241,13 @@ struct ThinScrollerInstaller: NSViewRepresentable {
                 if let found = current as? NSScrollView {
                     ThinScroller.install(in: found)
                     scrollView = found
-                    if watchesSwipes { watchSwipes() }
+                    if watchesSwipes, let scroller = found.verticalScroller as? ThinScroller {
+                        scroller.watchSwipes(in: found)
+                        if let onSwipeModeChange { scroller.onSwipeModeChange = onSwipeModeChange }
+                    }
                     return
                 }
                 view = current.superview
-            }
-        }
-        private func watchSwipes() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
-                guard let self, let scrollView = self.scrollView, let window = scrollView.window, event.window === window,
-                      let scroller = scrollView.verticalScroller as? ThinScroller else { return event }
-                let inside = scrollView.bounds.contains(scrollView.convert(event.locationInWindow, from: nil))
-                if inside, event.phase == .began || event.phase == .changed || event.momentumPhase == .began {
-                    scroller.isSuppressed = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
-                }
-                if inside { scroller.needsDisplay = true }
-                return event
             }
         }
     }

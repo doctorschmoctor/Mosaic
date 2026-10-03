@@ -56,7 +56,9 @@ Apple Messages must already be signed in. SMS/RCS availability depends on your e
 - **⌘N** or the compose button starts a New Message tile; in its To field the arrow keys move through the suggestions, Return takes the highlighted one, Backspace removes the last person, and **Esc** closes the new message.
 - Swipe a sidebar row left to delete the conversation from Mosaic (it stays in Messages).
 - **Return** sends from the active composer; **Shift–Return** inserts a line break. The smiley button opens Emoji & Symbols.
-- **⌘K** focuses search; **⌘R** refreshes.
+- **⌘F** focuses search: Return opens the first match, **↓** moves into the list, **Esc** clears the search and then gives up the keyboard.
+- **⌘L** puts the keyboard on the conversation list: **↑ / ↓** move between rows (the row under the pointer is also highlighted), **Return** opens the row in a tile — or focuses its tile when it is already open — **⌫** closes the row's tile, and **Esc** goes back to the focused tile's composer. Clicking anywhere else hands the keyboard over and the highlight clears.
+- **⌘R** refreshes.
 - **⌘⌥1**, **⌘⌥2**, **⌘⌥3** switch Grid, Columns, and Focus.
 - **⌘⇧W** closes the focused tile.
 

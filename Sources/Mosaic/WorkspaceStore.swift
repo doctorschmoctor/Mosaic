@@ -38,6 +38,12 @@ import MosaicCore
     var contactStatus: String?
     private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
     var tileDrag: TileDragSession?
+    /// The sidebar row the keyboard is on, while the conversation list has keyboard focus (⌘L, or
+    /// an arrow key from the search field). Nil whenever the list does not have the keyboard.
+    var sidebarSelection: String?
+    /// Whether a sideways swipe (a row's Delete action) is under way in the sidebar; row highlights
+    /// stay off until the next click or vertical scroll, so none sits against the action.
+    var sidebarSwiping = false
     /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
     private(set) var focusTarget: String?
     private(set) var focusToken = 0
@@ -241,6 +247,49 @@ import MosaicCore
         focusToken += 1
     }
     func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
+
+    // MARK: Sidebar keyboard
+
+    /// Puts the keyboard's row on `id`, or where the list is entered: the focused tile's row when
+    /// it is listed, else the first row.
+    func selectSidebarRow(_ id: String?) {
+        let rows = filteredConversations
+        let target = id.flatMap { candidate in rows.contains { $0.id == candidate } ? candidate : nil }
+            ?? focusedID.flatMap { focused in rows.contains { $0.id == focused } ? focused : nil }
+            ?? rows.first?.id
+        if sidebarSelection != target { instantly { sidebarSelection = target } }
+    }
+    /// Moves the keyboard's row down (positive) or up, stopping at the ends. Without a current row
+    /// the first press lands on the first (moving down) or last (moving up) row.
+    func moveSidebarSelection(by offset: Int) {
+        let rows = filteredConversations
+        guard !rows.isEmpty else { return }
+        let target: Int
+        if let current = sidebarSelection, let index = rows.firstIndex(where: { $0.id == current }) {
+            target = min(max(index + offset, 0), rows.count - 1)
+        } else {
+            target = offset >= 0 ? 0 : rows.count - 1
+        }
+        if sidebarSelection != rows[target].id { instantly { sidebarSelection = rows[target].id } }
+    }
+    /// Return on the keyboard's row (or the first search result): opens it in a tile, or focuses its
+    /// tile when it is already open. With every tile taken, says so instead of doing nothing.
+    func activateSidebarSelection() {
+        guard let id = sidebarSelection ?? (search.isEmpty ? nil : filteredConversations.first?.id) else { return }
+        if openIDs.contains(id) { focus(id); return }
+        guard openIDs.count < Workspace.maximumTiles else {
+            alert = WorkspaceAlert(title: "Mosaic shows up to \(Workspace.maximumTiles) conversations",
+                                   message: "Close a tile to open another conversation.")
+            return
+        }
+        open(id)
+    }
+    /// Delete on the keyboard's row: closes that conversation's tile, if it has one. The
+    /// conversation itself stays in the list.
+    func untileSidebarSelection() {
+        guard let id = sidebarSelection, openIDs.contains(id) else { return }
+        close(id)
+    }
     func setLayout(_ layout: WorkspaceLayout) { instantly { tileDrag = nil; self.layout = layout } }
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard layout != .focus, let frame = plan.frames[id] else { return }

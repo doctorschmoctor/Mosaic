@@ -17,10 +17,15 @@ import SwiftUI
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Message") { store.beginNewChat() }.keyboardShortcut("n", modifiers: .command)
-                Button("Find a Conversation") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
-                    .keyboardShortcut("k", modifiers: .command)
             }
             CommandMenu("Workspace") {
+                // KeyboardRouter takes ⌘F and ⌘L in the workspace window itself, ahead of the menu
+                // bar, so the Edit menu's text Find never claims ⌘F; these items name the keys.
+                Button("Find a Conversation") { NotificationCenter.default.post(name: .focusSearch, object: nil) }
+                    .keyboardShortcut("f", modifiers: .command)
+                Button("Go to Conversations") { NotificationCenter.default.post(name: .focusConversationList, object: nil) }
+                    .keyboardShortcut("l", modifiers: .command)
+                Divider()
                 Button("Grid Layout") { store.setLayout(.grid) }.keyboardShortcut("1", modifiers: [.command, .option])
                 Button("Column Layout") { store.setLayout(.columns) }.keyboardShortcut("2", modifiers: [.command, .option])
                 Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])
@@ -34,7 +39,12 @@ import SwiftUI
     }
 }
 
-extension Notification.Name { static let focusSearch = Notification.Name("Mosaic.focusSearch") }
+extension Notification.Name {
+    /// Puts the keyboard in the sidebar's search field (⌘F).
+    static let focusSearch = Notification.Name("Mosaic.focusSearch")
+    /// Gives the conversation list the keyboard (⌘L); see `SidebarKeyboard`.
+    static let focusConversationList = Notification.Name("Mosaic.focusConversationList")
+}
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {

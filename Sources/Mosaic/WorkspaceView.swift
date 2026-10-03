@@ -31,6 +31,7 @@ struct WorkspaceView: View {
     @Environment(WorkspaceStore.self) private var store
     @FocusState private var searchFocused: Bool
     @State private var keyboard = KeyboardRouter()
+    @State private var sidebarKeyboard = SidebarKeyboard()
 
     var body: some View {
         @Bindable var store = store
@@ -79,11 +80,13 @@ struct WorkspaceView: View {
         .transaction { transaction in transaction.animation = nil; transaction.disablesAnimations = true }
         .background(WindowReader { window in
             WindowChrome.apply(to: window)
-            keyboard.attach(window: window, store: store)
+            keyboard.attach(window: window, store: store, sidebar: sidebarKeyboard)
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
         .alert(item: $store.alert) { alert in Alert(title: Text(alert.title), message: Text(alert.message)) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
+        .onReceive(NotificationCenter.default.publisher(for: .focusConversationList)) { _ in sidebarKeyboard.focusList() }
+        .onChange(of: searchFocused) { _, focused in keyboard.searchFieldHasFocus = focused }
     }
 
     private var sidebar: some View {
@@ -92,37 +95,49 @@ struct WorkspaceView: View {
             HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Find a conversation", text: $store.search).textFieldStyle(.plain).focused($searchFocused)
+                    // Return opens the first match; ↓ moves into the list (KeyboardRouter).
+                    .onSubmit { store.activateSidebarSelection() }
                     .accessibilityLabel("Find a conversation")
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 10).padding(.top, Self.titleBarHeight + 4)
             // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
-            List {
-                ForEach(store.filteredConversations) { conversation in
-                    // Rows run to the sidebar's trailing edge, so the swipe action sits flush
-                    // against an open row's highlight instead of beside a gap.
-                    ConversationRow(conversation: conversation)
-                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
-                        .listRowSeparator(.hidden)
-                        // Inside the list's scroll view: gives it the slim scroller the tiles have,
-                        // one that does not thicken under the pointer or appear for a swipe.
-                        .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true))
-                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                            Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
-                                .tint(.red)
-                        }
+            ScrollViewReader { scroller in
+                List {
+                    ForEach(store.filteredConversations) { conversation in
+                        // Rows run to the sidebar's trailing edge, so the swipe action sits flush
+                        // against the row instead of beside a gap.
+                        ConversationRow(conversation: conversation)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
+                            .listRowSeparator(.hidden)
+                            // Inside the list's scroll view: gives it the slim scroller the tiles have,
+                            // one that does not thicken under the pointer or appear for a swipe, and
+                            // tells the rows while a swipe is under way.
+                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true) { swiping in
+                                if store.sidebarSwiping != swiping { store.sidebarSwiping = swiping }
+                            })
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
+                                    .tint(.red)
+                            }
+                    }
+                    if store.filteredConversations.isEmpty {
+                        Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
+                            .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
+                            .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                    }
                 }
-                if store.filteredConversations.isEmpty {
-                    Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
-                        .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
-                        .listRowSeparator(.hidden).listRowBackground(Color.clear)
-                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, 1)
+                .padding(.top, 12)
+                // The keyboard's row stays in view as the arrow keys move it.
+                .onChange(of: store.sidebarSelection) { _, id in if let id { scroller.scrollTo(id) } }
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .environment(\.defaultMinListRowHeight, 1)
-            .padding(.top, 12)
-        }.background(.regularMaterial)
+        }
+        .background(.regularMaterial)
+        // Holds the keyboard for the list (⌘L); draws nothing and takes no clicks.
+        .background(alignment: .topLeading) { SidebarKeyFocus(keyboard: sidebarKeyboard, store: store).frame(width: 1, height: 1) }
     }
     private var emptyWorkspace: some View {
         VStack(spacing: 16) {
@@ -264,9 +279,15 @@ struct ConversationRow: View {
     let conversation: Conversation
     /// Whether the tile was already open when a click sequence began; a double-click then closes it.
     @State private var wasOpenAtFirstClick = false
+    @State private var hovering = false
     private var isOpen: Bool { store.openIDs.contains(conversation.id) }
+    /// The keyboard is on this row (the list has keyboard focus: ⌘L or ↓ from the search field).
+    private var isSelected: Bool { store.sidebarSelection == conversation.id }
+    /// Row highlights stay off during a swipe, so none sits against the row's Delete action.
+    private var showsHighlight: Bool { !store.sidebarSwiping }
 
     var body: some View {
+        let selected = isSelected && showsHighlight
         Button(action: activate) {
             HStack(spacing: 10) {
                 Avatar(conversation: conversation, size: 36)
@@ -274,15 +295,25 @@ struct ConversationRow: View {
                     HStack(spacing: 4) {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         Spacer(minLength: 0)
-                        if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
-                        else if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
+                        if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(selected ? Color.white : Palette.accent) }
+                        else if conversation.unreadCount > 0 { Circle().fill(selected ? Color.white : Palette.accent).frame(width: 6, height: 6) }
                     }
-                    Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(conversation.preview).font(.system(size: 11)).foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary).lineLimit(1)
                 }
             }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
-                // An open conversation is marked by the grid icon alone; no row shading.
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                // An open conversation is marked by the grid icon alone. The keyboard's row is
+                // drawn in the accent color and the row under the pointer in a light wash, rounded
+                // like a Messages row and clear of the scroller at the trailing edge.
+                .background {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(selected ? Palette.accent : hovering && showsHighlight ? Color.primary.opacity(0.06) : Color.clear)
+                        .padding(.trailing, 8)
+                }
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+            .onHover { hovering = $0 }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }
@@ -302,6 +333,8 @@ struct ConversationRow: View {
             return
         }
         wasOpenAtFirstClick = isOpen
+        // While the list has the keyboard, a click also moves the keyboard's row here.
+        if store.sidebarSelection != nil { store.selectSidebarRow(conversation.id) }
         store.open(conversation.id)
     }
 }
@@ -450,15 +483,22 @@ struct DividerHandle: View {
     }
 }
 
-/// Routes Tab and Shift–Tab to tile traversal while the workspace window is key.
+/// Routes the workspace's keys while its window is key, ahead of the views and the menu bar:
+/// Tab and Shift–Tab traverse the tiles; ⌘F finds a conversation and ⌘L goes to the list (taken
+/// here so the Edit menu's text Find never claims ⌘F); from the search field, ↓ and ↑ move into
+/// the list and Esc clears the search, then gives up the keyboard.
 @MainActor final class KeyboardRouter {
     private weak var window: NSWindow?
     private weak var store: WorkspaceStore?
+    private var sidebar: SidebarKeyboard?
     private var monitor: Any?
+    /// Whether the sidebar's search field has the keyboard (from the view's focus state).
+    var searchFieldHasFocus = false
 
-    func attach(window: NSWindow?, store: WorkspaceStore) {
+    func attach(window: NSWindow?, store: WorkspaceStore, sidebar: SidebarKeyboard? = nil) {
         if let window { self.window = window }
         self.store = store
+        if let sidebar { self.sidebar = sidebar }
         guard monitor == nil else { return }
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
@@ -467,14 +507,31 @@ struct DividerHandle: View {
         }
     }
 
-    private func handle(_ event: NSEvent) -> Bool {
-        guard event.keyCode == 48, let store, let window, event.window === window,
-              window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
+    func handle(_ event: NSEvent) -> Bool {
+        guard let store, let window, event.window === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        guard modifiers.subtracting(.shift).isEmpty else { return false }
-        let editor = window.firstResponder as? DraftTextView
-        if let editor, editor.hasMarkedText() { return false }
-        return store.moveFocus(forward: !modifiers.contains(.shift), from: editor?.conversationID)
+        if modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
+            if key == "f" { NotificationCenter.default.post(name: .focusSearch, object: nil); return true }
+            if key == "l" { NotificationCenter.default.post(name: .focusConversationList, object: nil); return true }
+            return false
+        }
+        let inSearchField = searchFieldHasFocus && window.firstResponder is NSTextView
+        switch event.keyCode {
+        case 48: // Tab
+            guard modifiers.subtracting(.shift).isEmpty else { return false }
+            let editor = window.firstResponder as? DraftTextView
+            if let editor, editor.hasMarkedText() { return false }
+            return store.moveFocus(forward: !modifiers.contains(.shift), from: editor?.conversationID)
+        case 125, 126: // ↓ ↑ from the search field: into the list.
+            guard modifiers.isEmpty, inSearchField, let sidebar else { return false }
+            return sidebar.focusList(event.keyCode == 125 ? .first : .last)
+        case 53: // Esc in the search field: clear it, then give up the keyboard.
+            guard modifiers.isEmpty, inSearchField else { return false }
+            if store.search.isEmpty { window.makeFirstResponder(nil) } else { instantly { store.search = "" } }
+            return true
+        default:
+            return false
+        }
     }
 }
 
