@@ -24,12 +24,23 @@ final class ThinScroller: NSScroller {
         NSBezierPath(roundedRect: frame, xRadius: Self.knobWidth / 2, yRadius: Self.knobWidth / 2).fill()
     }
 
+    private var observer: NSObjectProtocol?
+    deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+
     static func install(in scrollView: NSScrollView) {
         guard !(scrollView.verticalScroller is ThinScroller) else { return }
         let scroller = ThinScroller()
         scroller.controlSize = .small
         scrollView.verticalScroller = scroller
         scrollView.scrollerStyle = .overlay
+        // The knob is drawn into a layer that some scroll views (a List's) do not invalidate when
+        // their content moves, which left the scroller invisible while scrolling. Redraw on every
+        // scroll of the clip view.
+        let clip = scrollView.contentView
+        clip.postsBoundsChangedNotifications = true
+        scroller.observer = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak scroller] _ in
+            scroller?.needsDisplay = true
+        }
     }
 }
 
@@ -194,6 +205,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
                 if inside, event.phase == .began || event.phase == .changed || event.momentumPhase == .began {
                     scroller.isSuppressed = abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
                 }
+                if inside { scroller.needsDisplay = true }
                 return event
             }
         }
