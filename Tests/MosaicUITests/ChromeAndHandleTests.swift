@@ -224,6 +224,14 @@ final class ChromeAndHandleTests: XCTestCase {
         XCTAssertEqual(bar.frames.count, 3)
     }
 
+    func testFocusLayoutParksTheOtherTilesOutsideTheWindowAtTheShownSize() throws {
+        let plan = TileLayout.plan(order: ["a"], viewport: CGSize(width: 900, height: 600), layout: .focus)
+        let parked = try XCTUnwrap(TileWorkspace.parkedFrame(in: plan))
+        XCTAssertEqual(parked.size, try XCTUnwrap(plan.frames["a"]).size)
+        XCTAssertLessThan(parked.maxX, -10_000, "parked tiles can never be seen or hit")
+        XCTAssertNil(TileWorkspace.parkedFrame(in: TileLayout.plan(order: [], viewport: CGSize(width: 900, height: 600), layout: .focus)))
+    }
+
     @MainActor func testSelectingAChipFocusesThatTileInTheStore() {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         store.setLayout(.focus)
