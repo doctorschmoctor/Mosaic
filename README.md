@@ -4,7 +4,7 @@ A native macOS SwiftUI workspace for keeping several Messages conversations open
 
 ![Mosaic demo workspace](docs/workspace.png)
 
-Open a conversation from the sidebar to give it a tile; double-click it to close that tile again. Cards grow and move into the grid; closing one shrinks it in place while the remaining cards fill its space. Keep up to eight chats open, resize the invisible gaps, drag a header to move the whole card, and reply from each tile's own composer. Neighboring cards move aside during the drag and the card settles into its new position on release. **Tab** and **Shift–Tab** move between tiles. Grid, Columns, and Focus layouts are available. Open tiles, layout mode, and independent drafts survive reopening the app; divider sizes are adjusted within the current session.
+Open a conversation from the sidebar to give it a tile; double-click it to close that tile again. Cards grow and move into the grid; closing one shrinks it in place while the remaining cards fill its space. Keep up to four chats open, resize the invisible gaps, drag a header to move the whole card, and reply from each tile's own composer. Neighboring cards move aside during the drag and the card settles into its new position on release. **Tab** and **Shift–Tab** move between tiles. Grid, Columns, and Focus layouts are available. Open tiles, layout mode, and independent drafts survive reopening the app; divider sizes are adjusted within the current session.
 
 The tile area fills the right side of the window, with search directly above the conversation list and no conversation-count or workspace-status labels. Tiles float over a solid background; invisible divider handles keep them resizable. Switch layouts with **⌘⌥1 / ⌘⌥2 / ⌘⌥3**. The interface follows the system's light/dark appearance with blue (`#218AFF`) iMessage bubbles, green SMS/RCS bubbles, and gray incoming messages. The original four-chat icon is green (`#39FF5A`).
 
@@ -37,7 +37,7 @@ open "$HOME/Applications/Mosaic.app" --args --demo
 
 ## Connect real conversations
 
-1. Open **Connect your Messages** in the sidebar.
+1. Mosaic opens its connection settings when it launches until Messages is connected. Later, open them from **Mosaic › Settings** (⌘,) or **Workspace › Connect Messages…**.
 2. Open **Full Disk Access**, add the built `Mosaic.app`, enable it, then quit and reopen Mosaic. The **Show Mosaic in Finder** button reveals the exact app to add. Grant access to the same app copy you will run regularly.
 3. Click **Connect Messages**. Mosaic reads conversations already synced to Apple Messages on this Mac and refreshes every three seconds.
 4. Send a text from a tile. macOS asks to let Mosaic control Messages; allow it. If denied, enable **Mosaic → Messages** in **Privacy & Security → Automation**. Failed submissions retain the draft.
@@ -62,7 +62,7 @@ Apple Messages must already be signed in. SMS/RCS availability depends on your e
 
 This is a first working implementation for **existing conversations and text replies**, not a full replacement for every Messages feature. Apple provides no general Messages history API. Mosaic reads the local `~/Library/Messages/chat.db` with a **read-only SQLite connection**, including its live WAL, and submits sends through Messages' AppleScript dictionary. No private Apple frameworks are linked.
 
-- The sidebar loads the 500 most recent conversations plus any open conversations. Search covers their names, participants, and latest previews.
+- The sidebar loads the 500 most recent conversations plus any open conversations, and holds nothing but the search field and the list. Search covers their names, participants, and latest previews.
 - Each open tile initially loads 100 messages; **Load earlier messages** increases this up to 1,000.
 - Plain text and common legacy typedstream bodies are displayed. Unknown rich-body formats are labeled with an **Open in Messages** fallback. Edits, unsends, rich formatting, and tapbacks are not rendered.
 - Attachments are shown from the copies Messages keeps in `~/Library/Messages/Attachments`. One that was never downloaded to this Mac shows as **Not downloaded**; open it in Messages. Link previews are fetched from the web by LinkPresentation, the same framework Messages uses, and are kept only in memory.

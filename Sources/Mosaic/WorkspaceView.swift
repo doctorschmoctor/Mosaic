@@ -85,11 +85,6 @@ struct WorkspaceView: View {
                     }
                 }.padding(.horizontal, 10)
             }.padding(.top, 12)
-            Divider().padding(.horizontal, 16)
-            Button { store.showSetup = true } label: {
-                HStack { Text(store.isLive ? "Connection settings" : "Connect your Messages"); Spacer(); Image(systemName: "arrow.up.right") }
-                    .font(.system(size: 12)).foregroundStyle(Palette.accent)
-            }.buttonStyle(.plain).padding(20)
         }.background(.regularMaterial)
     }
     private var emptyWorkspace: some View {

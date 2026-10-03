@@ -15,10 +15,11 @@ final class WorkspaceTests: XCTestCase {
         XCTAssertEqual(restored, state)
     }
     func testCapacityAndDuplicateOpening() {
-        var state = Workspace(openIDs: (0..<8).map(String.init))
+        var state = Workspace(openIDs: (0..<Workspace.maximumTiles).map(String.init))
+        XCTAssertEqual(Workspace.maximumTiles, 4)
         XCTAssertFalse(state.open("overflow"))
         XCTAssertTrue(state.open("3"))
-        XCTAssertEqual(state.openIDs.count, 8)
+        XCTAssertEqual(state.openIDs.count, 4)
         XCTAssertEqual(state.focusedID, "3")
         state.close("1")
         XCTAssertTrue(state.open("overflow"))

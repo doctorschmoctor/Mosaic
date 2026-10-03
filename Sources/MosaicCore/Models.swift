@@ -99,7 +99,7 @@ public enum WorkspaceLayout: String, Codable, CaseIterable, Sendable {
 
 /// Only layout, seen IDs, and drafts are persisted; message history stays in memory.
 public struct Workspace: Codable, Equatable, Sendable {
-    public static let maximumTiles = 8
+    public static let maximumTiles = 4
     public var openIDs: [String] = []
     public var focusedID: String?
     public var layout: WorkspaceLayout = .grid

@@ -42,8 +42,11 @@ struct ComposerEditor: NSViewRepresentable {
         // TextKit 1, set up by AppKit itself: its insertion point follows textContainerInset in every
         // state, including an empty field, where the default stack could draw the caret at the edge.
         let editor = DraftTextView(usingTextLayoutManager: false)
-        editor.frame = NSRect(origin: .zero, size: scroll.contentSize)
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.textContainerInset = NSSize(width: Self.margin, height: Self.margin)
         editor.textContainer?.widthTracksTextView = true
+        // Insets first, then the frame: the container's width is derived from both at frame time.
+        editor.frame = NSRect(origin: .zero, size: scroll.contentSize)
         editor.delegate = context.coordinator
         editor.isRichText = false
         editor.importsGraphics = false
@@ -52,8 +55,6 @@ struct ComposerEditor: NSViewRepresentable {
         editor.font = font
         editor.textColor = .labelColor
         editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
-        editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainerInset = NSSize(width: Self.margin, height: Self.margin)
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]
@@ -202,7 +203,9 @@ final class DraftTextView: NSTextView {
     func fitToClip(_ clip: NSSize) {
         guard clip.width > 0, clip.height > 0, let layoutManager, let textContainer else { return }
         minSize = NSSize(width: 0, height: clip.height)
+        if frame.origin != .zero { setFrameOrigin(.zero) }
         if abs(frame.width - clip.width) > 0.5 { setFrameSize(NSSize(width: clip.width, height: frame.height)) }
+        syncContainerWidth()
         layoutManager.ensureLayout(for: textContainer)
         // An empty field is never taller than its visible area, so it can never be scrolled.
         let used = string.isEmpty ? clip.height : textHeight + textContainerInset.height * 2
@@ -221,10 +224,28 @@ final class DraftTextView: NSTextView {
     }
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
+        syncContainerWidth()
         if abs(newSize.width - lastReportedWidth) > 0.5 {
             lastReportedWidth = newSize.width
             reportHeight()
         }
+    }
+    /// Text always starts exactly one margin in from the left and top. AppKit derives this point from
+    /// the container's width and can center a container sized before the inset was set, which put the
+    /// first line at the field's edge until the next resize.
+    override var textContainerOrigin: NSPoint { NSPoint(x: textContainerInset.width, y: textContainerInset.height) }
+    /// The container is as wide as the view minus both side margins, whatever order things were set in.
+    private func syncContainerWidth() {
+        guard let textContainer else { return }
+        let width = max(1, bounds.width - textContainerInset.width * 2)
+        if abs(textContainer.size.width - width) > 0.5 {
+            textContainer.size = NSSize(width: width, height: CGFloat.greatestFiniteMagnitude)
+            needsDisplay = true
+        }
+    }
+    override func viewWillDraw() {
+        syncContainerWidth()
+        super.viewWillDraw()
     }
     func requestFocus() {
         guard let window else { pendingFocus = true; return }

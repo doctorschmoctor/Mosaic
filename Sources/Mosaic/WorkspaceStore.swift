@@ -43,6 +43,9 @@ import MosaicCore
         self.defaults = defaults; self.database = database
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
         isLive = !forcedDemo && defaults.bool(forKey: "Mosaic.live")
+        // Connection settings open on launch until Messages is connected; afterwards they live in
+        // Mosaic › Settings and the Workspace menu.
+        showSetup = !isLive && !forcedDemo
         if isLive {
             restore()
             Task { await self.loadContacts(requestPermission: self.contactAuthorization == .notDetermined); await self.refresh() }
@@ -118,7 +121,7 @@ import MosaicCore
         if let origin, !workspace.openIDs.contains(id) { openingOrigins[id] = origin }
         var opened = false
         animateLayout { opened = workspace.open(id) }
-        guard opened else { banner = "Eight chats are open. Close a tile to make room for another."; return }
+        guard opened else { banner = "Four chats are open. Close a tile to make room for another."; return }
         markSeen(id)
         if isLive { Task { await refresh() } }
     }
