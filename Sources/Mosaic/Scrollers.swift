@@ -65,9 +65,13 @@ final class ScrollPinner: NSObject {
         clip.postsFrameChangedNotifications = true
         scrollView.documentView?.postsFrameChangedNotifications = true
         let center = NotificationCenter.default
-        // Views post these synchronously on the main thread.
+        // Views post these synchronously on the main thread. A scroll changes the clip view's
+        // bounds; a resize changes its frame (and the document's frame when content changes).
         observers.append(center.addObserver(forName: NSView.boundsDidChangeNotification, object: clip, queue: nil) { [weak self] _ in
             self?.clipBoundsChanged()
+        })
+        observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: nil) { [weak self] _ in
+            self?.sizeChanged()
         })
         if let document = scrollView.documentView {
             observers.append(center.addObserver(forName: NSView.frameDidChangeNotification, object: document, queue: nil) { [weak self] _ in

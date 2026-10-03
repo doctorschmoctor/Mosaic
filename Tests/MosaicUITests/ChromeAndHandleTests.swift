@@ -136,7 +136,7 @@ final class ChromeAndHandleTests: XCTestCase {
     }
 
     @MainActor func testMessageRowsPrecomputeDaySeparatorsAndStatusOnce() {
-        let base = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        let base = Date(timeIntervalSinceReferenceDate: 699_999_960) // the start of a minute
         let messages = [Message(id: "1", text: "a", date: base, isFromMe: false),
                         Message(id: "2", text: "b", date: base.addingTimeInterval(60), isFromMe: true),
                         Message(id: "3", text: "c", date: base.addingTimeInterval(86_400 * 2), isFromMe: true),
