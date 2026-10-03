@@ -3,15 +3,18 @@ import SwiftUI
 
 // Render the app's own view with fictional demo data. This captures the NSHostingView,
 // never the user's desktop, real conversations, or another application.
-// Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N]
+// Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N] [--settle SECONDS]
 
 MainActor.assumeIsolated {
     let output = CommandLine.arguments.dropFirst().first ?? "docs/workspace.png"
-    let scale: CGFloat = {
-        guard let index = CommandLine.arguments.firstIndex(of: "--scale"), CommandLine.arguments.indices.contains(index + 1),
-              let value = Double(CommandLine.arguments[index + 1]) else { return 2 }
-        return CGFloat(value)
-    }()
+    func option(_ name: String, default fallback: Double) -> Double {
+        guard let index = CommandLine.arguments.firstIndex(of: name), CommandLine.arguments.indices.contains(index + 1),
+              let value = Double(CommandLine.arguments[index + 1]) else { return fallback }
+        return value
+    }
+    let scale = CGFloat(option("--scale", default: 2))
+    // Link previews and thumbnails load asynchronously; the capture waits for them to settle.
+    let settle = option("--settle", default: 6)
     let app = NSApplication.shared
     app.setActivationPolicy(.prohibited)
     app.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
@@ -45,7 +48,7 @@ MainActor.assumeIsolated {
     }
     do {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { hosting.rootView = view }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { capture(output); print("Rendered demo preview: \(output)"); exit(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + settle) { capture(output); print("Rendered demo preview: \(output)"); exit(0) }
     }
     app.run()
 }
