@@ -37,6 +37,9 @@ import MosaicCore
     var sendErrors: [String: String] = [:]
     /// Files waiting in each tile's composer to go out with the next message.
     var outgoing: [String: [OutgoingAttachment]] = [:]
+    /// How many files are still on their way into each composer (photos being fetched from the
+    /// picker, a pasted picture being written); shown as placeholders meanwhile.
+    var outgoingLoading: [String: Int] = [:]
     var showSetup = false
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
@@ -441,6 +444,7 @@ import MosaicCore
 
     func send(_ id: String) async {
         if composeDrafts[id] != nil { await sendCompose(id); return }
+        await waitForArrivingAttachments(id)
         let originalDraft = drafts[id] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = outgoing[id] ?? []
@@ -524,10 +528,30 @@ import MosaicCore
         guard !urls.isEmpty, openIDs.contains(id) else { return }
         instantly { outgoing[id, default: []] += urls.map(OutgoingAttachment.init) }
     }
-    /// Adds a pasted or dropped picture to a tile's composer.
+    /// Adds a pasted or dropped picture to a tile's composer. The file is written off the main
+    /// thread, behind a placeholder.
     func attachPicture(_ data: Data, type: UTType, to id: String) {
-        do { attach([try OutgoingFiles.store(data, type: type)], to: id) }
-        catch { sendErrors[id] = "Couldn't keep the pasted picture: \(error.localizedDescription)" }
+        guard openIDs.contains(id) else { return }
+        beginAddingAttachments(1, to: id)
+        Task.detached(priority: .userInitiated) {
+            let url = try? OutgoingFiles.store(data, type: type)
+            await MainActor.run {
+                self.finishAddingAttachment(url, to: id)
+                if url == nil { self.sendErrors[id] = "Couldn't keep the pasted picture." }
+            }
+        }
+    }
+    /// This many files are on their way into a tile's composer; each then arrives through
+    /// `finishAddingAttachment` (nil for one that could not be read).
+    func beginAddingAttachments(_ count: Int, to id: String) {
+        guard count > 0, openIDs.contains(id) else { return }
+        instantly { outgoingLoading[id, default: 0] += count }
+    }
+    func finishAddingAttachment(_ url: URL?, to id: String) {
+        instantly {
+            if let remaining = outgoingLoading[id] { outgoingLoading[id] = remaining > 1 ? remaining - 1 : nil }
+            if let url, openIDs.contains(id) { outgoing[id, default: []].append(OutgoingAttachment(url: url)) }
+        }
     }
     func removeAttachment(_ attachmentID: String, from id: String) {
         guard let file = outgoing[id]?.first(where: { $0.id == attachmentID }) else { return }
@@ -615,8 +639,19 @@ import MosaicCore
     /// Sends a new message: to the conversation that has these people, or, for one new person, by
     /// asking Messages to start the conversation. Messages cannot start a new group from another
     /// app, so a new group is handed to Messages itself.
+    /// Photos still arriving from the picker when Return is pressed get a moment to land, so the
+    /// message goes out with them rather than without.
+    private func waitForArrivingAttachments(_ id: String) async {
+        var waited = 0
+        while (outgoingLoading[id] ?? 0) > 0, waited < 300 {
+            try? await Task.sleep(for: .milliseconds(50))
+            waited += 1
+        }
+    }
+
     private func sendCompose(_ draftID: String) async {
         guard let draft = composeDrafts[draftID] else { return }
+        await waitForArrivingAttachments(draftID)
         let originalDraft = drafts[draftID] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = outgoing[draftID] ?? []

@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import PhotosUI
+import QuickLookThumbnailing
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
 import MosaicCore
@@ -60,14 +62,36 @@ enum OutgoingFiles {
         try data.write(to: url, options: .atomic)
         return url
     }
-    /// Keeps a copy of a file that will not stay where it is (a Photos picker file representation
-    /// disappears when its completion handler returns).
+    /// Keeps a file that will not stay where it is (a Photos picker file representation disappears
+    /// when its completion handler returns). Moved when the volume allows it, which is instant;
+    /// copied otherwise.
     static func keep(_ source: URL, in directory: URL = pendingDirectory) throws -> URL {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let name = source.lastPathComponent.isEmpty ? "File" : source.lastPathComponent
         let url = directory.appending(path: "\(stamp()) \(name)")
-        try FileManager.default.copyItem(at: source, to: url)
+        do { try FileManager.default.moveItem(at: source, to: url) }
+        catch { try FileManager.default.copyItem(at: source, to: url) }
         return url
+    }
+    /// A small thumbnail for the composer strip, quickly: a camera file's embedded preview when it
+    /// has one, else a reduced decode; videos go through Quick Look at strip size.
+    static func quickThumbnail(for file: OutgoingAttachment, maxPixelSize: Int = 240) async -> NSImage? {
+        let url = file.url, kind = file.kind
+        return await Task.detached(priority: .userInitiated) { () -> NSImage? in
+            if kind == .image, let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
+                let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+                                                kCGImageSourceCreateThumbnailWithTransform: true,
+                                                kCGImageSourceShouldCacheImmediately: true,
+                                                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize]
+                if let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
+                    return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+                }
+            }
+            guard kind == .image || kind == .video else { return nil }
+            let request = QLThumbnailGenerator.Request(fileAt: url, size: CGSize(width: maxPixelSize / 2, height: maxPixelSize / 2), scale: 2,
+                                                       representationTypes: .thumbnail)
+            return try? await QLThumbnailGenerator.shared.generateBestRepresentation(for: request).nsImage
+        }.value
     }
     /// Copies a file into Messages' folder for sending, in a folder of its own; returns the copy.
     static func stage(_ source: URL, in directory: URL = stagingDirectory) throws -> URL {
@@ -120,9 +144,11 @@ enum OutgoingFiles {
 
 // MARK: - Composer strip
 
-/// The files waiting in a composer, as thumbnails above the text, each with a remove badge.
+/// The files waiting in a composer, as thumbnails above the text, each with a remove badge, plus a
+/// placeholder for every file still on its way in (from the Photos picker, or a picture being written).
 struct AttachmentStrip: View {
     let files: [OutgoingAttachment]
+    var loading = 0
     let onRemove: (String) -> Void
 
     var body: some View {
@@ -138,6 +164,12 @@ struct AttachmentStrip: View {
                             .buttonStyle(.plain).offset(x: 6, y: -6)
                             .accessibilityLabel("Remove \(file.name)")
                         }
+                }
+                ForEach(0..<max(0, loading), id: \.self) { _ in
+                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
+                        .frame(width: 60, height: 60)
+                        .overlay { ProgressView().controlSize(.small) }
+                        .accessibilityLabel("Adding a photo")
                 }
             }
             .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
@@ -171,7 +203,7 @@ struct OutgoingThumbnail: View {
         .accessibilityLabel(file.previewText)
         .task(id: file.id) {
             guard image == nil, file.kind == .image || file.kind == .video else { return }
-            image = await ThumbnailCache.shared.image(for: file.attachment)
+            image = await OutgoingFiles.quickThumbnail(for: file)
         }
     }
 }
@@ -183,13 +215,19 @@ struct OutgoingThumbnail: View {
 /// picker has a real view to anchor its popover to.
 struct AttachmentMenuButton: NSViewRepresentable {
     let conversationName: String
-    /// Files ready to attach: already in Mosaic's outgoing folder, or chosen by the user.
+    /// Files ready to attach now (chosen in the file panel).
     let onFiles: ([URL]) -> Void
+    /// This many photos are on their way from the Photos picker; each then arrives through
+    /// `onAdded` (nil when one could not be read), so the strip can show them coming.
+    let onBeginAdding: (Int) -> Void
+    let onAdded: (URL?) -> Void
 
     func makeNSView(context: Context) -> PlusButtonView { let view = PlusButtonView(); configure(view); return view }
     func updateNSView(_ view: PlusButtonView, context: Context) { configure(view) }
     private func configure(_ view: PlusButtonView) {
         view.onFiles = onFiles
+        view.onBeginAdding = onBeginAdding
+        view.onAdded = onAdded
         view.setAccessibilityLabel("Add a photo or file to the message to \(conversationName)")
         view.toolTip = "Photos and files"
     }
@@ -197,6 +235,8 @@ struct AttachmentMenuButton: NSViewRepresentable {
 
     final class PlusButtonView: NSView, PHPickerViewControllerDelegate {
         var onFiles: (([URL]) -> Void)?
+        var onBeginAdding: ((Int) -> Void)?
+        var onAdded: ((URL?) -> Void)?
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
@@ -269,24 +309,25 @@ struct AttachmentMenuButton: NSViewRepresentable {
                 if let card = picker.parent as? PhotosPickerCard { card.presentingViewController?.dismiss(card) }
                 else { picker.presentingViewController?.dismiss(picker) }
                 guard !results.isEmpty else { return }
-                let urls = await Self.copies(of: results)
-                if !urls.isEmpty { self.onFiles?(urls) }
+                // Placeholders at once; the files are fetched all at the same time and each shows
+                // up as soon as it lands.
+                self.onBeginAdding?(results.count)
+                await withTaskGroup(of: URL?.self) { group in
+                    for result in results { group.addTask { await Self.file(for: result) } }
+                    for await url in group { self.onAdded?(url) }
+                }
             }
         }
-        /// Copies each picked item's file representation while it exists.
-        private static func copies(of results: [PHPickerResult]) async -> [URL] {
-            var urls: [URL] = []
-            for result in results {
-                let provider = result.itemProvider
-                let type = [UTType.image, .movie].first { provider.hasItemConformingToTypeIdentifier($0.identifier) } ?? .data
-                let copied: URL? = await withCheckedContinuation { continuation in
-                    provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
-                        continuation.resume(returning: url.flatMap { try? OutgoingFiles.keep($0) })
-                    }
+        /// A picked item's file, kept while its representation exists (it is only valid inside the
+        /// handler). The current representation is asked for, so nothing is transcoded.
+        nonisolated private static func file(for result: PHPickerResult) async -> URL? {
+            let provider = result.itemProvider
+            let type = [UTType.image, .movie].first { provider.hasItemConformingToTypeIdentifier($0.identifier) } ?? .data
+            return await withCheckedContinuation { continuation in
+                provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
+                    continuation.resume(returning: url.flatMap { try? OutgoingFiles.keep($0) })
                 }
-                if let copied { urls.append(copied) }
             }
-            return urls
         }
 
         @objc private func chooseFile() {
@@ -303,9 +344,11 @@ struct AttachmentMenuButton: NSViewRepresentable {
     }
 }
 
-/// The Photos picker's popover card: a fixed-size host whose only child is the picker.
+/// The Photos picker's popover card: a fixed-size host whose only child is the picker. The card
+/// is as narrow as Messages' — the picker adds a sidebar of albums once it is wider, which
+/// squeezes the grid and its buttons.
 final class PhotosPickerCard: NSViewController {
-    static let size = NSSize(width: 420, height: 580)
+    static let size = NSSize(width: 356, height: 560)
     private let picker: PHPickerViewController
     init(picker: PHPickerViewController) {
         self.picker = picker

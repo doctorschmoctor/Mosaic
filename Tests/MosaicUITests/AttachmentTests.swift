@@ -115,4 +115,31 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(store.conversations[0].preview, "Photo")
         XCTAssertNil(store.outgoing[id])
     }
+
+    /// Photos from the picker arrive behind placeholders; a Return pressed while one is still on
+    /// its way waits for it, so the message goes out with the photo rather than without.
+    @MainActor func testArrivingPhotosShowPlaceholdersAndSendWaitsForThem() async throws {
+        let directory = try temporaryDirectory()
+        let photo = directory.appending(path: "photo.png")
+        try pngData().write(to: photo)
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let id = store.workspace.openIDs[0]
+        let before = store.conversations[0].messages.count
+        store.beginAddingAttachments(2, to: id)
+        XCTAssertEqual(store.outgoingLoading[id], 2)
+        store.finishAddingAttachment(nil, to: id)
+        XCTAssertEqual(store.outgoingLoading[id], 1, "one that could not be read just goes away")
+        XCTAssertNil(store.outgoing[id])
+        Task { try? await Task.sleep(for: .milliseconds(150)); store.finishAddingAttachment(photo, to: id) }
+        store.workspace.drafts[id] = "Here it is"
+        await store.send(id)
+        XCTAssertNil(store.outgoingLoading[id])
+        let messages = store.conversations[0].messages
+        XCTAssertEqual(messages.count, before + 2)
+        XCTAssertEqual(messages[before].attachments.first?.path, photo.path, "the late photo went out first")
+        XCTAssertEqual(messages[before + 1].text, "Here it is")
+        XCTAssertNil(store.outgoing[id])
+        store.beginAddingAttachments(1, to: "not-open")
+        XCTAssertNil(store.outgoingLoading["not-open"])
+    }
 }
