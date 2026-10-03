@@ -11,6 +11,9 @@ import SwiftUI
         }
         .defaultSize(width: 1320, height: 860)
         .windowStyle(.hiddenTitleBar)
+        // With the (empty, invisible) toolbar WorkspaceView declares, this gives the title bar Messages'
+        // height, which brings the window controls in from the corner.
+        .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Find a Conversation") { NotificationCenter.default.post(name: .focusSearch, object: nil) }

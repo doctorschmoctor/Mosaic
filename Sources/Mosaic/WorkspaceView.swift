@@ -22,6 +22,8 @@ enum Palette {
 }
 
 struct WorkspaceView: View {
+    /// Height of the unified title bar the window controls sit in.
+    static let titleBarHeight: CGFloat = 52
     @EnvironmentObject private var store: WorkspaceStore
     @FocusState private var searchFocused: Bool
     @StateObject private var keyboard = KeyboardRouter()
@@ -33,7 +35,7 @@ struct WorkspaceView: View {
             VStack(spacing: 0) {
                 if let banner = store.banner {
                     HStack { Text(banner).font(.callout); Spacer(); Button { store.banner = nil } label: { Image(systemName: "xmark") }.buttonStyle(.plain) }
-                        .padding(12).padding(.top, 18).background(Palette.accent.opacity(0.08))
+                        .padding(12).padding(.top, Self.titleBarHeight - 12).background(Palette.accent.opacity(0.08))
                 }
                 if let error = store.connectionError {
                     HStack(spacing: 12) {
@@ -42,12 +44,12 @@ struct WorkspaceView: View {
                         Spacer()
                         Button("Set up") { store.showSetup = true }
                         Button("Retry") { Task { await store.refresh() } }
-                    }.padding(14).padding(.top, 14).background(Color.orange.opacity(0.08))
+                    }.padding(14).padding(.top, Self.titleBarHeight - 14).background(Color.orange.opacity(0.08))
                 }
                 ZStack {
-                    // The top inset keeps tile headers clear of the hidden title bar, where a press drags the window.
+                    // Tile headers start below the title bar, where a press would drag the window instead.
                     TileWorkspace().padding(.horizontal, 8).padding(.bottom, 8)
-                        .padding(.top, store.banner == nil && store.connectionError == nil ? 20 : 10)
+                        .padding(.top, store.banner == nil && store.connectionError == nil ? Self.titleBarHeight - TileLayout.inset - 12 : 10)
                     if store.tiles.isEmpty { emptyWorkspace.transition(.opacity) }
                 }
             }.background(Palette.canvas)
@@ -55,6 +57,9 @@ struct WorkspaceView: View {
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(name: "workspace")
         .tint(Palette.accent)
+        // An invisible toolbar item is what makes the window use the taller unified title bar.
+        .toolbar { ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1).accessibilityHidden(true) } }
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .background(WindowReader { window in keyboard.attach(window: window, store: store) })
         .sheet(isPresented: $store.showSetup) { SetupView().environmentObject(store) }
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
@@ -68,7 +73,7 @@ struct WorkspaceView: View {
                     .accessibilityLabel("Find a conversation")
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
-                .padding(.horizontal, 10).padding(.top, 36)
+                .padding(.horizontal, 10).padding(.top, Self.titleBarHeight + 4)
             ScrollView {
                 LazyVStack(spacing: 3) {
                     ForEach(store.filteredConversations) { conversation in

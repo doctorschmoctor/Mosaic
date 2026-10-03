@@ -10,7 +10,7 @@ The tile area fills the right side of the window, with search directly above the
 
 Photos and videos sent in a conversation appear as thumbnails in the bubble; click one to open it, or use its context menu to show it in Finder. Other files show as a chip that opens the file. Web links are clickable and get a preview card with the page's title and image, like Messages. Thumbnails and previews are sized before they load, so the conversation never jumps while they arrive.
 
-Replies animate into the conversation and retain their bubble identity when Messages confirms them. The input looks like Messages' own: a capsule labeled with the conversation's service that grows with a draft up to a few lines, with no metadata footer or send button; its smiley button opens the system Emoji & Symbols palette for that field. Scroll bars inside tiles stay slim while you drag them. While tiles open, close, move, or resize, the cards animate and the bubbles inside them settle directly into place. Motion follows the Mac's Reduce Motion setting; launch with `--slow-motion` to inspect transitions.
+Replies animate into the conversation and retain their bubble identity when Messages confirms them. The input is labeled with the conversation's service, keeps text 8pt from its left, top and right edges, grows with a draft up to a few lines, and has no metadata footer or send button; its smiley button opens the system Emoji & Symbols palette for that field. Scroll bars inside tiles stay slim while you drag them. While tiles open, close, move, or resize, the cards animate and the bubbles inside them settle directly into place. Motion follows the Mac's Reduce Motion setting; launch with `--slow-motion` to inspect transitions.
 
 ## Run
 
@@ -48,8 +48,9 @@ Apple Messages must already be signed in. SMS/RCS availability depends on your e
 ## Workspace controls
 
 - Click a sidebar conversation to add it or focus an existing tile; double-click an open one to close its tile.
+- Click anywhere in a tile to type in its composer. Only the header drags the tile.
 - Drag a tile header to move its whole card; neighboring cards preview the new order before you release it. Text selection and message scrolling remain available inside the card.
-- **Tab** moves to the next tile's composer and **Shift–Tab** to the previous one, in the order the tiles appear.
+- **Tab** moves to the next tile's composer and **Shift–Tab** to the previous one, in the order the tiles appear, counted from the highlighted tile.
 - Drag the invisible gaps to resize. The grid always fits the window, so rows get shorter as more tiles open; Columns scroll horizontally when they exceed the window width.
 - Close a tile with ×; its draft remains available when reopened.
 - **Return** sends from the active composer; **Shift–Return** inserts a line break. The smiley button opens Emoji & Symbols.
@@ -66,7 +67,7 @@ This is a first working implementation for **existing conversations and text rep
 - Plain text and common legacy typedstream bodies are displayed. Unknown rich-body formats are labeled with an **Open in Messages** fallback. Edits, unsends, rich formatting, and tapbacks are not rendered.
 - Attachments are shown from the copies Messages keeps in `~/Library/Messages/Attachments`. One that was never downloaded to this Mac shows as **Not downloaded**; open it in Messages. Link previews are fetched from the web by LinkPresentation, the same framework Messages uses, and are kept only in memory.
 - Use Apple Messages to send attachments or reactions, make calls, add new recipients, or create groups. **Open Messages** opens the direct recipient when available; for groups, it opens the app and you select the group there.
-- A sent bubble shows only its time until Messages reports delivery or reading; automation accepting a send is not delivery. Sends are never retried automatically.
+- A sent bubble shows only its time; **Delivered** or **Read** appears under the most recent sent message only, once Messages reports it. Automation accepting a send is not delivery. Sends are never retried automatically.
 - Mosaic does not write read flags to Apple's database or synchronize unread state. Its new-activity indicators are local to the running session.
 - The integration depends on Apple's undocumented database schema and may need updates after a macOS release. Live reading/sending needs validation on your own Messages account after granting permissions.
 - The local build is ad-hoc signed, not notarized or intended for App Store submission. For distributing to other Macs, use your own Developer ID and notarization. Rebuilding or moving an ad-hoc signed app may require renewing its permissions.

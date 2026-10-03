@@ -25,6 +25,9 @@ struct ConversationTile: View {
                         senderNames: senderNames, onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
                 .equatable()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // A click anywhere in the thread puts the keyboard in this tile's composer; links,
+                // pictures and text selection keep working because this runs alongside their gestures.
+                .simultaneousGesture(TapGesture().onEnded { store.requestComposerFocus(conversation.id) })
             composer
         }
         .background(Palette.surface)
@@ -70,7 +73,7 @@ struct ConversationTile: View {
                 Spacer(minLength: 2)
             }
             .contentShape(Rectangle())
-            .onTapGesture { store.focus(conversation.id) }
+            .onTapGesture { store.requestComposerFocus(conversation.id) }
             .help(onDragChanged == nil ? "" : "Drag to move this tile")
             .hoverCursor(.openHand, enabled: onDragChanged != nil && store.tileDrag == nil)
             .gesture(DragGesture(minimumDistance: 4, coordinateSpace: .named(TileCanvas.space))
@@ -100,9 +103,9 @@ struct ConversationTile: View {
                     onSend: { Task { await store.send(conversation.id) } },
                     onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) })
                     .frame(height: composerHeight)
-                    // Messages' field: a capsule on one line, with the same corner radius as it grows.
-                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: ComposerEditor.minimumHeight / 2, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: ComposerEditor.minimumHeight / 2, style: .continuous)
+                    // The field's corners match the tile's.
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
                         .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
                 emojiButton.padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
             }
@@ -179,6 +182,7 @@ struct MessageList: View, Equatable {
                         Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity).padding(.top, 24)
                     }
+                    let latestOutgoing = conversation.messages.last(where: \.isFromMe)?.presentationID
                     ForEach(Array(conversation.messages.enumerated()), id: \.element.presentationID) { index, message in
                         VStack(spacing: 10) {
                             if index == 0 || !Calendar.current.isDate(message.date, inSameDayAs: conversation.messages[index - 1].date) {
@@ -186,7 +190,8 @@ struct MessageList: View, Equatable {
                                     .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                             }
                             MessageBubble(message: message, group: conversation.isGroup,
-                                          senderName: message.sender.map { senderNames[$0] ?? $0 }, live: isLive, service: conversation.service)
+                                          senderName: message.sender.map { senderNames[$0] ?? $0 }, live: isLive, service: conversation.service,
+                                          showsStatus: message.presentationID == latestOutgoing)
                         }
                         .id(message.presentationID)
                         .transition(Motion.reduced ? .opacity : .offset(x: message.isFromMe ? 12 : -12, y: 38)
@@ -232,6 +237,8 @@ struct MessageBubble: View {
     let senderName: String?
     let live: Bool
     let service: String
+    /// Delivery and read receipts appear under the most recent sent message only, as in Messages.
+    var showsStatus = true
 
     var body: some View {
         let fromMe = message.isFromMe
@@ -258,8 +265,8 @@ struct MessageBubble: View {
                 if fromMe {
                     // A sent message shows only its time until Messages reports delivery.
                     if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
-                    else if message.isRead { Text("· Read") }
-                    else if message.isDelivered { Text("· Delivered") }
+                    else if showsStatus && message.isRead { Text("· Read") }
+                    else if showsStatus && message.isDelivered { Text("· Delivered") }
                 }
             }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
         }

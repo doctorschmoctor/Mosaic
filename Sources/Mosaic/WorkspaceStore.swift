@@ -146,18 +146,24 @@ import MosaicCore
     @discardableResult func moveFocus(forward: Bool, from current: String?) -> Bool {
         let ids = workspace.openIDs
         guard !ids.isEmpty else { return false }
+        // Relative to the composer that has the keyboard, else to the focused tile: one press always moves
+        // to another tile. (It used to spend the first press focusing the current tile's composer.)
+        let origin = current.flatMap { ids.contains($0) ? $0 : nil } ?? workspace.focusedID.flatMap { ids.contains($0) ? $0 : nil }
         let target: String
-        if let current, let index = ids.firstIndex(of: current) {
+        if let origin, let index = ids.firstIndex(of: origin) {
             target = ids[(index + (forward ? 1 : ids.count - 1)) % ids.count]
-        } else if let focusedID = workspace.focusedID, ids.contains(focusedID) {
-            target = focusedID
         } else {
             target = forward ? ids[0] : ids[ids.count - 1]
         }
-        focus(target)
-        focusTarget = target
-        focusToken += 1
+        requestComposerFocus(target)
         return true
+    }
+    /// Focuses a tile and puts the keyboard in its composer in one step.
+    func requestComposerFocus(_ id: String) {
+        guard workspace.openIDs.contains(id) else { return }
+        focus(id, animated: false)
+        focusTarget = id
+        focusToken += 1
     }
     func reorder(_ id: String, before destination: String) { animateLayout { workspace.reorder(id, before: destination) } }
     func setLayout(_ layout: WorkspaceLayout) { animateLayout { tileDrag = nil; workspace.layout = layout } }

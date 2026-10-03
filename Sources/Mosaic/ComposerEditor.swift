@@ -4,9 +4,13 @@ import AppKit
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
 struct ComposerEditor: NSViewRepresentable {
-    /// Single-line height and the limit after which the field scrolls, matching Messages' composer.
-    static let minimumHeight: CGFloat = 32
-    static let maximumHeight: CGFloat = 112
+    static let font = NSFont.systemFont(ofSize: 12)
+    /// Text sits 8pt from the field's left, top and right edges; one line of text plus those margins
+    /// is the field's resting height, so the margins are the same whatever font metrics the Mac uses.
+    static let margin: CGFloat = 8
+    static let minimumHeight: CGFloat = (NSLayoutManager().defaultLineHeight(for: font) + margin * 2).rounded(.up)
+    /// After about six lines the field stops growing and scrolls.
+    static let maximumHeight: CGFloat = (NSLayoutManager().defaultLineHeight(for: font) * 6 + margin * 2).rounded(.up)
 
     @Binding var text: String
     var placeholder = ""
@@ -23,6 +27,9 @@ struct ComposerEditor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ComposerScrollView {
         let scroll = ComposerScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: Self.minimumHeight))
+        let clip = PinnedClipView()
+        clip.drawsBackground = false
+        scroll.contentView = clip
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
@@ -31,7 +38,7 @@ struct ComposerEditor: NSViewRepresentable {
         // The field only scrolls once the text is taller than its maximum height; it never bounces.
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
-        let font = NSFont.systemFont(ofSize: 12)
+        let font = Self.font
         // TextKit 1, set up by AppKit itself: its insertion point follows textContainerInset in every
         // state, including an empty field, where the default stack could draw the caret at the edge.
         let editor = DraftTextView(usingTextLayoutManager: false)
@@ -45,7 +52,8 @@ struct ComposerEditor: NSViewRepresentable {
         editor.font = font
         editor.textColor = .labelColor
         editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
-        editor.textContainerInset = NSSize(width: 8, height: DraftTextView.verticalInset(for: font, height: Self.minimumHeight))
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.textContainerInset = NSSize(width: Self.margin, height: Self.margin)
         editor.isVerticallyResizable = true
         editor.isHorizontallyResizable = false
         editor.autoresizingMask = [.width]
@@ -117,6 +125,26 @@ final class ComposerScrollView: NSScrollView {
         super.tile()
         (documentView as? DraftTextView)?.fitToClip(contentSize)
     }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            (self.documentView as? DraftTextView)?.fitToClip(self.contentSize)
+        }
+    }
+}
+
+/// Keeps the text pinned to the top whenever it fits in the field. AppKit otherwise keeps a scroll
+/// offset left over from an earlier, taller state, which showed a new tile's composer with its
+/// placeholder shifted until the field was scrolled by hand.
+final class PinnedClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        rect.origin.x = 0
+        if let document = documentView, document.frame.height <= bounds.height + 0.5 { rect.origin.y = 0 }
+        return rect
+    }
 }
 
 final class DraftTextView: NSTextView {
@@ -143,12 +171,6 @@ final class DraftTextView: NSTextView {
     func showEmojiPicker() {
         requestFocus()
         NSApp.orderFrontCharacterPalette(nil)
-    }
-
-    /// Centers one line of text inside the minimum composer height.
-    static func verticalInset(for font: NSFont, height: CGFloat) -> CGFloat {
-        let line = NSLayoutManager().defaultLineHeight(for: font)
-        return max(4, ((height - line) / 2).rounded(.down))
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -182,13 +204,20 @@ final class DraftTextView: NSTextView {
         minSize = NSSize(width: 0, height: clip.height)
         if abs(frame.width - clip.width) > 0.5 { setFrameSize(NSSize(width: clip.width, height: frame.height)) }
         layoutManager.ensureLayout(for: textContainer)
-        let used = textHeight + textContainerInset.height * 2
+        // An empty field is never taller than its visible area, so it can never be scrolled.
+        let used = string.isEmpty ? clip.height : textHeight + textContainerInset.height * 2
         let height = max(used.rounded(.up), clip.height)
         if abs(frame.height - height) > 0.5 { setFrameSize(NSSize(width: clip.width, height: height)) }
         if height <= clip.height + 0.5, let clipView = enclosingScrollView?.contentView, clipView.bounds.origin != .zero {
             clipView.scroll(to: .zero)
             enclosingScrollView?.reflectScrolledClipView(clipView)
         }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let scroll = enclosingScrollView { fitToClip(scroll.contentSize) }
+        guard pendingFocus, window != nil else { return }
+        DispatchQueue.main.async { [weak self] in self?.requestFocus() }
     }
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -197,18 +226,19 @@ final class DraftTextView: NSTextView {
             reportHeight()
         }
     }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        guard pendingFocus, window != nil else { return }
-        DispatchQueue.main.async { [weak self] in self?.requestFocus() }
-    }
-
     func requestFocus() {
         guard let window else { pendingFocus = true; return }
         pendingFocus = false
-        if window.firstResponder !== self { window.makeFirstResponder(self) }
+        // Already typing here: leave the caret where it is.
+        guard window.firstResponder !== self else { return }
+        window.makeFirstResponder(self)
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         scrollRangeToVisible(selectedRange())
+    }
+    override func scrollRangeToVisible(_ range: NSRange) {
+        // Nothing to bring into view while the whole draft fits; scrolling would only shift the text.
+        if let clip = enclosingScrollView?.contentSize, frame.height <= clip.height + 0.5 { return }
+        super.scrollRangeToVisible(range)
     }
 
     /// Height of the laid-out text. An empty field measures as exactly one line, so every tile's
@@ -233,7 +263,8 @@ final class DraftTextView: NSTextView {
         let padding = textContainer?.lineFragmentPadding ?? 0
         let origin = textContainerOrigin
         let line = layoutManager?.defaultLineHeight(for: font) ?? 16
-        let rect = NSRect(x: origin.x + padding, y: origin.y, width: max(0, bounds.width - origin.x * 2 - padding * 2), height: line)
+        // The same margins as the typed text, so the placeholder and the first character line up.
+        let rect = NSRect(x: origin.x + padding, y: origin.y, width: max(0, bounds.width - origin.x - textContainerInset.width - padding * 2), height: line)
         NSAttributedString(string: placeholder, attributes: [.font: font, .foregroundColor: NSColor.placeholderTextColor])
             .draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
