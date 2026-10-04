@@ -317,6 +317,9 @@ struct AttachmentMenuButton: NSViewRepresentable {
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
         private var photosPopover: NSPopover?
+        /// Watches for Esc while the Photos card is open, wherever the keyboard is (the card's
+        /// window does not always become key, and then Esc went to the message field instead).
+        private var escapeMonitor: Any?
 
         override init(frame: NSRect) {
             super.init(frame: frame)
@@ -392,13 +395,32 @@ struct AttachmentMenuButton: NSViewRepresentable {
             popover.contentViewController = NSHostingController(rootView: view)
             popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
             photosPopover = popover
-            // The card takes the keyboard, so Esc reaches it (and closes it) straight away.
-            popover.contentViewController?.view.window?.makeKey()
+            watchEscape()
+            // The card takes the keyboard, once its window is up.
+            DispatchQueue.main.async { [weak popover] in popover?.contentViewController?.view.window?.makeKey() }
+        }
+        /// Esc, with no modifier, closes the open card and puts the keyboard back in the message field.
+        private func watchEscape() {
+            stopWatchingEscape()
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let popover = self.photosPopover, popover.isShown, event.keyCode == 53,
+                      event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty else { return event }
+                popover.close()
+                self.onFinish?()
+                return nil
+            }
+        }
+        private func stopWatchingEscape() {
+            if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
+            escapeMonitor = nil
         }
         func popoverDidClose(_ notification: Notification) {
             photosPopover = nil
-            // Closed by Esc (the popover's own handling): back to the message field, as Cancel does.
-            if let event = NSApp.currentEvent, event.type == .keyDown, event.keyCode == 53 { onFinish?() }
+            stopWatchingEscape()
+        }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window == nil { photosPopover?.close(); stopWatchingEscape() }
         }
 
         @objc private func chooseFile() {
