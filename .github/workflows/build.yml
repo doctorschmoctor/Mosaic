@@ -16,8 +16,8 @@ jobs:
           name: Mosaic-macOS
           path: build/Mosaic.zip
       - name: Render demo preview
-        run: mkdir -p build/preview && ./scripts/render-preview.sh build/preview/workspace.png
+        run: mkdir -p build/preview && ./scripts/render-preview.sh build/preview/workspace.png && .build/MosaicPreview build/preview/workspace-zoom-160.png --demo --zoom 1.6 && .build/MosaicPreview build/preview/workspace-zoom-80.png --demo --zoom 0.8
       - uses: actions/upload-artifact@v4
         with:
           name: Mosaic-preview
-          path: build/preview/workspace.png
+          path: build/preview/*.png
