@@ -4,15 +4,17 @@ def edit(rel, old, new, count=1):
     p = root / rel; s = p.read_text()
     assert old in s, (rel, old[:60]); p.write_text(s.replace(old, new) if count == 0 else s.replace(old, new, count))
 tile = 'Sources/Mosaic/ConversationTile.swift'
-# Counters always.
-edit(tile, '    var body: some View {\n        let prepared', '    var body: some View {\n        let _ = BenchCounters.hit(0)\n        let prepared')
-s = (root / tile).read_text()
-i = s.index('struct MessageBubble: View'); j = s.index('var body: some View {', i)
-s = s[:j] + 'var body: some View {\n        let _ = BenchCounters.hit(1)' + s[j + len('var body: some View {'):]
-k = s.index('struct ConversationTile: View'); m = s.index('var body: some View {', k)
-s = s[:m] + 'var body: some View {\n        let _ = BenchCounters.hit(3)' + s[m + len('var body: some View {'):]
-(root / tile).write_text(s)
-edit('Sources/Mosaic/MediaViews.swift', '    var body: some View {\n        switch attachment.kind', '    var body: some View {\n        let _ = BenchCounters.hit(2)\n        switch attachment.kind')
+# Counters always: the first `var body` after each struct declaration.
+import glob
+for index, struct in enumerate(['MessageList', 'MessageBubble', 'AttachmentView', 'ConversationTile', 'TileWorkspace']):
+    for path in glob.glob(str(root / 'Sources/Mosaic/*.swift')):
+        text = pathlib.Path(path).read_text()
+        match = re.search(r'\bstruct ' + struct + r'\b[^{]*\{', text)
+        if not match: continue
+        j = text.index('var body: some View {', match.end())
+        text = text[:j] + 'var body: some View {\n        let _ = BenchCounters.hit(%d)' % index + text[j + len('var body: some View {'):]
+        pathlib.Path(path).write_text(text)
+        break
 for name in names:
     if name == 'nogeo':
         s = (root / tile).read_text()
