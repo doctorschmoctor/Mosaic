@@ -9,7 +9,8 @@ jobs:
           fetch-depth: 0
       - name: Sample new drag
         run: ./scripts/bench/sample.sh 8fa39c8
-      - uses: actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: samples
           path: build/sample-*.txt

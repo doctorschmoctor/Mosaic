@@ -1,6 +1,6 @@
 #!/bin/bash
 # Usage: scripts/bench/sample.sh <commit> — samples the main thread while the drag loop runs.
-set -uo pipefail
+set -u
 cd "$(dirname "$0")/../.."
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 mkdir -p .build/bench build
@@ -18,6 +18,6 @@ sample $pid 6 -mayDie -file build/sample-$sha.txt > /dev/null 2>&1
 wait $pid
 cat build/sampled-$sha.log | grep -E "RESULT|PARTS"
 echo "---- top of stack ($sha)"
-awk '/Sort by top of stack/,0' build/sample-$sha.txt | head -60
-echo "---- call graph excerpt ($sha)"
-awk '/Call graph:/,/Total number in stack/' build/sample-$sha.txt | grep -E "^ +[+!:| ]*[0-9]+ " | awk '$0 ~ /[0-9]+ / {print}' | head -250
+awk '/Sort by top of stack/,0' build/sample-$sha.txt | head -40 | cut -c1-160 || true
+echo "---- main thread call graph ($sha)"
+python3 scripts/bench/callgraph.py build/sample-$sha.txt 60 || true
