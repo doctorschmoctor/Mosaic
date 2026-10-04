@@ -62,7 +62,8 @@ MainActor.assumeIsolated {
         BenchCounters.counts = [Int](repeating: 0, count: 8)
         var cpuTimes: [Double] = [], wallTimes: [Double] = []
         var parts = [Double](repeating: 0, count: 5)
-        let steps = 400
+        let steps = CommandLine.arguments.firstIndex(of: "--steps").flatMap { Int(CommandLine.arguments[$0 + 1]) } ?? 400
+        print("STEPS-BEGIN"); fflush(stdout)
         for i in 0..<steps {
             let angle = Double(i) / Double(steps) * .pi * 4
             let translation = CGSize(width: cos(angle) * 320 - 320 + Double(i % 7), height: sin(angle) * 220)

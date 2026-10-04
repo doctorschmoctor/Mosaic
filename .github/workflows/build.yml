@@ -7,11 +7,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Drag benchmark, new drag
-        run: ./scripts/bench/run.sh 8fa39c8 ""
-      - name: Drag benchmark, before
-        run: ./scripts/bench/run.sh 614e48d ""
+      - name: Sample new drag
+        run: ./scripts/bench/sample.sh 8fa39c8
       - uses: actions/upload-artifact@v4
         with:
-          name: drag-captures
-          path: build/bench-*.png
+          name: samples
+          path: build/sample-*.txt
