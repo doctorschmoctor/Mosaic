@@ -119,14 +119,30 @@ public final class MessagesReader: @unchecked Sendable {
         func col(_ name: String, prefix: String = "m", fallback: String = "0") -> String { message.contains(name) ? "\(prefix).\(name)" : fallback }
     }
 
+    /// Statements whose SQL is fixed for a connection (it depends only on the probed schema),
+    /// prepared on first use and reset after each. Finalized when the connection closes.
+    private var statements: [String: OpaquePointer] = [:]
+    /// Counters for tests: statements compiled, and member rows read by the last load.
+    private var prepareCount = 0
+    private var memberRows = 0
+
     public init(database: MessagesDatabase) { self.database = database }
-    deinit { if let db { sqlite3_close(db) } }
+    deinit {
+        for statement in statements.values { sqlite3_finalize(statement) }
+        if let db { sqlite3_close(db) }
+    }
+
+    /// How many statements this reader has compiled so far (cached ones count once).
+    public var preparedStatementCount: Int { queue.sync { prepareCount } }
+    /// How many chat-member rows the last full load read (only the listed and open chats').
+    public var lastMemberRowCount: Int { queue.sync { memberRows } }
 
     /// Loads what the request asks for, or returns nil when the database has not changed since the
     /// load that produced `known` and the request is the same as that load's.
-    public func load(_ request: LoadRequest, unlessUnchangedFrom known: ChangeToken?) async throws -> DatabaseSnapshot? {
+    /// `background` runs the read at utility priority (a fallback poll while Mosaic is not in front).
+    public func load(_ request: LoadRequest, unlessUnchangedFrom known: ChangeToken?, background: Bool = false) async throws -> DatabaseSnapshot? {
         try await withCheckedThrowingContinuation { continuation in
-            queue.async {
+            queue.async(qos: background ? .utility : .userInitiated, flags: background ? .enforceQoS : []) {
                 do { continuation.resume(returning: try self.perform(request, unlessUnchangedFrom: known)) }
                 catch { continuation.resume(throwing: error) }
             }
@@ -151,8 +167,8 @@ public final class MessagesReader: @unchecked Sendable {
             try execute(db, "BEGIN DEFERRED")
             defer { try? execute(db, "ROLLBACK") }
             let schema = try schema(db)
-            let lookup = try prepare(db, "SELECT ROWID FROM chat WHERE guid = ?")
-            defer { sqlite3_finalize(lookup) }
+            let lookup = try cached(db, "SELECT ROWID FROM chat WHERE guid = ?")
+            defer { recycle(lookup) }
             bind(lookup, 1, guid)
             guard sqlite3_step(lookup) == SQLITE_ROW else { return nil }
             let thread = try history(db, chatID: sqlite3_column_int64(lookup, 0), schema: schema, limit: limit)
@@ -219,6 +235,8 @@ public final class MessagesReader: @unchecked Sendable {
         return opened
     }
     private func closeConnection() {
+        for statement in statements.values { sqlite3_finalize(statement) }
+        statements.removeAll()
         if let db { sqlite3_close(db) }
         db = nil; schema = nil; lastRequest = nil; fileIdentity = nil
     }
@@ -226,8 +244,8 @@ public final class MessagesReader: @unchecked Sendable {
         (try? FileManager.default.attributesOfItem(atPath: path)[.systemFileNumber] as? NSNumber)?.uint64Value
     }
     private func dataVersion(_ db: OpaquePointer) throws -> Int64 {
-        let statement = try prepare(db, "PRAGMA data_version")
-        defer { sqlite3_finalize(statement) }
+        let statement = try cached(db, "PRAGMA data_version")
+        defer { recycle(statement) }
         guard sqlite3_step(statement) == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
         return sqlite3_column_int64(statement, 0)
     }
@@ -248,8 +266,6 @@ public final class MessagesReader: @unchecked Sendable {
         try execute(db, "BEGIN DEFERRED")
         defer { try? execute(db, "ROLLBACK") }
         let schema = try schema(db)
-        // One query for every conversation's members, instead of one query per conversation.
-        let membersByChat = try participantsByChat(db)
         let body = schema.col("attributedBody", fallback: "NULL")
         let retracted = schema.col("date_retracted", fallback: "0")
         let sql = """
@@ -259,49 +275,66 @@ public final class MessagesReader: @unchecked Sendable {
         LEFT JOIN message m ON m.ROWID = (SELECT MAX(message_id) FROM chat_message_join WHERE chat_id = c.ROWID)
         ORDER BY COALESCE(m.date, 0) DESC LIMIT ?
         """
-        let statement = try prepare(db, sql)
-        defer { sqlite3_finalize(statement) }
-        sqlite3_bind_int(statement, 1, Int32(max(1, min(request.limit, 5000))))
-        var conversations: [Conversation] = []
-        var status = sqlite3_step(statement)
-        while status == SQLITE_ROW {
-            let rowID = sqlite3_column_int64(statement, 0)
-            let guid = string(statement, 1) ?? ""
-            let members = membersByChat[rowID] ?? []
-            let displayName = string(statement, 2) ?? ""
-            let fallback = members.isEmpty ? (string(statement, 3) ?? "Conversation") : members.joined(separator: ", ")
-            let name = displayName.isEmpty ? fallback : displayName
-            let lastID = sqlite3_column_int64(statement, 8)
-            // An unsent message's words are gone: the preview says so instead of showing them.
-            let wasUnsent = sqlite3_column_int64(statement, 9) != 0
-            let preview = wasUnsent ? "Unsent message" : BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6))
-            let thread = request.openIDs.contains(guid) ? try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: guid)) : LoadedThread()
-            let unread = try request.seenBoundaries[guid].map { boundary in
-                lastID > boundary ? try unreadCount(db, chatID: rowID, schema: schema, after: boundary) : 0
-            } ?? 0
-            conversations.append(Conversation(id: guid, databaseID: rowID, name: name, participants: members,
-                service: string(statement, 4) ?? "iMessage", preview: preview.isEmpty ? "Attachment or activity" : preview,
-                lastActivity: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 7)), unreadCount: unread,
-                messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: lastID))
-            status = sqlite3_step(statement)
+        // First the listed chats themselves, then their members (only theirs), then histories.
+        struct Summary {
+            let rowID: Int64; let guid: String; let displayName: String; let identifier: String?; let service: String?
+            let preview: String; let date: Int64; let lastID: Int64
         }
-        guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
-        // Keep pinned conversations even if they fall outside the recent-conversation limit.
-        for id in request.openIDs.subtracting(Set(conversations.map(\.id))) {
-            let pinned = try prepare(db, "SELECT ROWID, display_name, chat_identifier, service_name FROM chat WHERE guid = ?")
-            defer { sqlite3_finalize(pinned) }
-            bind(pinned, 1, id)
-            if sqlite3_step(pinned) == SQLITE_ROW {
-                let rowID = sqlite3_column_int64(pinned, 0)
-                let members = membersByChat[rowID] ?? []
-                let thread = try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: id))
-                let display = string(pinned, 1) ?? ""
-                conversations.append(Conversation(id: id, databaseID: rowID,
-                    name: display.isEmpty ? (members.isEmpty ? (string(pinned, 2) ?? id) : members.joined(separator: ", ")) : display,
-                    participants: members, service: string(pinned, 3) ?? "iMessage", preview: thread.messages.last?.text ?? "",
-                    lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions,
-                    referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0))
+        var summaries: [Summary] = []
+        do {
+            let statement = try cached(db, sql)
+            defer { recycle(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, min(request.limit, 5000))))
+            var status = sqlite3_step(statement)
+            while status == SQLITE_ROW {
+                // An unsent message's words are gone: the preview says so instead of showing them.
+                let wasUnsent = sqlite3_column_int64(statement, 9) != 0
+                summaries.append(Summary(rowID: sqlite3_column_int64(statement, 0), guid: string(statement, 1) ?? "",
+                    displayName: string(statement, 2) ?? "", identifier: string(statement, 3), service: string(statement, 4),
+                    preview: wasUnsent ? "Unsent message" : BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6)),
+                    date: sqlite3_column_int64(statement, 7), lastID: sqlite3_column_int64(statement, 8)))
+                status = sqlite3_step(statement)
             }
+            guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        }
+        // Open tiles outside the recent-conversation limit stay available.
+        struct Pinned { let rowID: Int64; let guid: String; let displayName: String; let identifier: String?; let service: String? }
+        var pinned: [Pinned] = []
+        for id in request.openIDs.subtracting(Set(summaries.map(\.guid))).sorted() {
+            let lookup = try cached(db, "SELECT ROWID, display_name, chat_identifier, service_name FROM chat WHERE guid = ?")
+            defer { recycle(lookup) }
+            bind(lookup, 1, id)
+            if sqlite3_step(lookup) == SQLITE_ROW {
+                pinned.append(Pinned(rowID: sqlite3_column_int64(lookup, 0), guid: id, displayName: string(lookup, 1) ?? "",
+                                     identifier: string(lookup, 2), service: string(lookup, 3)))
+            }
+        }
+        let membersByChat = try participants(db, chats: summaries.map(\.rowID) + pinned.map(\.rowID))
+
+        var conversations: [Conversation] = []
+        conversations.reserveCapacity(summaries.count + pinned.count)
+        for summary in summaries {
+            let members = membersByChat[summary.rowID] ?? []
+            let fallback = members.isEmpty ? (summary.identifier ?? "Conversation") : members.joined(separator: ", ")
+            let name = summary.displayName.isEmpty ? fallback : summary.displayName
+            let guid = summary.guid
+            let thread = request.openIDs.contains(guid) ? try history(db, chatID: summary.rowID, schema: schema, limit: request.historyLimit(for: guid)) : LoadedThread()
+            let unread = try request.seenBoundaries[guid].map { boundary in
+                summary.lastID > boundary ? try unreadCount(db, chatID: summary.rowID, schema: schema, after: boundary) : 0
+            } ?? 0
+            conversations.append(Conversation(id: guid, databaseID: summary.rowID, name: name, participants: members,
+                service: summary.service ?? "iMessage", preview: summary.preview.isEmpty ? "Attachment or activity" : summary.preview,
+                lastActivity: MessagesDatabase.appleDate(summary.date), unreadCount: unread,
+                messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: summary.lastID))
+        }
+        for chat in pinned {
+            let members = membersByChat[chat.rowID] ?? []
+            let thread = try history(db, chatID: chat.rowID, schema: schema, limit: request.historyLimit(for: chat.guid))
+            conversations.append(Conversation(id: chat.guid, databaseID: chat.rowID,
+                name: chat.displayName.isEmpty ? (members.isEmpty ? (chat.identifier ?? chat.guid) : members.joined(separator: ", ")) : chat.displayName,
+                participants: members, service: chat.service ?? "iMessage", preview: thread.messages.last?.text ?? "",
+                lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions,
+                referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0))
         }
         return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, token: token)
     }
@@ -323,11 +356,11 @@ public final class MessagesReader: @unchecked Sendable {
         }
         if schema.message.contains("item_type") { filters.append("COALESCE(m.item_type, 0) = 0") }
         if schema.message.contains("date_retracted") { filters.append("COALESCE(m.date_retracted, 0) = 0") }
-        let statement = try prepare(db, """
+        let statement = try cached(db, """
             SELECT COUNT(*) FROM (SELECT 1 FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
             WHERE \(filters.joined(separator: " AND ")) LIMIT 99)
             """)
-        defer { sqlite3_finalize(statement) }
+        defer { recycle(statement) }
         sqlite3_bind_int64(statement, 1, chatID)
         sqlite3_bind_int64(statement, 2, boundary)
         guard sqlite3_step(statement) == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
@@ -341,7 +374,7 @@ public final class MessagesReader: @unchecked Sendable {
         func col(_ name: String, _ prefix: String = "m", _ fallback: String = "0") -> String { schema.col(name, prefix: prefix, fallback: fallback) }
         let hasAssociation = schema.message.contains("associated_message_type")
         let notReaction = hasAssociation ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
-        let statement = try prepare(db, """
+        let statement = try cached(db, """
             SELECT m.ROWID, m.text, \(col("attributedBody", "m", "NULL")), m.date, m.is_from_me, h.id,
                    \(col("is_delivered")), \(col("is_read")), \(col("error")), \(col("cache_has_attachments")),
                    \(col("associated_message_type")), \(col("item_type")), \(col("guid", "m", "NULL")),
@@ -351,7 +384,7 @@ public final class MessagesReader: @unchecked Sendable {
             LEFT JOIN handle h ON h.ROWID = m.handle_id
             WHERE j.chat_id = ? \(notReaction) ORDER BY m.date DESC, m.ROWID DESC LIMIT ?
             """)
-        defer { sqlite3_finalize(statement) }
+        defer { recycle(statement) }
         sqlite3_bind_int64(statement, 1, chatID)
         sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 1000))))
         struct Row {
@@ -378,7 +411,8 @@ public final class MessagesReader: @unchecked Sendable {
             status = sqlite3_step(statement)
         }
         guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
-        let files = try attachments(db, chatID: chatID, schema: schema, from: rows.map(\.id).min(), messageIDs: Set(rows.map(\.id)))
+        // Files are looked up for this page's rows by their exact IDs.
+        let files = try attachments(db, schema: schema, messageIDs: rows.map(\.id))
         var messages: [Message] = []
         messages.reserveCapacity(rows.count)
         for row in rows.reversed() {
@@ -443,7 +477,7 @@ public final class MessagesReader: @unchecked Sendable {
     /// as the oldest loaded message, so the scan is bounded by the page.
     private func reactions(_ db: OpaquePointer, chatID: Int64, schema: Schema, targets: Set<String>, since: Date?) throws -> [ReactionEvent] {
         guard !targets.isEmpty, let since else { return [] }
-        let statement = try prepare(db, """
+        let statement = try cached(db, """
             SELECT m.ROWID, m.date, m.is_from_me, h.id, m.associated_message_guid, m.associated_message_type, m.text
             FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
             LEFT JOIN handle h ON h.ROWID = m.handle_id
@@ -451,7 +485,7 @@ public final class MessagesReader: @unchecked Sendable {
               AND (m.date >= ?2 OR (m.date < 10000000000 AND m.date >= ?3))
             ORDER BY m.date, m.ROWID
             """)
-        defer { sqlite3_finalize(statement) }
+        defer { recycle(statement) }
         // Dates are nanoseconds in current databases and seconds in old ones; accept either.
         sqlite3_bind_int64(statement, 1, chatID)
         sqlite3_bind_int64(statement, 2, Int64((since.timeIntervalSinceReferenceDate * 1_000_000_000).rounded(.down)))
@@ -470,57 +504,79 @@ public final class MessagesReader: @unchecked Sendable {
         return events
     }
 
-    /// Attachment metadata for the loaded messages. Missing tables (older or synthetic schemas) yield no attachments.
-    private func attachments(_ db: OpaquePointer, chatID: Int64, schema: Schema, from minimumID: Int64?, messageIDs: Set<Int64>) throws -> [Int64: [Attachment]] {
-        guard let minimumID, !messageIDs.isEmpty else { return [:] }
+    /// Attachment metadata for the given messages, looked up by their exact IDs (the join's
+    /// message index serves the lookup; nothing else of the chat is scanned). Missing tables
+    /// (older or synthetic schemas) yield no attachments.
+    private func attachments(_ db: OpaquePointer, schema: Schema, messageIDs: [Int64]) throws -> [Int64: [Attachment]] {
+        guard !messageIDs.isEmpty else { return [:] }
         let columns = schema.attachment
-        guard columns.contains("filename"), schema.attachmentJoin.contains("attachment_id") else { return [:] }
+        guard columns.contains("filename"), schema.attachmentJoin.contains("attachment_id"), schema.attachmentJoin.contains("message_id") else { return [:] }
         func col(_ name: String, fallback: String = "NULL") -> String { columns.contains(name) ? "a.\(name)" : fallback }
-        let statement = try prepare(db, """
-            SELECT maj.message_id, a.ROWID, \(col("guid")), a.filename, \(col("mime_type")), \(col("uti")),
-                   \(col("transfer_name")), \(col("is_sticker", fallback: "0")), \(col("hide_attachment", fallback: "0")), \(col("total_bytes", fallback: "0"))
-            FROM chat_message_join j
-            JOIN message_attachment_join maj ON maj.message_id = j.message_id
-            JOIN attachment a ON a.ROWID = maj.attachment_id
-            WHERE j.chat_id = ? AND j.message_id >= ?
-            ORDER BY maj.message_id, a.ROWID
-            """)
-        defer { sqlite3_finalize(statement) }
-        sqlite3_bind_int64(statement, 1, chatID)
-        sqlite3_bind_int64(statement, 2, minimumID)
         var result: [Int64: [Attachment]] = [:]
-        while sqlite3_step(statement) == SQLITE_ROW {
-            let messageID = sqlite3_column_int64(statement, 0)
-            guard messageIDs.contains(messageID), sqlite3_column_int(statement, 8) == 0 else { continue }
-            let rawPath = string(statement, 3)
-            // Link-preview payloads are rendered from the URL itself, not shown as files.
-            if let rawPath, rawPath.hasSuffix(".pluginPayloadAttachment") { continue }
-            let path = MessagesDatabase.resolve(rawPath, home: database.home)
-            let name = string(statement, 6) ?? rawPath.map { ($0 as NSString).lastPathComponent } ?? "Attachment"
-            let bytes = sqlite3_column_int64(statement, 9)
-            var attachment = Attachment(id: string(statement, 2) ?? "attachment-\(sqlite3_column_int64(statement, 1))",
-                path: path.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }, name: name,
-                mimeType: string(statement, 4), uti: string(statement, 5), isSticker: sqlite3_column_int(statement, 7) != 0,
-                byteCount: bytes > 0 ? Int(bytes) : nil)
-            if attachment.kind == .image, let file = attachment.path, let size = ImageSizeProbe.shared.size(at: file) {
-                attachment = Attachment(id: attachment.id, path: file, name: name, mimeType: attachment.mimeType, uti: attachment.uti,
-                    isSticker: attachment.isSticker, pixelWidth: size.width, pixelHeight: size.height, byteCount: attachment.byteCount)
+        for start in stride(from: 0, to: messageIDs.count, by: Self.inListChunk) {
+            let chunk = messageIDs[start..<min(start + Self.inListChunk, messageIDs.count)]
+            let placeholders = chunk.indices.map { _ in "?" }.joined(separator: ", ")
+            let statement = try prepare(db, """
+                SELECT maj.message_id, a.ROWID, \(col("guid")), a.filename, \(col("mime_type")), \(col("uti")),
+                       \(col("transfer_name")), \(col("is_sticker", fallback: "0")), \(col("hide_attachment", fallback: "0")), \(col("total_bytes", fallback: "0"))
+                FROM message_attachment_join maj
+                JOIN attachment a ON a.ROWID = maj.attachment_id
+                WHERE maj.message_id IN (\(placeholders))
+                ORDER BY maj.message_id, a.ROWID
+                """)
+            defer { sqlite3_finalize(statement) }
+            for (offset, id) in chunk.enumerated() { sqlite3_bind_int64(statement, Int32(offset + 1), id) }
+            var status = sqlite3_step(statement)
+            while status == SQLITE_ROW {
+                defer { status = sqlite3_step(statement) }
+                let messageID = sqlite3_column_int64(statement, 0)
+                guard sqlite3_column_int(statement, 8) == 0 else { continue }
+                let rawPath = string(statement, 3)
+                // Link-preview payloads are rendered from the URL itself, not shown as files.
+                if let rawPath, rawPath.hasSuffix(".pluginPayloadAttachment") { continue }
+                let path = MessagesDatabase.resolve(rawPath, home: database.home)
+                let name = string(statement, 6) ?? rawPath.map { ($0 as NSString).lastPathComponent } ?? "Attachment"
+                let bytes = sqlite3_column_int64(statement, 9)
+                var attachment = Attachment(id: string(statement, 2) ?? "attachment-\(sqlite3_column_int64(statement, 1))",
+                    path: path.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }, name: name,
+                    mimeType: string(statement, 4), uti: string(statement, 5), isSticker: sqlite3_column_int(statement, 7) != 0,
+                    byteCount: bytes > 0 ? Int(bytes) : nil)
+                if attachment.kind == .image, let file = attachment.path, let size = ImageSizeProbe.shared.size(at: file) {
+                    attachment = Attachment(id: attachment.id, path: file, name: name, mimeType: attachment.mimeType, uti: attachment.uti,
+                        isSticker: attachment.isSticker, pixelWidth: size.width, pixelHeight: size.height, byteCount: attachment.byteCount)
+                }
+                result[messageID, default: []].append(attachment)
             }
-            result[messageID, default: []].append(attachment)
+            guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
         }
         return result
     }
 
-    private func participantsByChat(_ db: OpaquePointer) throws -> [Int64: [String]] {
-        let statement = try prepare(db, "SELECT j.chat_id, h.id FROM chat_handle_join j JOIN handle h ON h.ROWID = j.handle_id ORDER BY j.chat_id, h.ROWID")
-        defer { sqlite3_finalize(statement) }
+    /// Bound parameters per IN list, well under SQLite's variable limit.
+    private static let inListChunk = 400
+
+    /// Members of the given chats only — not of every chat in the database.
+    private func participants(_ db: OpaquePointer, chats: [Int64]) throws -> [Int64: [String]] {
+        memberRows = 0
         var result: [Int64: [String]] = [:]
-        var status = sqlite3_step(statement)
-        while status == SQLITE_ROW {
-            if let id = string(statement, 1) { result[sqlite3_column_int64(statement, 0), default: []].append(id) }
-            status = sqlite3_step(statement)
+        let unique = Array(Set(chats)).sorted()
+        for start in stride(from: 0, to: unique.count, by: Self.inListChunk) {
+            let chunk = unique[start..<min(start + Self.inListChunk, unique.count)]
+            let placeholders = chunk.indices.map { _ in "?" }.joined(separator: ", ")
+            let statement = try prepare(db, """
+                SELECT j.chat_id, h.id FROM chat_handle_join j JOIN handle h ON h.ROWID = j.handle_id
+                WHERE j.chat_id IN (\(placeholders)) ORDER BY j.chat_id, h.ROWID
+                """)
+            defer { sqlite3_finalize(statement) }
+            for (offset, id) in chunk.enumerated() { sqlite3_bind_int64(statement, Int32(offset + 1), id) }
+            var status = sqlite3_step(statement)
+            while status == SQLITE_ROW {
+                memberRows += 1
+                if let id = string(statement, 1) { result[sqlite3_column_int64(statement, 0), default: []].append(id) }
+                status = sqlite3_step(statement)
+            }
+            guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
         }
-        guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
         return result
     }
     private func tableColumns(_ db: OpaquePointer, table: String) throws -> Set<String> {
@@ -534,7 +590,21 @@ public final class MessagesReader: @unchecked Sendable {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
             throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db)))
-        }; return statement
+        }
+        prepareCount += 1
+        return statement
+    }
+    /// A statement for SQL that stays the same for this connection: compiled once, then reused.
+    /// Each use ends with `recycle`, on every path, so no statement is left mid-step.
+    private func cached(_ db: OpaquePointer, _ sql: String) throws -> OpaquePointer {
+        if let statement = statements[sql] { return statement }
+        let statement = try prepare(db, sql)
+        statements[sql] = statement
+        return statement
+    }
+    private func recycle(_ statement: OpaquePointer) {
+        sqlite3_reset(statement)
+        sqlite3_clear_bindings(statement)
     }
     private func execute(_ db: OpaquePointer, _ sql: String) throws {
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
@@ -557,21 +627,34 @@ public final class MessagesReader: @unchecked Sendable {
     }
 }
 
-/// Reads image dimensions from file headers (no decoding) and remembers them for the session.
+/// Reads image dimensions from file headers (no decoding) and remembers a bounded number of them,
+/// keyed by path and file version (a file that finishes downloading is measured again). A file
+/// that could not be read is tried again after `retryInterval`.
 final class ImageSizeProbe: @unchecked Sendable {
     static let shared = ImageSizeProbe()
+    static let retryInterval: TimeInterval = 60
     private let lock = NSLock()
-    private var sizes: [String: (width: Int, height: Int)] = [:]
-    private var failures = Set<String>()
+    private var sizes = LRUCache<FileVersion, (width: Int, height: Int)>(capacity: 2000)
+    private var failures = LRUCache<String, Date>(capacity: 500)
+
+    struct FileVersion: Hashable {
+        let path: String, modified: Date?, size: Int?
+        init(path: String) {
+            let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            self.path = path; modified = values?.contentModificationDate; size = values?.fileSize
+        }
+    }
 
     func size(at path: String) -> (width: Int, height: Int)? {
+        let version = FileVersion(path: path)
         lock.lock()
-        if let known = sizes[path] { lock.unlock(); return known }
-        if failures.contains(path) { lock.unlock(); return nil }
+        if let known = sizes.value(for: version) { lock.unlock(); return known }
+        if let failed = failures.peek(path), Date().timeIntervalSince(failed) < Self.retryInterval { lock.unlock(); return nil }
         lock.unlock()
         let measured = Self.measure(path)
         lock.lock()
-        if let measured { sizes[path] = measured } else { failures.insert(path) }
+        if let measured { sizes.insert(measured, for: version); failures.removeValue(for: path) }
+        else { failures.insert(Date(), for: path) }
         lock.unlock()
         return measured
     }

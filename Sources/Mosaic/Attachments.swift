@@ -37,6 +37,14 @@ struct OutgoingAttachment: Identifiable, Equatable {
         url = nil
         state = .importing
     }
+    /// A file a restored draft points at that is no longer there: shown, and blocking the send,
+    /// until it is removed.
+    static func missing(_ url: URL) -> OutgoingAttachment {
+        var file = OutgoingAttachment(url: url)
+        file.state = .failed("\(url.lastPathComponent) is no longer on this Mac.")
+        return file
+    }
+    var isMissing: Bool { state.isFailed && url != nil }
     var name: String { url?.lastPathComponent ?? "Photo" }
     /// Whether the file is one Mosaic wrote (and may remove), not one the user chose.
     var isOwnedByMosaic: Bool { url.map(OutgoingFiles.isOwned) ?? false }
@@ -123,8 +131,27 @@ enum OutgoingFiles {
         let folder = directory.appending(path: UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let destination = folder.appending(path: source.lastPathComponent)
-        try FileManager.default.copyItem(at: source, to: destination)
+        do { try FileManager.default.copyItem(at: source, to: destination) }
+        catch { try? FileManager.default.removeItem(at: folder); throw error }
         return destination
+    }
+    /// The same copy, off the main thread: a large video copies while every composer stays responsive.
+    static func stageInBackground(_ source: URL, in directory: URL = stagingDirectory) async throws -> URL {
+        try await Task.detached(priority: .userInitiated) { try stage(source, in: directory) }.value
+    }
+    /// Removes a staged copy now (its send failed); the original it was copied from is untouched.
+    static func removeStaged(_ staged: URL) {
+        let folder = staged.deletingLastPathComponent()
+        guard folder.deletingLastPathComponent().standardizedFileURL.path == stagingDirectory.standardizedFileURL.path else { return }
+        DispatchQueue.global(qos: .utility).async { try? FileManager.default.removeItem(at: folder) }
+    }
+    /// Copies a file to a destination off the main thread, replacing what is there when asked.
+    static func copyInBackground(_ source: URL, to destination: URL, replacing: Bool = false) async throws {
+        try await Task.detached(priority: .userInitiated) {
+            let manager = FileManager.default
+            if replacing, manager.fileExists(atPath: destination.path) { try manager.removeItem(at: destination) }
+            try manager.copyItem(at: source, to: destination)
+        }.value
     }
     /// Removes a staged copy once Messages has had time to take it (Messages copies the file into
     /// its own Attachments folder as it sends).
@@ -132,15 +159,22 @@ enum OutgoingFiles {
         let folder = staged.deletingLastPathComponent()
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + seconds) { try? FileManager.default.removeItem(at: folder) }
     }
-    /// Drops leftovers from earlier runs: staged copies, and pending files more than two days old.
-    static func purgeStale(now: Date = Date()) {
+    /// Drops leftovers from earlier runs: staged copies, and pending files more than two days old
+    /// that no saved draft still points at. Only Mosaic's own folders are looked at.
+    static func purgeStale(now: Date = Date(), keeping referenced: Set<String> = []) {
         purge(stagingDirectory, olderThan: 3600, now: now)
-        purge(pendingDirectory, olderThan: 2 * 86400, now: now)
+        purge(pendingDirectory, olderThan: 2 * 86400, now: now, keeping: referenced)
     }
-    static func purge(_ directory: URL, olderThan age: TimeInterval, now: Date) {
+    /// The same cleanup on a utility thread, so launch never waits for it.
+    static func purgeStaleInBackground(keeping referenced: Set<String>) {
+        Task.detached(priority: .utility) { purgeStale(keeping: referenced) }
+    }
+    static func purge(_ directory: URL, olderThan age: TimeInterval, now: Date, keeping referenced: Set<String> = []) {
         let manager = FileManager.default
         guard let items = try? manager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let kept = Set(referenced.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path })
         for item in items {
+            if kept.contains(item.standardizedFileURL.resolvingSymlinksInPath().path) { continue }
             let modified = (try? item.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if now.timeIntervalSince(modified) > age { try? manager.removeItem(at: item) }
         }

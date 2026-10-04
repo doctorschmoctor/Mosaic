@@ -26,7 +26,7 @@ import MosaicCore
     /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
     var animateMessages: Bool { didSet { if animateMessages != oldValue { defaults.set(animateMessages, forKey: "Mosaic.animateMessages") } } }
     /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
-    var composeDrafts: [String: ComposeDraft] = [:]
+    var composeDrafts: [String: ComposeDraft] = [:] { didSet { if composeDrafts != oldValue { persist() } } }
     /// Every contact with its handles, for addressing new messages.
     var contactEntries: [ContactNames.Entry] = []
     var search = ""
@@ -42,7 +42,7 @@ import MosaicCore
     /// Files in each tile's composer, in the order they were added, to go out with the next
     /// message — including the ones still on their way in (a photo being fetched from the
     /// library, a pasted picture being written) and the ones that could not be added.
-    var outgoing: [String: [OutgoingAttachment]] = [:]
+    var outgoing: [String: [OutgoingAttachment]] = [:] { didSet { if outgoing != oldValue { persist() } } }
     /// A line under a composer about its send: waiting for photos, or why a send stopped.
     var sendNotes: [String: String] = [:]
     var showSetup = false
@@ -97,6 +97,13 @@ import MosaicCore
     /// Sends waiting for a composer's photos to finish arriving.
     @ObservationIgnored private var importWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    /// The cadence the running poll was started with; a faster need restarts it at once.
+    @ObservationIgnored private var scheduledPollInterval: Duration?
+    /// Whether Mosaic is the active app; the fallback poll slows down while it is not.
+    @ObservationIgnored private var appActive = true
+    /// When the current burst of database writes began and when its refresh is due.
+    @ObservationIgnored private var burstStarted: ContinuousClock.Instant?
+    @ObservationIgnored private var watchDeadline: ContinuousClock.Instant?
     @ObservationIgnored private var persistTask: Task<Void, Never>?
     @ObservationIgnored private var watcher: FileChangeWatcher?
     @ObservationIgnored private var watchRefreshTask: Task<Void, Never>?
@@ -108,6 +115,7 @@ import MosaicCore
     @ObservationIgnored private var contactNames = ContactNames()
     @ObservationIgnored private var originalTitles: [String: String] = [:]
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadingState = true
     // Submitted sends are held in memory until the database reports them; never auto-retry a send.
@@ -122,7 +130,6 @@ import MosaicCore
         animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
         reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
-        OutgoingFiles.purgeStale()
         // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
         // whose "Connect Messages" leads to the connection settings. Nothing opens or asks on
         // launch — no settings sheet, no Contacts prompt (that waits for the settings' button).
@@ -137,6 +144,10 @@ import MosaicCore
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
         }
         loadingState = false
+        // Leftovers from earlier runs go, off the main thread — never a file a saved draft (this
+        // workspace's or the other one's) still points at.
+        OutgoingFiles.purgeStaleInBackground(keeping: SavedDrafts.referencedPaths(in: defaults)
+            .union(outgoing.values.joined().compactMap { $0.url?.path }))
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -145,9 +156,11 @@ import MosaicCore
             }
         })
         // Contacts may be switched on in System Settings while Mosaic is open; pick that up on return.
+        // Coming back also checks Messages at once and returns the poll to its active cadence.
         observers.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                self.setAppActive(true)
                 let status = CNContactStore.authorizationStatus(for: .contacts)
                 let changed = status != self.contactAuthorization
                 self.contactAuthorization = status
@@ -157,14 +170,50 @@ import MosaicCore
         observers.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.persistNow() }
         })
-        // The poll is a fallback: changes are normally picked up within a moment by the file watcher.
-        pollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
-                guard !Task.isCancelled, let self else { break }
-                if self.isLive { await self.refresh() }
+        observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setAppActive(false) }
+        })
+        // After sleep the watcher may have missed writes; look once on wake.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        wakeObserver = workspaceCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isLive else { return }
+                await self.refresh()
             }
         }
+        startPolling()
+    }
+
+    /// The poll is a fallback: changes are normally picked up within a moment by the file watcher.
+    /// Its cadence follows `RefreshPolicy` and is chosen again after every check.
+    private func startPolling() {
+        pollTask?.cancel()
+        let first = pollInterval
+        scheduledPollInterval = first
+        pollTask = Task { [weak self] in
+            var interval = first
+            while !Task.isCancelled {
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled, let self else { break }
+                if self.isLive { await self.refresh(background: !self.appActive) }
+                interval = self.pollInterval
+                self.scheduledPollInterval = interval
+            }
+        }
+    }
+    private var pollInterval: Duration {
+        RefreshPolicy.pollInterval(appActive: appActive, awaitingConfirmation: pending.values.contains { !$0.isEmpty })
+    }
+    /// Restarts the poll when a quicker cadence is wanted now; a slower one waits for the next tick.
+    private func pollCadenceMayHaveChanged() {
+        guard let scheduled = scheduledPollInterval, pollInterval < scheduled else { return }
+        startPolling()
+    }
+    private func setAppActive(_ active: Bool) {
+        guard appActive != active else { return }
+        appActive = active
+        if active, isLive { Task { await self.refresh() } }
+        pollCadenceMayHaveChanged()
     }
 
     deinit {
@@ -172,6 +221,7 @@ import MosaicCore
         persistTask?.cancel()
         watchRefreshTask?.cancel()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
     }
 
     /// The persisted shape of the workspace (open tiles, focus, layout, drafts, seen messages).
@@ -322,19 +372,27 @@ import MosaicCore
     private func evict(_ victim: String) {
         if tileDrag?.id == victim { tileDrag = nil }
         if focusTarget == victim { focusTarget = nil }
-        if composeDrafts[victim] != nil { composeDrafts[victim] = nil; drafts[victim] = nil }
-        dropImports(for: victim)
+        let isNewMessage = composeDrafts[victim] != nil
+        if isNewMessage { composeDrafts[victim] = nil; drafts[victim] = nil }
+        releaseComposer(victim, keepingFiles: !isNewMessage)
         releaseTileState(victim)
     }
-    /// A closed or replaced tile's composer files are let go: a photo still arriving for it lands
-    /// nowhere (its file is removed when it does), and a send waiting for those photos stops waiting.
     /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
         historyLimits[id] = nil
     }
-    private func dropImports(for id: String) {
-        for file in outgoing[id] ?? [] where file.isOwnedByMosaic { try? FileManager.default.removeItem(at: file.url!) }
-        outgoing[id] = nil
+    /// A closed or replaced conversation keeps the files ready in its composer, as it keeps its
+    /// text: they are there again when it opens. A photo still arriving lands nowhere (its file
+    /// is removed when it does), a failed add is forgotten, and a send waiting for photos stops
+    /// waiting. A New Message tile's files go with it; Mosaic's own copies of them are removed.
+    private func releaseComposer(_ id: String, keepingFiles: Bool) {
+        let files = outgoing[id] ?? []
+        let kept = keepingFiles ? files.filter { $0.state == .ready || $0.isMissing } : []
+        let keptIDs = Set(kept.map(\.id))
+        for file in files where !keptIDs.contains(file.id) && file.isOwnedByMosaic {
+            if let url = file.url { try? FileManager.default.removeItem(at: url) }
+        }
+        if outgoing[id] != nil { outgoing[id] = kept.isEmpty ? nil : kept }
         sendNotes[id] = nil
         resumeImportWaiters(for: id)
     }
@@ -346,8 +404,9 @@ import MosaicCore
         instantly {
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
-            if composeDrafts[id] != nil { composeDrafts[id] = nil; drafts[id] = nil }
-            dropImports(for: id)
+            let isNewMessage = composeDrafts[id] != nil
+            if isNewMessage { composeDrafts[id] = nil; drafts[id] = nil }
+            releaseComposer(id, keepingFiles: !isNewMessage)
             releaseTileState(id)
         }
         if focusTarget == id { focusTarget = nil }
@@ -519,25 +578,29 @@ import MosaicCore
 
     /// Reloads conversations and open histories. A request that arrives while a load is running is
     /// not dropped: one more load follows, so a tile opened mid-poll gets its history right away.
-    func refresh() async {
+    /// `background` marks a fallback poll while Mosaic is not the active app; its read runs at
+    /// utility priority.
+    func refresh(background: Bool = false) async {
         guard isLive else { return }
         if isRefreshing { refreshRequestedWhileBusy = true; return }
         isRefreshing = true
         defer { isRefreshing = false }
+        var background = background
         repeat {
             refreshRequestedWhileBusy = false
-            await performRefresh()
+            await performRefresh(background: background)
+            background = false
         } while refreshRequestedWhileBusy && isLive
     }
 
-    private func performRefresh() async {
+    private func performRefresh(background: Bool = false) async {
         let requestGeneration = generation
         // Each open tile gets exactly the history depth it asked for; the reader skips the load
         // when nothing was committed since the last one and the request is the same.
         let request = LoadRequest(openIDs: Set(openIDs), historyLimits: historyLimits, defaultHistoryLimit: 100,
                                   seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) })
         do {
-            let snapshot = try await reader.load(request, unlessUnchangedFrom: lastLoad)
+            let snapshot = try await reader.load(request, unlessUnchangedFrom: lastLoad, background: background)
             guard generation == requestGeneration, isLive else { return }
             consecutiveLoadFailures = 0
             if connectionError != nil { connectionError = nil }
@@ -616,14 +679,28 @@ import MosaicCore
     private func startWatchingDatabase() {
         guard watcher == nil else { return }
         watcher = FileChangeWatcher(paths: database.watchedPaths) { [weak self] in
-            guard let self else { return }
-            self.watchRefreshTask?.cancel()
-            // Messages writes in bursts; one refresh after the burst settles.
-            self.watchRefreshTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(120))
-                guard !Task.isCancelled, let self, self.isLive else { return }
-                await self.refresh()
-            }
+            self?.databaseWritten()
+        }
+    }
+    /// Messages writes in bursts; one refresh after the burst settles — but no later than
+    /// `RefreshPolicy.maxWait` after the burst began, so a writer that never pauses still shows.
+    private func databaseWritten() {
+        let now = ContinuousClock.now
+        let started = burstStarted ?? now
+        burstStarted = started
+        let deadline = RefreshPolicy.refreshDeadline(now: now, burstStarted: started)
+        // At the cap the deadline stops moving: the refresh already due stands.
+        if watchRefreshTask != nil, watchDeadline == deadline { return }
+        watchDeadline = deadline
+        watchRefreshTask?.cancel()
+        watchRefreshTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            guard !Task.isCancelled, let self else { return }
+            self.burstStarted = nil
+            self.watchDeadline = nil
+            self.watchRefreshTask = nil
+            guard self.isLive else { return }
+            await self.refresh()
         }
     }
 
@@ -656,7 +733,8 @@ import MosaicCore
             instantly { sendNotes[id] = nil }
         }
         if let failed = outgoing[id]?.first(where: { $0.state.isFailed }) {
-            sendErrors[id] = "\(failed.name) couldn't be added. Remove it or add it again, then send."
+            sendErrors[id] = failed.isMissing ? "\(failed.name) is no longer on this Mac. Remove it, then send."
+                : "\(failed.name) couldn't be added. Remove it or add it again, then send."
             return false
         }
         return openIDs.contains(id) || composeDrafts[id] != nil
@@ -699,6 +777,7 @@ import MosaicCore
             place(batch.items.map(\.message), in: threadID, preview: Self.preview(text: text, files: files))
         }
         pending[threadID, default: []].append(contentsOf: batch.items.map(\.message))
+        pollCadenceMayHaveChanged()
         noteUse(threadID)
         markSeen(threadID)
         return batch
@@ -875,7 +954,8 @@ import MosaicCore
         instantly {
             outgoing[id]?.removeAll { $0.id == attachmentID }
             if outgoing[id]?.isEmpty == true { outgoing[id] = nil }
-            if outgoing[id]?.contains(where: { $0.state.isFailed }) != true, sendErrors[id]?.contains("couldn't be added") == true { sendErrors[id] = nil }
+            if outgoing[id]?.contains(where: { $0.state.isFailed }) != true,
+               let error = sendErrors[id], error.contains("couldn't be added") || error.contains("no longer on this Mac") { sendErrors[id] = nil }
         }
         // A picture Mosaic wrote for this message is not needed any more; a chosen file is the user's.
         if file.isOwnedByMosaic, let url = file.url { try? FileManager.default.removeItem(at: url) }
@@ -1115,15 +1195,53 @@ import MosaicCore
     }
     func persistNow() {
         persistTask?.cancel(); persistTask = nil
-        guard !loadingState, !forcedDemo, let data = try? JSONEncoder().encode(workspace) else { return }
-        defaults.set(data, forKey: stateKey)
+        guard !loadingState, !forcedDemo else { return }
+        if let data = try? JSONEncoder().encode(workspace) { defaults.set(data, forKey: stateKey) }
+        if let data = try? JSONEncoder().encode(savedDrafts) { defaults.set(data, forKey: SavedDrafts.key(live: isLive)) }
     }
     private func restore(defaultIDs: [String] = []) {
         var state: Workspace
         if !forcedDemo, let data = defaults.data(forKey: stateKey), let saved = try? JSONDecoder().decode(Workspace.self, from: data) { state = saved }
         else { state = Workspace(openIDs: defaultIDs) }
-        if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id))) }
+        let saved = forcedDemo ? nil : SavedDrafts.load(from: defaults, live: isLive)
+        // New Message tiles that were open come back with their recipients.
+        let newMessageIDs = Set((saved?.newMessages.keys).map(Array.init) ?? []).intersection(state.openIDs)
+        if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id)).union(newMessageIDs)) }
+        // Text kept for a New Message tile that is not coming back has nowhere to go.
+        for id in state.drafts.keys where id.hasPrefix("new-") && !newMessageIDs.contains(id) { state.drafts[id] = nil }
         workspace = state
+        if let saved { restoreDrafts(saved, newMessages: newMessageIDs) }
+    }
+    /// What `SavedDrafts` keeps of the composers now: files that are ready (or missing, so the
+    /// reader still sees them), and each unsent New Message's recipients. A New Message that has
+    /// already handed messages over is in transition to its conversation and is not kept.
+    private var savedDrafts: SavedDrafts {
+        var saved = SavedDrafts()
+        for (id, files) in outgoing {
+            let paths = files.filter { $0.state == .ready || $0.isMissing }.compactMap { $0.url?.path }
+            if !paths.isEmpty { saved.files[id] = paths }
+        }
+        for (id, draft) in composeDrafts where draft.sent.isEmpty {
+            saved.newMessages[id] = SavedDrafts.NewMessage(recipients: draft.recipients.map { SavedDrafts.SavedRecipient(address: $0.address, name: $0.name) },
+                                                          conversationID: draft.boundConversationID)
+        }
+        return saved
+    }
+    /// Puts saved composers back. A file that is gone is shown as missing (and blocks the send
+    /// until removed); nothing is sent.
+    private func restoreDrafts(_ saved: SavedDrafts, newMessages ids: Set<String>) {
+        for id in ids {
+            guard let draft = saved.newMessages[id] else { continue }
+            composeDrafts[id] = ComposeDraft(recipients: draft.recipients.map { Recipient(address: $0.address, name: $0.name) },
+                                             boundConversationID: draft.conversationID)
+        }
+        for (id, paths) in saved.files where !id.hasPrefix("new-") || ids.contains(id) {
+            let files = paths.map { path -> OutgoingAttachment in
+                let url = URL(fileURLWithPath: path)
+                return FileManager.default.fileExists(atPath: path) ? OutgoingAttachment(url: url) : .missing(url)
+            }
+            if !files.isEmpty { outgoing[id] = files }
+        }
     }
 }
 
@@ -1131,6 +1249,35 @@ struct WorkspaceAlert: Identifiable, Equatable {
     let title: String
     let message: String
     var id: String { title + message }
+}
+
+/// Unsent work kept across launches, beside the workspace (which holds the text drafts): the
+/// files waiting in each composer, as paths — Mosaic's own copies, or the user's chosen originals
+/// where they are — and the recipients of each New Message tile. Nothing about sends: a message
+/// that was handed to Messages is never restored, and nothing is sent at launch. Stored as JSON
+/// in Mosaic's preferences, like the workspace; no history or previews are kept here.
+struct SavedDrafts: Codable, Equatable {
+    static let currentVersion = 1
+    var version = SavedDrafts.currentVersion
+    var files: [String: [String]] = [:]
+    var newMessages: [String: NewMessage] = [:]
+    struct NewMessage: Codable, Equatable {
+        var recipients: [SavedRecipient]
+        var conversationID: String?
+    }
+    struct SavedRecipient: Codable, Equatable { var address: String; var name: String }
+
+    static func key(live: Bool) -> String { "Mosaic.drafts.\(live ? "live" : "demo")" }
+    /// The saved record, or nil when there is none or it was written by a newer Mosaic.
+    static func load(from defaults: UserDefaults, live: Bool) -> SavedDrafts? {
+        guard let data = defaults.data(forKey: key(live: live)),
+              let saved = try? JSONDecoder().decode(SavedDrafts.self, from: data), saved.version <= currentVersion else { return nil }
+        return saved
+    }
+    /// Every file a saved draft (live or demo) still points at; cleanup leaves these alone.
+    static func referencedPaths(in defaults: UserDefaults) -> Set<String> {
+        Set([true, false].compactMap { load(from: defaults, live: $0) }.flatMap { $0.files.values.joined() })
+    }
 }
 
 /// A message being addressed in a new-message tile.
@@ -1160,6 +1307,31 @@ enum RecipientSuggestion: Identifiable, Equatable {
 /// Calls back on the main thread when any of the given files is written, replaced or removed. The
 /// write-ahead log Messages appends to is recreated on checkpoints, so a vanished file is watched
 /// again as soon as it exists.
+/// How often Mosaic looks at Messages' database when the file watcher has said nothing, and how
+/// it settles a burst of writes. The watcher is the normal path; the poll covers a missed event,
+/// a replaced file or a watcher that could not start.
+enum RefreshPolicy {
+    /// Mosaic is in front: a quick fallback.
+    static let active: Duration = .seconds(3)
+    /// A send was handed to Messages and its row has not appeared yet: look more often, active or not.
+    static let awaitingConfirmation: Duration = .seconds(1)
+    /// Mosaic is in the background: rare checks (the watcher still refreshes at once).
+    static let inactive: Duration = .seconds(15)
+    /// Quiet time after the last write before refreshing.
+    static let settle: Duration = .milliseconds(120)
+    /// The longest a burst can postpone its refresh.
+    static let maxWait: Duration = .milliseconds(500)
+
+    static func pollInterval(appActive: Bool, awaitingConfirmation: Bool) -> Duration {
+        if awaitingConfirmation { return Self.awaitingConfirmation }
+        return appActive ? active : inactive
+    }
+    /// When to refresh after a write at `now` in a burst that began at `burstStarted`.
+    static func refreshDeadline(now: ContinuousClock.Instant, burstStarted: ContinuousClock.Instant) -> ContinuousClock.Instant {
+        min(now + settle, burstStarted + maxWait)
+    }
+}
+
 @MainActor final class FileChangeWatcher {
     private let paths: [String]
     private let onChange: () -> Void

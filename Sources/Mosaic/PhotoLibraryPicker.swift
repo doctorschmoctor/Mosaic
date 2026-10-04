@@ -24,8 +24,8 @@ struct PhotoLibraryPickerView: View {
                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
-                Button("Cancel") { onCancel() }.buttonStyle(PickerButtonStyle(prominent: false))
-                Button(model.selectedIDs.count > 1 ? "Add \(model.selectedIDs.count)" : "Add") { onAdd(model.selectedAssets) }
+                Button("Cancel") { model.close(); onCancel() }.buttonStyle(PickerButtonStyle(prominent: false))
+                Button(model.selectedIDs.count > 1 ? "Add \(model.selectedIDs.count)" : "Add") { let chosen = model.selectedAssets; model.close(); onAdd(chosen) }
                     .buttonStyle(PickerButtonStyle(prominent: true))
                     .disabled(model.selectedIDs.isEmpty)
                     .keyboardShortcut(.defaultAction)
@@ -34,6 +34,7 @@ struct PhotoLibraryPickerView: View {
         }
         .frame(width: Self.size.width, height: Self.size.height)
         .task { await model.load() }
+        .onDisappear { model.close() }
     }
 
     @ViewBuilder private var content: some View {
@@ -47,8 +48,10 @@ struct PhotoLibraryPickerView: View {
                         ForEach(0..<model.count, id: \.self) { index in
                             let asset = model.asset(at: index)
                             PhotoCell(asset: asset, manager: model.manager, selected: model.isSelected(asset.localIdentifier)) {
-                                model.toggle(asset.localIdentifier)
+                                model.toggle(asset)
                             }
+                            .onAppear { model.cellAppeared(index) }
+                            .onDisappear { model.cellDisappeared(index) }
                         }
                     }
                     .padding(8)
@@ -80,12 +83,15 @@ private struct PhotoCell: View {
     let selected: Bool
     let onTap: () -> Void
     @State private var image: NSImage?
+    /// The asset the shown (or requested) picture belongs to: a cell given another asset after a
+    /// library change drops the old picture, and a late callback for the old one is ignored.
+    @State private var shownID: String?
     @State private var request: PHImageRequestID?
 
     var body: some View {
         ZStack {
             Rectangle().fill(Palette.incoming)
-            if let image { Image(nsImage: image).resizable().interpolation(.medium).aspectRatio(contentMode: .fill) }
+            if let image, shownID == asset.localIdentifier { Image(nsImage: image).resizable().interpolation(.medium).aspectRatio(contentMode: .fill) }
         }
         .frame(width: PhotoLibraryPickerView.cellSize, height: PhotoLibraryPickerView.cellSize)
         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
@@ -107,18 +113,30 @@ private struct PhotoCell: View {
         .accessibilityLabel(asset.mediaType == .video ? "Video" : "Photo")
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
         .onAppear(perform: load)
-        .onDisappear { if let request { manager.cancelImageRequest(request); self.request = nil } }
+        .onDisappear(perform: cancel)
+        .onChange(of: asset.localIdentifier) { cancel(); image = nil; load() }
     }
+    private func cancel() {
+        if let request { manager.cancelImageRequest(request) }
+        request = nil
+    }
+    /// Asks with the same size and options the model preheats with, so a preheated picture is
+    /// served from the cache. A degraded picture shows first; the request ends with the final
+    /// one, a cancellation or an error.
     private func load() {
-        guard image == nil, request == nil else { return }
-        let options = PHImageRequestOptions()
-        options.deliveryMode = .opportunistic
-        options.resizeMode = .fast
-        options.isNetworkAccessAllowed = true
-        let pixels = PhotoLibraryPickerView.cellSize * 2
-        request = manager.requestImage(for: asset, targetSize: CGSize(width: pixels, height: pixels), contentMode: .aspectFill, options: options) { result, _ in
-            guard let result else { return }
-            Task { @MainActor in image = result }
+        let id = asset.localIdentifier
+        guard request == nil, image == nil || shownID != id else { return }
+        shownID = id
+        request = manager.requestImage(for: asset, targetSize: PhotoLibraryModel.thumbnailSize, contentMode: .aspectFill,
+                                       options: PhotoLibraryModel.thumbnailOptions) { result, info in
+            let degraded = (info?[PHImageResultIsDegradedKey] as? NSNumber)?.boolValue ?? false
+            let cancelled = (info?[PHImageCancelledKey] as? NSNumber)?.boolValue ?? false
+            let failed = info?[PHImageErrorKey] != nil
+            Task { @MainActor in
+                guard shownID == id else { return }
+                if let result, !cancelled { image = result }
+                if !degraded || cancelled || failed { request = nil }
+            }
         }
     }
 }
@@ -141,25 +159,50 @@ struct PickerButtonStyle: ButtonStyle {
 }
 
 /// The library behind the picker: access, the assets newest first, and the selection.
+///
+/// The selection is kept by identifier, with the chosen assets themselves, so adding three photos
+/// from a large library never walks the library, and a picture added to Photos while the picker is
+/// open does not shift what was chosen. Thumbnails near the visible cells are preheated with the
+/// cells' own request parameters; preheating stops when the picker closes.
 @Observable @MainActor final class PhotoLibraryModel {
     private(set) var status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     private(set) var assets: PHFetchResult<PHAsset>?
     private(set) var selectedIDs: [String] = []
+    @ObservationIgnored private var chosen: [String: PHAsset] = [:]
     let manager = PHCachingImageManager()
+    @ObservationIgnored private var visible = Set<Int>()
+    @ObservationIgnored private var preheated: Range<Int> = 0..<0
+    @ObservationIgnored private var observer: LibraryObserver?
+
+    static let thumbnailSize = CGSize(width: PhotoLibraryPickerView.cellSize * 2, height: PhotoLibraryPickerView.cellSize * 2)
+    static let thumbnailOptions: PHImageRequestOptions = {
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .opportunistic
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+        return options
+    }()
+    /// Assets preheated on each side of the visible ones (a few rows of the grid).
+    static let preheatMargin = PhotoLibraryPickerView.columns * 6
 
     var count: Int { assets?.count ?? 0 }
     func asset(at index: Int) -> PHAsset { assets!.object(at: index) }
-    func isSelected(_ id: String) -> Bool { selectedIDs.contains(id) }
+    func isSelected(_ id: String) -> Bool { selectedSet.contains(id) }
+    @ObservationIgnored private var selectedSet = Set<String>()
+    func toggle(_ asset: PHAsset) { toggle(asset.localIdentifier, asset: asset) }
     /// Chooses or unchooses one picture; the order chosen is the order sent.
-    func toggle(_ id: String) {
-        if let index = selectedIDs.firstIndex(of: id) { selectedIDs.remove(at: index) } else { selectedIDs.append(id) }
+    func toggle(_ id: String, asset: PHAsset? = nil) {
+        if selectedSet.remove(id) != nil {
+            selectedIDs.removeAll { $0 == id }
+            chosen[id] = nil
+        } else {
+            selectedSet.insert(id)
+            selectedIDs.append(id)
+            chosen[id] = asset
+        }
     }
-    var selectedAssets: [PHAsset] {
-        guard let assets else { return [] }
-        var byID: [String: PHAsset] = [:]
-        assets.enumerateObjects { asset, _, _ in if self.selectedIDs.contains(asset.localIdentifier) { byID[asset.localIdentifier] = asset } }
-        return selectedIDs.compactMap { byID[$0] }
-    }
+    var selectedAssets: [PHAsset] { selectedIDs.compactMap { chosen[$0] } }
+
     /// A video's length as Photos shows it: m:ss, or h:mm:ss from an hour.
     nonisolated static func duration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded())
@@ -172,6 +215,87 @@ struct PickerButtonStyle: ButtonStyle {
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
         assets = PHAsset.fetchAssets(with: options)
+        if observer == nil {
+            let observer = LibraryObserver { [weak self] change in self?.apply(change) }
+            PHPhotoLibrary.shared().register(observer)
+            self.observer = observer
+        }
+    }
+    /// The library changed under the open picker: show the new contents, keep the selection
+    /// (by identity), and forget chosen pictures that were deleted.
+    private func apply(_ change: PHChange) {
+        guard let assets, let details = change.changeDetails(for: assets) else { return }
+        self.assets = details.fetchResultAfterChanges
+        let removed = Set(details.removedObjects.map(\.localIdentifier))
+        if !removed.isEmpty {
+            selectedIDs.removeAll { removed.contains($0) }
+            selectedSet.subtract(removed)
+            for id in removed { chosen[id] = nil }
+        }
+        for asset in details.changedObjects where chosen[asset.localIdentifier] != nil { chosen[asset.localIdentifier] = asset }
+        // Indices moved: preheat again from what is visible now.
+        manager.stopCachingImagesForAllAssets()
+        preheated = 0..<0
+        updatePreheat()
+    }
+
+    func cellAppeared(_ index: Int) { visible.insert(index); updatePreheat() }
+    func cellDisappeared(_ index: Int) { visible.remove(index) }
+    /// Keeps a bounded window of thumbnails cached around the visible cells, starting and stopping
+    /// only the difference when the window moves by at least a row.
+    private func updatePreheat() {
+        guard let assets, let low = visible.min(), let high = visible.max() else { return }
+        let wanted = Self.preheatWindow(visible: low...high, count: assets.count, margin: Self.preheatMargin)
+        guard abs(wanted.lowerBound - preheated.lowerBound) >= PhotoLibraryPickerView.columns
+                || abs(wanted.upperBound - preheated.upperBound) >= PhotoLibraryPickerView.columns
+                || preheated.isEmpty else { return }
+        let (added, removed) = Self.difference(from: preheated, to: wanted)
+        let start = added.flatMap { assets.objects(at: IndexSet(integersIn: $0)) }
+        let stop = removed.flatMap { assets.objects(at: IndexSet(integersIn: $0)) }
+        if !start.isEmpty {
+            manager.startCachingImages(for: start, targetSize: Self.thumbnailSize, contentMode: .aspectFill, options: Self.thumbnailOptions)
+        }
+        if !stop.isEmpty {
+            manager.stopCachingImages(for: stop, targetSize: Self.thumbnailSize, contentMode: .aspectFill, options: Self.thumbnailOptions)
+        }
+        preheated = wanted
+    }
+    /// The picker went away: stop preheating, drop the cache and stop observing the library.
+    func close() {
+        manager.stopCachingImagesForAllAssets()
+        preheated = 0..<0
+        visible.removeAll()
+        if let observer { PHPhotoLibrary.shared().unregisterChangeObserver(observer) }
+        observer = nil
+    }
+
+    /// The visible span widened by `margin` on each side, within the library.
+    nonisolated static func preheatWindow(visible: ClosedRange<Int>, count: Int, margin: Int) -> Range<Int> {
+        guard count > 0 else { return 0..<0 }
+        let lower = max(0, visible.lowerBound - margin)
+        let upper = min(count, visible.upperBound + 1 + margin)
+        return lower < upper ? lower..<upper : 0..<0
+    }
+    /// What starts and what stops when the preheated window moves from `old` to `new`.
+    nonisolated static func difference(from old: Range<Int>, to new: Range<Int>) -> (added: [Range<Int>], removed: [Range<Int>]) {
+        func subtract(_ a: Range<Int>, _ b: Range<Int>) -> [Range<Int>] {
+            guard !a.isEmpty else { return [] }
+            guard a.overlaps(b) else { return [a] }
+            var parts: [Range<Int>] = []
+            if a.lowerBound < b.lowerBound { parts.append(a.lowerBound..<b.lowerBound) }
+            if b.upperBound < a.upperBound { parts.append(b.upperBound..<a.upperBound) }
+            return parts
+        }
+        return (subtract(new, old), subtract(old, new))
+    }
+}
+
+/// Hands Photos library changes to the main actor.
+private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
+    private let onChange: @MainActor (PHChange) -> Void
+    init(onChange: @escaping @MainActor (PHChange) -> Void) { self.onChange = onChange }
+    func photoLibraryDidChange(_ changeInstance: PHChange) {
+        Task { @MainActor in self.onChange(changeInstance) }
     }
 }
 

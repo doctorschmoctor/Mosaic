@@ -52,10 +52,17 @@ struct TransportError: LocalizedError {
         }
     }
     func send(file: URL, to target: SendTarget) async throws {
-        let staged = try OutgoingFiles.stage(file)
-        switch target {
-        case .chat(let id): try MessagesBridge.send(filePath: staged.path, conversationID: id)
-        case .participant(let handle, let service): try MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
+        // The copy is made off the main thread; the hand-off to Messages stays on it.
+        let staged = try await OutgoingFiles.stageInBackground(file)
+        do {
+            switch target {
+            case .chat(let id): try MessagesBridge.send(filePath: staged.path, conversationID: id)
+            case .participant(let handle, let service): try MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
+            }
+        } catch {
+            // Refused: Messages took nothing, so the staged copy goes now (never the original).
+            OutgoingFiles.removeStaged(staged)
+            throw error
         }
         OutgoingFiles.scheduleRemoval(of: staged)
     }

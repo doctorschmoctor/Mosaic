@@ -51,6 +51,16 @@ final class ComposerTests: XCTestCase {
     @MainActor func testMessagesSenderScriptCompilesWithoutExecuting() throws {
         _ = try MessagesBridge.prepareScript()
     }
+    /// The script is compiled once and reused: a second preparation returns the same object and
+    /// does not compile again. (Nothing is executed, so no message can be sent.)
+    @MainActor func testMessagesScriptIsCompiledOnce() throws {
+        let first = try MessagesBridge.prepareScript()
+        let count = MessagesBridge.compileCount
+        let second = try MessagesBridge.prepareScript()
+        XCTAssertTrue(first === second)
+        XCTAssertEqual(MessagesBridge.compileCount, count)
+        XCTAssertEqual(count, 1)
+    }
     /// Esc closes a New Message tile and does nothing in any other composer. (The default
     /// NSResponder implementation does not exist; calling it raised an exception.)
     @MainActor func testEscapeOnlyActsWhereTheComposerHasACancelAction() {

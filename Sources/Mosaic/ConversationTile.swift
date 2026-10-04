@@ -201,6 +201,9 @@ struct MessageList: View, Equatable {
     @State private var registry = ThreadRowRegistry()
     /// The rows that just arrived at the tail and settle in once.
     @State private var freshIDs: Set<String> = []
+    /// Rows, reactions and lookups derived from the conversation, kept between renders (a class,
+    /// so refreshing it costs no invalidation). Scrolling, highlights and resizes reuse them.
+    @State private var presentation = ThreadPresentation()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
@@ -231,14 +234,15 @@ struct MessageList: View, Equatable {
     }
 
     var body: some View {
-        let rows = MessageRow.rows(for: conversation)
+        let prepared = presentation.prepared(for: conversation)
+        let rows = prepared.rows
         let content = ThreadContent(first: rows.first?.id, last: rows.last?.id, count: rows.count)
-        let ids = rows.map(\.id)
-        let reactions = Reactions.reduce(conversation.reactions)
-        let byGUID = Dictionary(conversation.messages.compactMap { message in message.guid.map { ($0, message) } }, uniquingKeysWith: { first, _ in first })
+        let ids = prepared.ids
+        let reactions = prepared.reactions
+        let byGUID = prepared.byGUID
         // The New Messages line only while reading above them; at the tail everything is being seen.
         let firstUnread = isNearBottom ? nil : Self.firstUnread(in: rows, after: seenBoundary)
-        let attachmentFiles = conversation.messages.flatMap(\.attachments).compactMap { $0.path.map(URL.init(fileURLWithPath:)) }
+        let attachmentFiles = prepared.attachmentFiles
         ScrollViewReader { proxy in
         ScrollView {
             // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
@@ -408,6 +412,42 @@ struct MessageRow: Identifiable, Equatable {
     }
 }
 
+/// A thread's presentation, rebuilt only when something it is made from changes: the messages
+/// (text, edits, receipts), the reactions, or the clock's time zone and locale (day separators and
+/// times are formatted with them). A render caused by scrolling, a highlight or a resize reuses it.
+@MainActor final class ThreadPresentation {
+    struct Prepared {
+        let rows: [MessageRow]
+        let ids: [String]
+        let reactions: [String: [ReactionSummary]]
+        let byGUID: [String: Message]
+        let attachmentFiles: [URL]
+    }
+    private struct Inputs: Equatable {
+        let messages: [Message]
+        let reactions: [ReactionEvent]
+        let clock: MessageText.Environment
+    }
+    private var inputs: Inputs?
+    private var cached: Prepared?
+    /// How many times the rows were built (tests).
+    private(set) var buildCount = 0
+
+    func prepared(for conversation: Conversation) -> Prepared {
+        let clock = MessageText.currentEnvironment()
+        let now = Inputs(messages: conversation.messages, reactions: conversation.reactions, clock: clock)
+        if let cached, now == inputs { return cached }
+        buildCount += 1
+        let rows = MessageRow.rows(for: conversation)
+        let prepared = Prepared(rows: rows, ids: rows.map(\.id), reactions: Reactions.reduce(conversation.reactions),
+            byGUID: Dictionary(conversation.messages.compactMap { message in message.guid.map { ($0, message) } }, uniquingKeysWith: { first, _ in first }),
+            attachmentFiles: conversation.messages.flatMap(\.attachments).compactMap { $0.path.map(URL.init(fileURLWithPath:)) })
+        inputs = now
+        cached = prepared
+        return prepared
+    }
+}
+
 /// Formatted strings for bubbles, cached: `Date.formatted` and attributed-string construction are
 /// the slow parts of drawing a conversation, and the same values are needed on every render.
 enum MessageText {
@@ -418,6 +458,23 @@ enum MessageText {
     private static let days = NSCache<NSNumber, NSString>()
     private static let attributed: NSCache<NSString, AttributedBox> = { let c = NSCache<NSString, AttributedBox>(); c.countLimit = 4000; return c }()
     private final class AttributedBox { let value: AttributedString; init(_ value: AttributedString) { self.value = value } }
+
+    /// The time zone and locale strings are formatted for. When either changes (travel, a new
+    /// region setting) the formatters follow and cached strings are dropped.
+    struct Environment: Equatable { let timeZone: String; let locale: String }
+    private static var formattedFor: Environment?
+    static func currentEnvironment() -> Environment {
+        let now = Environment(timeZone: TimeZone.current.identifier, locale: Locale.current.identifier)
+        if now != formattedFor {
+            if formattedFor != nil {
+                timeFormatter.timeZone = .current; timeFormatter.locale = .current
+                dayFormatter.timeZone = .current; dayFormatter.locale = .current
+                times.removeAllObjects(); days.removeAllObjects()
+            }
+            formattedFor = now
+        }
+        return now
+    }
 
     static func dayOrdinal(_ date: Date) -> Int { calendar.ordinality(of: .day, in: .era, for: date) ?? 0 }
     static func time(_ date: Date) -> String {

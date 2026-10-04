@@ -96,6 +96,41 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(MessagesDatabase(path: path).watchedPaths, [path, path + "-wal"])
     }
 
+    /// A load reads members only for the chats it lists or has open, attachments only for its
+    /// pages' own messages (by ID), and compiles its fixed statements once per connection: a later
+    /// load prepares only the variable-length lookups, and an unchanged poll prepares nothing.
+    func testLoadsReadOnlyTheirOwnRowsAndReuseStatements() throws {
+        execute("""
+        CREATE TABLE attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT,
+          is_sticker INTEGER DEFAULT 0, hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        INSERT INTO attachment (guid, filename, mime_type, transfer_name)
+          VALUES ('A1', '/nonexistent/one.pdf', 'application/pdf', 'one.pdf'), ('A2', '/nonexistent/two.pdf', 'application/pdf', 'two.pdf');
+        INSERT INTO message_attachment_join VALUES (3, 1), (2, 2);
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        // Only the most recent chat (the group, two members) is listed; nothing is open.
+        _ = try reader.loadSync(LoadRequest(openIDs: [], limit: 1), unlessUnchangedFrom: nil)
+        XCTAssertEqual(reader.lastMemberRowCount, 2)
+
+        let request = LoadRequest(openIDs: [alex, "iMessage;+;group"])
+        let first = try XCTUnwrap(try reader.loadSync(request, unlessUnchangedFrom: nil))
+        XCTAssertEqual(reader.lastMemberRowCount, 3)
+        let group = try XCTUnwrap(first.conversations.first { $0.id == "iMessage;+;group" })
+        XCTAssertEqual(group.messages.first?.attachments.map(\.name), ["one.pdf"])
+        let alexThread = try XCTUnwrap(first.conversations.first { $0.id == alex })
+        XCTAssertEqual(alexThread.messages.flatMap(\.attachments).map(\.name), ["two.pdf"], "each file belongs to its own message")
+
+        let afterFirst = reader.preparedStatementCount
+        XCTAssertNil(try reader.loadSync(request, unlessUnchangedFrom: first.token))
+        XCTAssertEqual(reader.preparedStatementCount, afterFirst, "an unchanged poll reuses its statement")
+        execute("UPDATE message SET is_read = 1 WHERE ROWID = 2")
+        let second = try XCTUnwrap(try reader.loadSync(request, unlessUnchangedFrom: first.token))
+        XCTAssertTrue(second.conversations.first { $0.id == alex }?.messages.last?.isRead ?? false)
+        // Members (one list) and attachments (one list per open chat) are the only new statements.
+        XCTAssertEqual(reader.preparedStatementCount - afterFirst, 3)
+    }
+
     /// A different request loads even when the database is unchanged, and each tile's history is
     /// as deep as that tile asked for — one tile asking for more never deepens the others.
     func testHistoryDepthIsPerConversationAndANewRequestAlwaysLoads() throws {

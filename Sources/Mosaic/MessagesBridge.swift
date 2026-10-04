@@ -1,7 +1,8 @@
 import AppKit
 import Carbon
+import os
 
-enum MessagesBridge {
+@MainActor enum MessagesBridge {
     private static let source = """
     on sendMessage(messageText, conversationID)
         tell application id "com.apple.MobileSMS"
@@ -47,12 +48,32 @@ enum MessagesBridge {
 
     /// Arguments are Apple event descriptors, never interpolated into executable script.
     /// Use the exact chat GUID; a failed lookup must never fall back to another recipient.
+    /// The compiled script, kept for the life of the app: the source never changes, so it is
+    /// compiled on first use and every later send only executes it. NSAppleScript is main-thread
+    /// only (Apple's thread-safety summary), which is why the whole bridge is main-actor isolated.
+    private static var compiled: NSAppleScript?
+    /// How many times the script has been compiled — once per launch. Tests check it.
+    private(set) static var compileCount = 0
+    /// Compile and execution times of the last send, measured apart so a slow Messages reply is
+    /// not mistaken for compile cost. Logged under the "bridge" category.
+    private(set) static var lastCompileDuration: Duration?
+    private(set) static var lastExecutionDuration: Duration?
+    private static let log = Logger(subsystem: "com.doctorschmoctor.Mosaic", category: "bridge")
+
     static func prepareScript() throws -> NSAppleScript {
+        if let compiled { return compiled }
+        let clock = ContinuousClock()
+        let started = clock.now
         guard let script = NSAppleScript(source: source) else { throw BridgeError("Could not prepare Messages automation.") }
         var compilationError: NSDictionary?
         guard script.compileAndReturnError(&compilationError) else {
             throw BridgeError(compilationError?[NSAppleScript.errorMessage] as? String ?? "Could not compile Messages automation.")
         }
+        compileCount += 1
+        let elapsed = clock.now - started
+        lastCompileDuration = elapsed
+        log.debug("Compiled Messages script in \(String(describing: elapsed), privacy: .public)")
+        compiled = script
         return script
     }
 
@@ -88,7 +109,12 @@ enum MessagesBridge {
         for (index, argument) in arguments.enumerated() { parameters.insert(NSAppleEventDescriptor(string: argument), at: index + 1) }
         event.setParam(parameters, forKeyword: AEKeyword(keyDirectObject))
         var error: NSDictionary?
+        let clock = ContinuousClock()
+        let started = clock.now
         _ = script.executeAppleEvent(event, error: &error)
+        let elapsed = clock.now - started
+        lastExecutionDuration = elapsed
+        log.debug("\(handler, privacy: .public) ran in \(String(describing: elapsed), privacy: .public)")
         if let error {
             let number = error[NSAppleScript.errorNumber] as? Int ?? 0
             if number == -1743 {

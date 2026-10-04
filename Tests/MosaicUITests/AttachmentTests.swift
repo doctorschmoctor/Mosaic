@@ -183,6 +183,124 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(PhotoLibraryModel.duration(3725), "1:02:05")
     }
 
+    /// Preheating covers a bounded window around the visible cells, and moving it starts and
+    /// stops only the difference.
+    func testPhotoPreheatWindowIsBoundedAndMovesByDifference() {
+        XCTAssertEqual(PhotoLibraryModel.preheatWindow(visible: 0...8, count: 50_000, margin: 18), 0..<27)
+        XCTAssertEqual(PhotoLibraryModel.preheatWindow(visible: 300...320, count: 50_000, margin: 18), 282..<339)
+        XCTAssertEqual(PhotoLibraryModel.preheatWindow(visible: 49_990...49_999, count: 50_000, margin: 18), 49_972..<50_000)
+        XCTAssertEqual(PhotoLibraryModel.preheatWindow(visible: 0...3, count: 0, margin: 18), 0..<0)
+        let moved = PhotoLibraryModel.difference(from: 0..<27, to: 9..<36)
+        XCTAssertEqual(moved.added, [27..<36])
+        XCTAssertEqual(moved.removed, [0..<9])
+        let jumped = PhotoLibraryModel.difference(from: 0..<27, to: 300..<327)
+        XCTAssertEqual(jumped.added, [300..<327])
+        XCTAssertEqual(jumped.removed, [0..<27])
+        let first = PhotoLibraryModel.difference(from: 0..<0, to: 0..<27)
+        XCTAssertEqual(first.added, [0..<27])
+        XCTAssertTrue(first.removed.isEmpty)
+    }
+
+    /// A conversation that is closed or replaced keeps the files waiting in its composer, as it
+    /// keeps its text; a New Message tile's files go with it.
+    @MainActor func testClosedOrReplacedConversationKeepsItsComposerFiles() throws {
+        let directory = try temporaryDirectory()
+        let plan = directory.appending(path: "plan.pdf"), note = directory.appending(path: "note.txt")
+        try Data("plan".utf8).write(to: plan); try Data("note".utf8).write(to: note)
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let id = store.workspace.openIDs[0]
+        store.attach([plan], to: id)
+        store.workspace.drafts[id] = "See attached"
+        store.close(id)
+        XCTAssertEqual(store.outgoing[id]?.map(\.url?.path), [plan.path])
+        store.open(id)
+        XCTAssertEqual(store.outgoing[id]?.map(\.url?.path), [plan.path])
+        XCTAssertEqual(store.workspace.drafts[id], "See attached")
+        // Every other tile used since, then a fifth conversation opens in its place.
+        for other in store.workspace.openIDs where other != id { store.open(other) }
+        let fifth = try XCTUnwrap(store.conversations.map(\.id).first { !store.workspace.openIDs.contains($0) })
+        store.open(fifth)
+        XCTAssertFalse(store.workspace.openIDs.contains(id), "the tile used longest ago was replaced")
+        XCTAssertEqual(store.outgoing[id]?.map(\.url?.path), [plan.path])
+        store.open(id)
+        XCTAssertEqual(store.outgoing[id]?.map(\.state), [.ready])
+        // A New Message tile's files are let go with it (a chosen file itself stays where it is).
+        let newID = try XCTUnwrap(store.beginNewChat())
+        store.attach([note], to: newID)
+        store.close(newID)
+        XCTAssertNil(store.outgoing[newID])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: note.path))
+    }
+
+    /// After a relaunch an unsent New Message is back with its recipients, text and files, a
+    /// parked file that went missing is shown as missing and blocks its send, and nothing is sent.
+    @MainActor func testUnsentDraftsComeBackAfterRelaunchWithoutSending() async throws {
+        let directory = try temporaryDirectory()
+        let kept = directory.appending(path: "kept.png"), gone = directory.appending(path: "gone.png")
+        try pngData().write(to: kept); try pngData().write(to: gone)
+        let defaults = UserDefaults(suiteName: "MosaicTest-\(UUID())")!
+        defaults.set(false, forKey: "Mosaic.live")
+        let first = WorkspaceStore(defaults: defaults)
+        XCTAssertFalse(first.isLive)
+        let conversation = first.workspace.openIDs[0]
+        first.attach([gone], to: conversation)
+        first.close(conversation)
+        let newID = try XCTUnwrap(first.beginNewChat())
+        first.composeDrafts[newID]?.recipients = [Recipient(address: "+15555550123", name: "Sam")]
+        first.workspace.drafts[newID] = "Hi Sam"
+        first.attach([kept], to: newID)
+        first.persistNow()
+        let before = first.conversations.map(\.messages.count)
+        try FileManager.default.removeItem(at: gone)
+
+        let second = WorkspaceStore(defaults: defaults)
+        XCTAssertTrue(second.workspace.openIDs.contains(newID))
+        XCTAssertEqual(second.composeDrafts[newID]?.recipients.map(\.address), ["+15555550123"])
+        XCTAssertEqual(second.composeDrafts[newID]?.recipients.map(\.name), ["Sam"])
+        XCTAssertEqual(second.workspace.drafts[newID], "Hi Sam")
+        XCTAssertEqual(second.outgoing[newID]?.map(\.url?.path), [kept.path])
+        XCTAssertEqual(second.outgoing[newID]?.map(\.state), [.ready])
+        let missing = try XCTUnwrap(second.outgoing[conversation]?.first)
+        XCTAssertTrue(missing.isMissing)
+        XCTAssertEqual(second.conversations.map(\.messages.count), before, "nothing is sent at launch")
+        XCTAssertTrue(second.conversations.flatMap(\.messages).allSatisfy { $0.sendState == nil })
+        // The missing file stops a send from that conversation until it is removed.
+        second.open(conversation)
+        second.workspace.drafts[conversation] = "Here"
+        await second.send(conversation)
+        XCTAssertEqual(second.sendErrors[conversation], "gone.png is no longer on this Mac. Remove it, then send.")
+        second.removeAttachment(missing.id, from: conversation)
+        XCTAssertNil(second.sendErrors[conversation])
+    }
+
+    /// Cleanup of Mosaic's outgoing folder leaves alone every file a saved draft points at.
+    func testCleanupLeavesFilesASavedDraftPointsAt() throws {
+        let directory = try temporaryDirectory()
+        let referenced = directory.appending(path: "referenced.png"), stale = directory.appending(path: "stale.png")
+        try pngData().write(to: referenced); try pngData().write(to: stale)
+        OutgoingFiles.purge(directory, olderThan: 60, now: Date().addingTimeInterval(3600), keeping: [referenced.path])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: referenced.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+    }
+
+    /// Staging copies off the main thread into a folder of its own, and a refused send's copy can
+    /// be removed without touching the original.
+    func testStagingCopiesInTheBackgroundAndLeavesTheOriginal() async throws {
+        let directory = try temporaryDirectory()
+        let original = directory.appending(path: "clip.mov")
+        try Data(repeating: 7, count: 4096).write(to: original)
+        let staging = directory.appending(path: "staging")
+        let staged = try await OutgoingFiles.stageInBackground(original, in: staging)
+        XCTAssertEqual(try Data(contentsOf: staged), try Data(contentsOf: original))
+        XCTAssertEqual(staged.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path, staging.standardizedFileURL.path)
+        try FileManager.default.removeItem(at: staged.deletingLastPathComponent())
+        XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
+        let copy = directory.appending(path: "saved.mov")
+        try await OutgoingFiles.copyInBackground(original, to: copy)
+        try await OutgoingFiles.copyInBackground(original, to: copy, replacing: true)
+        XCTAssertEqual(try Data(contentsOf: copy).count, 4096)
+    }
+
     /// Saving a received picture to Downloads never overwrites: the name gets a number.
     func testSavedAttachmentNamesDoNotCollide() throws {
         let folder = try temporaryDirectory()
