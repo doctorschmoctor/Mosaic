@@ -6,6 +6,10 @@ import QuartzCore
 // Each step changes the drag, lets SwiftUI process it, lays out and draws, as a frame would.
 // Measures main-thread CPU and wall time per step. Fictional data only.
 
+/// Body counters for instrumented variants (incremented by patched sources when present).
+enum BenchCounters { nonisolated(unsafe) static var counts = [Int](repeating: 0, count: 8); static func hit(_ index: Int) { counts[index] += 1 } }
+extension View { func benchHelp<S: StringProtocol>(_ text: S) -> some View { self } }
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     app.setActivationPolicy(.prohibited)
@@ -51,6 +55,7 @@ MainActor.assumeIsolated {
         let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 800), layout: store.layout)
         let held = ids[0]
         for _ in 0..<20 { frame() } // warm
+        BenchCounters.counts = [Int](repeating: 0, count: 8)
         var cpuTimes: [Double] = [], wallTimes: [Double] = []
         let steps = 400
         for i in 0..<steps {
@@ -65,6 +70,7 @@ MainActor.assumeIsolated {
         store.finishTileDrag(held)
         frame()
         let total = cpuTimes.reduce(0, +)
+        print("COUNTS list=\(BenchCounters.counts[0]) bubble=\(BenchCounters.counts[1]) attachment=\(BenchCounters.counts[2]) tile=\(BenchCounters.counts[3])")
         print(String(format: "RESULT heavy=%@ steps=%d cpu_mean=%.3f cpu_p50=%.3f cpu_p95=%.3f cpu_max=%.3f wall_mean=%.3f wall_p95=%.3f cpu_total=%.1f",
                      heavy ? "yes" : "no", steps, total / Double(steps), percentile(cpuTimes, 0.5), percentile(cpuTimes, 0.95), cpuTimes.max() ?? 0,
                      wallTimes.reduce(0, +) / Double(steps), percentile(wallTimes, 0.95), total))

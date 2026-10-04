@@ -8,4 +8,4 @@ jobs:
         with:
           fetch-depth: 0
       - name: Drag benchmark across commits
-        run: ./scripts/bench/run.sh 1367c41 3f70ed6 b3cb996 7896158 614e48d
+        run: ./scripts/bench/run.sh 614e48d "" nogeo nohover noid noshadow noeffect "nogeo+nohover+noid+noeffect"
