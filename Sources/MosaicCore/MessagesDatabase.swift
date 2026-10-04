@@ -217,7 +217,7 @@ public final class MessagesReader: @unchecked Sendable {
             let fallback = members.isEmpty ? (string(statement, 3) ?? "Conversation") : members.joined(separator: ", ")
             let name = displayName.isEmpty ? fallback : displayName
             let preview = BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6))
-            let thread = request.openIDs.contains(guid) ? try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: guid)) : ([], [])
+            let thread = request.openIDs.contains(guid) ? try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: guid)) : (messages: [], reactions: [])
             conversations.append(Conversation(id: guid, databaseID: rowID, name: name, participants: members,
                 service: string(statement, 4) ?? "iMessage", preview: preview.isEmpty ? "Attachment or activity" : preview,
                 lastActivity: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 7)), messages: thread.messages, reactions: thread.reactions))

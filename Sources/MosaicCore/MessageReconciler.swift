@@ -49,7 +49,7 @@ public enum MessageReconciler {
         }
         // Local messages stay on screen: the ones still waiting for their row, and the ones Messages
         // refused (until the reader retries or removes them).
-        let failed = previous.filter { $0.sendState?.isFailed == true && !waiting.contains { $0.presentationID == $1.presentationID } }
+        let failed = previous.filter { prior in prior.sendState?.isFailed == true && !waiting.contains { $0.presentationID == prior.presentationID } }
         messages.append(contentsOf: (waiting + failed).sorted { $0.date < $1.date })
         return Result(messages: messages, pending: waiting)
     }
