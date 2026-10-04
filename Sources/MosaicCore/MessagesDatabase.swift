@@ -54,10 +54,22 @@ public struct LoadRequest: Equatable, Sendable {
     /// more history never deepens the others.
     public var historyLimits: [String: Int]
     public var defaultHistoryLimit: Int
-    public init(openIDs: Set<String>, limit: Int = 500, historyLimits: [String: Int] = [:], defaultHistoryLimit: Int = 100) {
+    /// The newest row the reader has seen in each conversation. Incoming messages after it are
+    /// counted as unread; a conversation without a boundary counts nothing.
+    public var seenBoundaries: [String: Int64]
+    public init(openIDs: Set<String>, limit: Int = 500, historyLimits: [String: Int] = [:], defaultHistoryLimit: Int = 100,
+                seenBoundaries: [String: Int64] = [:]) {
         self.openIDs = openIDs; self.limit = limit; self.historyLimits = historyLimits; self.defaultHistoryLimit = defaultHistoryLimit
+        self.seenBoundaries = seenBoundaries
     }
     public func historyLimit(for id: String) -> Int { historyLimits[id] ?? defaultHistoryLimit }
+    /// Two requests load the same content when they cover the same conversations to the same
+    /// depth. Seen boundaries are left out: reading a message moves a boundary, and that alone
+    /// should not cost a load (the reader's own count is cleared locally until the next change).
+    public static func == (lhs: LoadRequest, rhs: LoadRequest) -> Bool {
+        lhs.openIDs == rhs.openIDs && lhs.limit == rhs.limit && lhs.historyLimits == rhs.historyLimits
+            && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit
+    }
 }
 
 /// Marks the state of the database a load saw: SQLite's `data_version` on the reader's own
@@ -197,9 +209,10 @@ public final class MessagesReader: @unchecked Sendable {
         // One query for every conversation's members, instead of one query per conversation.
         let membersByChat = try participantsByChat(db)
         let body = schema.col("attributedBody", fallback: "NULL")
+        let retracted = schema.col("date_retracted", fallback: "0")
         let sql = """
         SELECT c.ROWID, c.guid, c.display_name, c.chat_identifier, c.service_name,
-               m.text, \(body), m.date, m.ROWID
+               m.text, \(body), m.date, m.ROWID, \(retracted)
         FROM chat c
         LEFT JOIN message m ON m.ROWID = (SELECT MAX(message_id) FROM chat_message_join WHERE chat_id = c.ROWID)
         ORDER BY COALESCE(m.date, 0) DESC LIMIT ?
@@ -216,11 +229,18 @@ public final class MessagesReader: @unchecked Sendable {
             let displayName = string(statement, 2) ?? ""
             let fallback = members.isEmpty ? (string(statement, 3) ?? "Conversation") : members.joined(separator: ", ")
             let name = displayName.isEmpty ? fallback : displayName
-            let preview = BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6))
-            let thread = request.openIDs.contains(guid) ? try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: guid)) : (messages: [], reactions: [])
+            let lastID = sqlite3_column_int64(statement, 8)
+            // An unsent message's words are gone: the preview says so instead of showing them.
+            let wasUnsent = sqlite3_column_int64(statement, 9) != 0
+            let preview = wasUnsent ? "Unsent message" : BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6))
+            let thread = request.openIDs.contains(guid) ? try history(db, chatID: rowID, schema: schema, limit: request.historyLimit(for: guid)) : LoadedThread()
+            let unread = try request.seenBoundaries[guid].map { boundary in
+                lastID > boundary ? try unreadCount(db, chatID: rowID, schema: schema, after: boundary) : 0
+            } ?? 0
             conversations.append(Conversation(id: guid, databaseID: rowID, name: name, participants: members,
                 service: string(statement, 4) ?? "iMessage", preview: preview.isEmpty ? "Attachment or activity" : preview,
-                lastActivity: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 7)), messages: thread.messages, reactions: thread.reactions))
+                lastActivity: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 7)), unreadCount: unread,
+                messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: lastID))
             status = sqlite3_step(statement)
         }
         guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
@@ -237,16 +257,45 @@ public final class MessagesReader: @unchecked Sendable {
                 conversations.append(Conversation(id: id, databaseID: rowID,
                     name: display.isEmpty ? (members.isEmpty ? (string(pinned, 2) ?? id) : members.joined(separator: ", ")) : display,
                     participants: members, service: string(pinned, 3) ?? "iMessage", preview: thread.messages.last?.text ?? "",
-                    lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions))
+                    lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions,
+                    referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0))
             }
         }
         return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, token: token)
     }
 
+    /// One conversation's loaded page: its messages, the reactions on them, and the messages its
+    /// replies answer that lie above the page.
+    struct LoadedThread {
+        var messages: [Message] = []
+        var reactions: [ReactionEvent] = []
+        var referenced: [String: Message] = [:]
+    }
+
+    /// How many incoming messages (not reactions, not activity, not unsent) came after the boundary
+    /// row, up to 99.
+    private func unreadCount(_ db: OpaquePointer, chatID: Int64, schema: Schema, after boundary: Int64) throws -> Int {
+        var filters = ["j.chat_id = ?1", "m.ROWID > ?2", "m.is_from_me = 0"]
+        if schema.message.contains("associated_message_type") {
+            filters.append("(m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)")
+        }
+        if schema.message.contains("item_type") { filters.append("COALESCE(m.item_type, 0) = 0") }
+        if schema.message.contains("date_retracted") { filters.append("COALESCE(m.date_retracted, 0) = 0") }
+        let statement = try prepare(db, """
+            SELECT COUNT(*) FROM (SELECT 1 FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
+            WHERE \(filters.joined(separator: " AND ")) LIMIT 99)
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, chatID)
+        sqlite3_bind_int64(statement, 2, boundary)
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        return Int(sqlite3_column_int(statement, 0))
+    }
+
     /// The newest `limit` messages of a chat (oldest first) and the reactions on them. Reaction
     /// rows are not messages: they are left out of the page and loaded by their targets, so a
     /// burst of Tapbacks never pushes real messages out of view.
-    private func history(_ db: OpaquePointer, chatID: Int64, schema: Schema, limit: Int) throws -> (messages: [Message], reactions: [ReactionEvent]) {
+    private func history(_ db: OpaquePointer, chatID: Int64, schema: Schema, limit: Int) throws -> LoadedThread {
         func col(_ name: String, _ prefix: String = "m", _ fallback: String = "0") -> String { schema.col(name, prefix: prefix, fallback: fallback) }
         let hasAssociation = schema.message.contains("associated_message_type")
         let notReaction = hasAssociation ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
@@ -291,8 +340,9 @@ public final class MessagesReader: @unchecked Sendable {
         var messages: [Message] = []
         messages.reserveCapacity(rows.count)
         for row in rows.reversed() {
-            let attached = files[row.id] ?? []
-            var text = row.text
+            // An unsent message keeps its place but none of its content, whatever the row still holds.
+            let attached = row.retracted == nil ? files[row.id] ?? [] : []
+            var text = row.retracted == nil ? row.text : ""
             let activity = row.itemType != 0
             if text.isEmpty && attached.isEmpty && row.retracted == nil {
                 if row.attachmentCount > 0 { text = "Attachment · Open in Messages" }
@@ -308,7 +358,43 @@ public final class MessagesReader: @unchecked Sendable {
         let reactions = hasAssociation && schema.message.contains("associated_message_guid")
             ? try reactions(db, chatID: chatID, schema: schema, targets: Set(rows.compactMap(\.guid)), since: rows.last.map(\.date))
             : []
-        return (messages, reactions)
+        let pageGUIDs = Set(rows.compactMap(\.guid))
+        let missing = Set(rows.compactMap(\.replyToGUID)).subtracting(pageGUIDs)
+        let referenced = schema.message.contains("guid") ? try messages(db, chatID: chatID, schema: schema, guids: missing) : [:]
+        return LoadedThread(messages: messages, reactions: reactions, referenced: referenced)
+    }
+
+    /// Messages of this chat by GUID (what replies answer, above the page), at most fifty, with
+    /// their text and files' kinds — enough for a quote, never the history around them. A GUID
+    /// from another chat is not found here: a reply never shows another conversation's message.
+    private func messages(_ db: OpaquePointer, chatID: Int64, schema: Schema, guids: Set<String>) throws -> [String: Message] {
+        let wanted = Array(guids.prefix(50))
+        guard !wanted.isEmpty else { return [:] }
+        func col(_ name: String, _ fallback: String = "0") -> String { schema.col(name, prefix: "m", fallback: fallback) }
+        let placeholders = wanted.indices.map { "?\($0 + 2)" }.joined(separator: ", ")
+        let statement = try prepare(db, """
+            SELECT m.ROWID, m.guid, m.text, \(col("attributedBody", "NULL")), m.date, m.is_from_me, h.id,
+                   \(col("cache_has_attachments")), \(col("date_retracted", "NULL"))
+            FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            WHERE j.chat_id = ?1 AND m.guid IN (\(placeholders))
+            """)
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, chatID)
+        for (index, guid) in wanted.enumerated() { bind(statement, Int32(index + 2), guid) }
+        var result: [String: Message] = [:]
+        var status = sqlite3_step(statement)
+        while status == SQLITE_ROW {
+            defer { status = sqlite3_step(statement) }
+            guard let guid = string(statement, 1) else { continue }
+            let retracted = optionalDate(statement, 8)
+            result[guid] = Message(id: String(sqlite3_column_int64(statement, 0)),
+                text: retracted == nil ? BodyDecoder.decode(text: string(statement, 2), attributedBody: blob(statement, 3)) : "",
+                date: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 4)), isFromMe: sqlite3_column_int(statement, 5) != 0,
+                sender: string(statement, 6), attachmentCount: Int(sqlite3_column_int(statement, 7)), guid: guid, dateRetracted: retracted)
+        }
+        guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        return result
     }
 
     /// The reaction rows of a chat that point at the loaded messages: those are at least as new

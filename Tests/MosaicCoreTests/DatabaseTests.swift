@@ -195,6 +195,76 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(ReactionEvent.isReaction(type: 2005)); XCTAssertFalse(ReactionEvent.isReaction(type: 1000))
     }
 
+    /// A newer-schema database for the reply, unsend and unread cases below.
+    private func makeModern(_ rows: String) -> String {
+        let modern = directory.appendingPathComponent("modern-\(UUID().uuidString).db").path
+        execute("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE chat (guid TEXT, display_name TEXT, chat_identifier TEXT, service_name TEXT);
+        CREATE TABLE handle (id TEXT);
+        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+        CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+        CREATE TABLE message (guid TEXT, text TEXT, attributedBody BLOB, date INTEGER, is_from_me INTEGER, handle_id INTEGER,
+          is_delivered INTEGER DEFAULT 0, is_read INTEGER DEFAULT 0, error INTEGER DEFAULT 0, cache_has_attachments INTEGER DEFAULT 0,
+          associated_message_type INTEGER DEFAULT 0, associated_message_guid TEXT, item_type INTEGER DEFAULT 0,
+          thread_originator_guid TEXT, thread_originator_part TEXT, date_edited INTEGER DEFAULT 0, date_retracted INTEGER DEFAULT 0);
+        INSERT INTO handle VALUES ('alex@example.test'), ('jamie@example.test');
+        INSERT INTO chat VALUES ('\(alex)', '', 'alex@example.test', 'iMessage'), ('iMessage;-;jamie@example.test', '', 'jamie@example.test', 'iMessage');
+        INSERT INTO chat_handle_join VALUES (1,1),(2,2);
+        \(rows)
+        """, at: modern)
+        return modern
+    }
+
+    /// A reply whose original is above the loaded page brings the original's text along (and only
+    /// from its own chat); an unsent message keeps its place but loses its words everywhere.
+    func testRepliesBringTheirOriginalAndUnsentMessagesShowNothing() throws {
+        let modern = makeModern("""
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('OLD', 'Way back when', 700000001000000000, 0, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('J1', 'Jamie elsewhere', 700000001500000000, 0, 2);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('M1', 'Filler', 700000002000000000, 1, 0);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, thread_originator_guid) VALUES ('R1', 'About that', 700000003000000000, 1, 0, 'OLD');
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, thread_originator_guid) VALUES ('R2', 'And that', 700000004000000000, 1, 0, 'J1');
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, date_retracted) VALUES ('U1', 'secret words', 700000005000000000, 0, 1, 700000006000000000);
+        INSERT INTO chat_message_join VALUES (1,1),(2,2),(1,3),(1,4),(1,5),(1,6);
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: modern))
+        let snapshot = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [alex], defaultHistoryLimit: 4), unlessUnchangedFrom: nil))
+        let chat = try XCTUnwrap(snapshot.conversations.first { $0.id == alex })
+        XCTAssertEqual(chat.messages.map(\.guid), ["M1", "R1", "R2", "U1"])
+        XCTAssertEqual(chat.referencedMessages["OLD"]?.text, "Way back when", "the original above the page comes along")
+        XCTAssertNil(chat.referencedMessages["J1"], "a GUID from another chat is never shown here")
+        let unsent = try XCTUnwrap(chat.messages.last)
+        XCTAssertTrue(unsent.isUnsent)
+        XCTAssertEqual(unsent.text, "", "an unsent message's words are not kept")
+        XCTAssertEqual(chat.preview, "Unsent message", "nor shown in the sidebar")
+        XCTAssertEqual(chat.lastMessageID, 6)
+    }
+
+    /// Unread counts come from the seen boundary: every incoming message after it counts — the
+    /// same text five times is five — and sent messages, reactions and activity do not.
+    func testUnreadCountsFromTheSeenBoundary() throws {
+        let modern = makeModern("""
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('A', 'Seen', 700000001000000000, 0, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('B', 'ok', 700000002000000000, 0, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('C', 'ok', 700000003000000000, 0, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('D', 'ok', 700000004000000000, 0, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('E', 'mine', 700000005000000000, 1, 0);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, associated_message_type, associated_message_guid) VALUES ('F', 'Loved', 700000006000000000, 0, 1, 2000, 'p:0/E');
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, item_type) VALUES ('G', '', 700000007000000000, 0, 1, 1);
+        INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('H', 'ok', 700000008000000000, 0, 1);
+        INSERT INTO chat_message_join VALUES (1,1),(1,2),(1,3),(1,4),(1,5),(1,6),(1,7),(1,8);
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: modern))
+        let unseen = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [], seenBoundaries: [alex: 1]), unlessUnchangedFrom: nil))
+        XCTAssertEqual(unseen.conversations.first { $0.id == alex }?.unreadCount, 4, "three identical texts and one more: four")
+        let seen = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [], seenBoundaries: [alex: 8]), unlessUnchangedFrom: nil))
+        XCTAssertEqual(seen.conversations.first { $0.id == alex }?.unreadCount, 0)
+        let none = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: []), unlessUnchangedFrom: nil))
+        XCTAssertEqual(none.conversations.first { $0.id == alex }?.unreadCount, 0, "no boundary, nothing counted")
+        XCTAssertEqual(LoadRequest(openIDs: [], seenBoundaries: [alex: 1]), LoadRequest(openIDs: []), "boundaries alone do not make a different load")
+    }
+
     func testWALContentIsVisibleWithoutCopyingDatabase() throws {
         var db: OpaquePointer?
         XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)

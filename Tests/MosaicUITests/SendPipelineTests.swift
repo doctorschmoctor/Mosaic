@@ -48,6 +48,15 @@ final class SendPipelineTests: XCTestCase {
         let sql = "INSERT INTO message (guid, text, date, is_from_me, handle_id, is_delivered) VALUES ('\(UUID().uuidString)', '\(text)', \(date), 1, 0, 1); INSERT INTO chat_message_join VALUES (1, last_insert_rowid());"
         XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
     }
+    /// Inserts an incoming message from Alex.
+    private func receive(_ text: String, at path: String) {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        let date = Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000)
+        let sql = "INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('\(UUID().uuidString)', '\(text)', \(date), 0, 1); INSERT INTO chat_message_join VALUES (1, last_insert_rowid());"
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+    }
     @MainActor private func liveStore(transport: RecordingTransport) async throws -> (WorkspaceStore, String) {
         let path = try makeDatabase()
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, database: MessagesDatabase(path: path), transport: transport)
@@ -155,6 +164,70 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertTrue(confirmed.isDelivered)
         XCTAssertEqual(confirmed.presentationID, bubble.presentationID, "the bubble keeps its identity")
         XCTAssertEqual(store.conversations[0].messages.filter { $0.text == "See you at 5" }.count, 1)
+    }
+
+    /// Quote in Reply: the quote travels as ordinary text above the reply (Messages cannot thread a
+    /// reply from another app); with only files, the quote is the text; Esc's cancel clears it.
+    @MainActor func testQuotedRepliesAreSentAsTextAboveTheReply() async throws {
+        let transport = RecordingTransport()
+        let (store, _) = try await liveStore(transport: transport)
+        store.open(Self.alex)
+        let hello = try XCTUnwrap(store.conversations[0].messages.first { $0.text == "Hello" })
+        store.beginQuotedReply(to: hello, in: Self.alex)
+        XCTAssertEqual(store.replyTargets[Self.alex]?.excerpt, "Hello")
+        store.workspace.drafts[Self.alex] = "Sure"
+        await store.send(Self.alex)
+        guard case .text(let sent, .chat(Self.alex)) = try XCTUnwrap(transport.submissions.last) else { return XCTFail("a text was sent") }
+        XCTAssertTrue(sent.hasPrefix("> "), sent)
+        XCTAssertTrue(sent.hasSuffix(": Hello\nSure"), sent)
+        XCTAssertNil(store.replyTargets[Self.alex], "the quote goes with one message")
+        // Files alone still carry the quote, as the text after them.
+        store.beginQuotedReply(to: hello, in: Self.alex)
+        let picture = directory.appending(path: "photo.png")
+        try Data([1, 2, 3]).write(to: picture)
+        store.attach([picture], to: Self.alex)
+        await store.send(Self.alex)
+        XCTAssertEqual(transport.submissions.suffix(2).first, .file(picture, .chat(Self.alex)))
+        guard case .text(let quoteOnly, _) = try XCTUnwrap(transport.submissions.last) else { return XCTFail("the quote was sent") }
+        XCTAssertTrue(quoteOnly.hasPrefix("> ") && quoteOnly.hasSuffix(": Hello"), quoteOnly)
+        // Cancelling (Esc, or the bar's ×) sends nothing extra.
+        store.beginQuotedReply(to: hello, in: Self.alex)
+        store.cancelReply(Self.alex)
+        store.workspace.drafts[Self.alex] = "Plain"
+        await store.send(Self.alex)
+        XCTAssertEqual(transport.submissions.last, .text("Plain", .chat(Self.alex)))
+        XCTAssertFalse(store.transport.capabilities.nativeReply, "a quote is never presented as a threaded reply")
+    }
+
+    /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it
+    /// counts, sent ones never do, and reading the newest message clears the count.
+    @MainActor func testUnreadCountsFollowIncomingMessagesAndTheSeenBoundary() async throws {
+        let transport = RecordingTransport()
+        let (store, path) = try await liveStore(transport: transport)
+        XCTAssertEqual(store.seenBoundary(Self.alex), 2, "a conversation first seen starts with its newest row as seen")
+        XCTAssertEqual(store.conversations[0].unreadCount, 0)
+        receive("ok", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].unreadCount, 1)
+        receive("ok", at: path); receive("ok", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].unreadCount, 3, "the same text three times is three messages")
+        record("from me", date: Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000), at: path)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].unreadCount, 3, "a sent message is not unread")
+        // Opening or focusing a tile does not read it; the thread reports its newest message in view.
+        store.open(Self.alex)
+        store.focus(Self.alex)
+        XCTAssertEqual(store.conversations[0].unreadCount, 3)
+        store.markSeen(Self.alex)
+        XCTAssertEqual(store.conversations[0].unreadCount, 0)
+        XCTAssertEqual(store.seenBoundary(Self.alex), 6)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].unreadCount, 0)
+        // Closing the tile lets its history go back to the standard depth.
+        store.historyLimits[Self.alex] = 300
+        store.close(Self.alex)
+        XCTAssertNil(store.historyLimits[Self.alex])
     }
 
     @MainActor func testDemoModeNeverTouchesTheLiveTransport() async throws {

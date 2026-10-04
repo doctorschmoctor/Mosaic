@@ -166,17 +166,25 @@ public struct Conversation: Identifiable, Equatable, Sendable {
     public var lastActivity: Date
     public var unreadCount: Int
     public var messages: [Message]
-    /// Reactions on the loaded messages (not shown yet; kept apart from the history page).
+    /// Reactions on the loaded messages, kept apart from the history page (see `Reactions.reduce`).
     public var reactions: [ReactionEvent]
+    /// Messages that loaded replies answer but that lie outside the loaded page, by GUID: enough to
+    /// show what a reply quotes without loading the whole history above it.
+    public var referencedMessages: [String: Message]
+    /// The database row of the conversation's newest message (0 when unknown): the seen boundary
+    /// for unread counts is a row, not a preview text.
+    public var lastMessageID: Int64
     /// A tile for a message that has no conversation yet: the reader is still choosing recipients.
     public var isComposeDraft: Bool
 
     public init(id: String, databaseID: Int64 = 0, name: String, participants: [String],
                 service: String = "iMessage", preview: String = "", lastActivity: Date = Date(),
-                unreadCount: Int = 0, messages: [Message] = [], reactions: [ReactionEvent] = [], isComposeDraft: Bool = false) {
+                unreadCount: Int = 0, messages: [Message] = [], reactions: [ReactionEvent] = [], isComposeDraft: Bool = false,
+                referencedMessages: [String: Message] = [:], lastMessageID: Int64 = 0) {
         self.id = id; self.databaseID = databaseID; self.name = name; self.participants = participants
         self.service = service; self.preview = preview; self.lastActivity = lastActivity
         self.unreadCount = unreadCount; self.messages = messages; self.reactions = reactions; self.isComposeDraft = isComposeDraft
+        self.referencedMessages = referencedMessages; self.lastMessageID = lastMessageID
     }
 
     /// The participants as comparable keys, so a chosen set of people can be matched to a chat.
@@ -193,6 +201,111 @@ public struct Conversation: Identifiable, Equatable, Sendable {
 public enum WorkspaceLayout: String, Codable, CaseIterable, Sendable {
     case grid, columns, focus
     public var title: String { rawValue.capitalized }
+}
+
+/// Who put a reaction on a message.
+public enum ReactionActor: Hashable, Sendable {
+    case me
+    case handle(String)
+    case unknown
+}
+
+/// The reactions currently on a message, one entry per kind, as a thread shows them.
+public struct ReactionSummary: Identifiable, Equatable, Sendable {
+    public let kind: ReactionEvent.Kind
+    /// Everyone whose latest reaction on the message is this kind, in the order they reacted.
+    public let actors: [ReactionActor]
+    public var id: String { Reactions.key(for: kind) }
+    public var count: Int { actors.count }
+    public var includesMe: Bool { actors.contains(.me) }
+    public init(kind: ReactionEvent.Kind, actors: [ReactionActor]) { self.kind = kind; self.actors = actors }
+}
+
+/// Builds the reactions a thread shows from the reaction rows Messages keeps. The rows are not a
+/// complete event log — a removed reaction's row may simply be gone — so the state is rebuilt from
+/// whatever rows exist each time: per actor, per message part, the latest row decides. A removal
+/// clears only the same actor's matching reaction; a new kind from the same actor replaces the old
+/// one, as Messages allows one reaction per person per part.
+public enum Reactions {
+    public static func reduce(_ events: [ReactionEvent]) -> [String: [ReactionSummary]] {
+        struct Slot: Hashable { let actor: ReactionActor; let target: String; let part: Int? }
+        var state: [Slot: (kind: ReactionEvent.Kind, order: Int)] = [:]
+        let ordered = events.enumerated().sorted { a, b in
+            if a.element.date != b.element.date { return a.element.date < b.element.date }
+            let x = Int64(a.element.id) ?? Int64(a.offset), y = Int64(b.element.id) ?? Int64(b.offset)
+            return x < y
+        }
+        for (order, entry) in ordered.enumerated() {
+            let event = entry.element
+            let actor: ReactionActor = event.isFromMe ? .me : event.actor.map(ReactionActor.handle) ?? .unknown
+            let slot = Slot(actor: actor, target: event.targetGUID, part: event.targetPart)
+            if event.isRemoval {
+                if let current = state[slot], matches(removal: event.kind, current: current.kind) { state[slot] = nil }
+            } else {
+                state[slot] = (event.kind, order)
+            }
+        }
+        // Group by message, then by kind, in the order the kinds first appeared; an actor who
+        // reacted to two parts of one message with the same kind is counted once.
+        var byTarget: [String: [(kind: ReactionEvent.Kind, order: Int, actors: [ReactionActor])]] = [:]
+        for (slot, value) in state.sorted(by: { $0.value.order < $1.value.order }) {
+            var groups = byTarget[slot.target] ?? []
+            if let index = groups.firstIndex(where: { $0.kind == value.kind }) {
+                if !groups[index].actors.contains(slot.actor) { groups[index].actors.append(slot.actor) }
+            } else {
+                groups.append((value.kind, value.order, [slot.actor]))
+            }
+            byTarget[slot.target] = groups
+        }
+        return byTarget.mapValues { groups in groups.map { ReactionSummary(kind: $0.kind, actors: $0.actors) } }
+    }
+    /// A removal row names the kind it takes off; an emoji removal may not repeat the emoji.
+    static func matches(removal: ReactionEvent.Kind, current: ReactionEvent.Kind) -> Bool {
+        if removal == current { return true }
+        if case .emoji(let removed) = removal, case .emoji = current { return removed.isEmpty }
+        if case .other = removal { return true }
+        return false
+    }
+    static func key(for kind: ReactionEvent.Kind) -> String {
+        switch kind {
+        case .love: return "love"
+        case .like: return "like"
+        case .dislike: return "dislike"
+        case .laugh: return "laugh"
+        case .emphasize: return "emphasize"
+        case .question: return "question"
+        case .emoji(let value): return "emoji:" + value
+        case .other(let type): return "other:\(type)"
+        }
+    }
+}
+
+/// A reply Mosaic sends as ordinary text. Messages' scripting dictionary cannot make a threaded
+/// reply, so the quoted message travels in the text itself, above the reply, and the recipient
+/// sees exactly that: a quote line, then the message.
+public enum QuotedReply {
+    public static let excerptLimit = 80
+    /// A one-line excerpt of a message, shortened with an ellipsis.
+    public static func excerpt(of message: Message) -> String {
+        if message.isUnsent { return "Unsent message" }
+        let firstLine = message.text.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
+        if firstLine.isEmpty {
+            switch message.attachments.first?.kind {
+            case .image?: return "Photo"
+            case .video?: return "Video"
+            case .audio?: return "Audio message"
+            case .file?: return message.attachments.first?.name ?? "Attachment"
+            case nil: return message.attachmentCount > 0 ? "Attachment" : "Message"
+            }
+        }
+        return firstLine.count > excerptLimit ? String(firstLine.prefix(excerptLimit - 1)).trimmingCharacters(in: .whitespaces) + "…" : firstLine
+    }
+    /// The text that is sent: the quote line, then the reply (which may be empty when only files
+    /// go with the quote).
+    public static func compose(quoting excerpt: String, from sender: String?, reply: String) -> String {
+        let quote = "> " + (sender.map { "\($0): " } ?? "") + excerpt
+        return reply.isEmpty ? quote : quote + "\n" + reply
+    }
 }
 
 /// Someone a new message is addressed to: a handle (phone number or email) and the name shown for it.

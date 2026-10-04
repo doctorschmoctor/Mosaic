@@ -16,6 +16,14 @@ public enum DemoData {
             ("Taylor Brooks", ["taylor@example.test"], [text("That restaurant was so good.", false), text("Already thinking about going back.", true)], 0),
             ("Riley Park", ["riley@example.test"], [text("Did you finish the book?", false), text("Last chapter tonight!", true)], 0)
         ]
+        // Fictional replies ("conversation-message" → the message answered), edits and reactions.
+        let replies: [String: Int] = ["1-3": 2, "3-4": 3]
+        let edited: Set<String> = ["4-2"]
+        let reactions: [Int: [(target: Int, kind: ReactionEvent.Kind, actor: String?)]] = [
+            0: [(2, .love, nil), (3, .like, "alex@example.test")],
+            1: [(5, .like, nil), (5, .like, "jules@example.test"), (3, .laugh, "sam@example.test")],
+            3: [(4, .love, nil)],
+        ]
         return examples.enumerated().map { offset, example in
             let messages = example.2.enumerated().compactMap { (index, entry) -> Message? in
                 var attachments: [Attachment] = []
@@ -26,13 +34,22 @@ public enum DemoData {
                         name: (path as NSString).lastPathComponent, mimeType: "image/png", uti: "public.png",
                         pixelWidth: image == 0 ? 1200 : 900, pixelHeight: image == 0 ? 800 : 1100)]
                 }
-                return Message(id: "demo-\(offset)-\(index)", text: entry.text,
-                    date: now.addingTimeInterval(Double(-1800 - offset * 600 + index * 240)), isFromMe: entry.fromMe,
-                    sender: example.1.first, attachments: attachments, isDelivered: entry.fromMe)
+                let date = now.addingTimeInterval(Double(-1800 - offset * 600 + index * 240))
+                let key = "\(offset)-\(index)"
+                return Message(id: "demo-\(key)", text: entry.text, date: date, isFromMe: entry.fromMe,
+                    sender: example.1.first, attachments: attachments, isDelivered: entry.fromMe,
+                    guid: "demo-\(key)", replyToGUID: replies[key].map { "demo-\(offset)-\($0)" },
+                    dateEdited: edited.contains(key) ? date.addingTimeInterval(60) : nil)
+            }
+            let events = (reactions[offset] ?? []).enumerated().compactMap { (position, reaction) -> ReactionEvent? in
+                guard let target = messages.first(where: { $0.id == "demo-\(offset)-\(reaction.target)" }) else { return nil }
+                return ReactionEvent(id: "demo-reaction-\(offset)-\(position)", date: target.date.addingTimeInterval(30 + Double(position)),
+                    isFromMe: reaction.actor == nil, actor: reaction.actor, targetGUID: target.guid ?? target.id, targetPart: nil,
+                    kind: reaction.kind, isRemoval: false)
             }
             return Conversation(id: "demo-\(offset)", name: example.0, participants: example.1,
                 preview: messages.last?.text ?? "", lastActivity: messages.last?.date ?? now,
-                unreadCount: example.3, messages: messages)
+                unreadCount: example.3, messages: messages, reactions: events)
         }
     }
 }

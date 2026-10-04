@@ -33,7 +33,9 @@ struct ConversationTile: View {
                 MessageList(conversation: conversation, isLive: store.isLive,
                             canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
                             senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
-                            onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
+                            seenBoundary: store.seenBoundary(conversation.id),
+                            onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
+                            onTailSeen: { [store, id = conversation.id] in store.markSeen(id) })
                     .equatable()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A click anywhere in the thread puts the keyboard in this tile's composer; links
@@ -114,6 +116,9 @@ struct ConversationTile: View {
             } else if let note = store.sendNotes[conversation.id] {
                 Text(note).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let target = store.replyTargets[conversation.id] {
+                ReplyBar(target: target) { store.cancelReply(conversation.id) }
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 // Photos and files, as in Messages.
                 AttachmentMenuButton(conversationName: conversation.name,
@@ -134,7 +139,10 @@ struct ConversationTile: View {
                         onFocus: { store.focus(conversation.id) },
                         onSend: { Task { await store.send(conversation.id) } },
                         onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
-                        onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil,
+                        // Esc cancels a quote first; then it closes a New Message tile; otherwise nothing.
+                        onCancel: store.replyTargets[conversation.id] != nil || conversation.isComposeDraft ? { [store, id = conversation.id] in
+                            if store.replyTargets[id] != nil { store.cancelReply(id) } else { store.close(id) }
+                        } : nil,
                         onAttachFiles: { urls in store.attach(urls, to: conversation.id) },
                         onAttachPicture: { data, type in store.attachPicture(data, type: type, to: conversation.id) })
                         .frame(height: composerHeight)
@@ -185,8 +193,14 @@ struct MessageList: View, Equatable {
     var zoom: CGFloat = 1
     /// Whether a newly arrived or sent message settles in with a short effect (Settings).
     var animateNew = true
+    /// The newest row the reader has seen; incoming messages after it are new.
+    var seenBoundary: Int64? = nil
     let onLoadMore: () -> Void
+    /// The newest message is in view: everything up to it has been seen.
+    var onTailSeen: () -> Void = {}
     @State private var isNearBottom = true
+    /// A reply's original that was just jumped to, outlined for a moment.
+    @State private var highlightedID: String?
     @State private var latestRequest = 0
     /// Where each row sits in the content, for the scroll anchor; a class, so rows reporting
     /// their frames cost no view invalidation.
@@ -198,12 +212,39 @@ struct MessageList: View, Equatable {
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
         lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore
             && lhs.senderNames == rhs.senderNames && lhs.zoom == rhs.zoom && lhs.animateNew == rhs.animateNew
+            && lhs.seenBoundary == rhs.seenBoundary
+    }
+
+    /// A person in this thread, as the thread names them.
+    private func name(of handle: String?) -> String {
+        guard let handle else { return conversation.isGroup ? "Someone" : conversation.name }
+        return senderNames[handle] ?? (conversation.isGroup ? Recipient.display(handle) : conversation.name)
+    }
+    private func name(of actor: ReactionActor) -> String {
+        switch actor {
+        case .me: return "You"
+        case .handle(let handle): return name(of: handle)
+        case .unknown: return "Someone"
+        }
+    }
+    private func author(of message: Message) -> String { message.isFromMe ? "You" : name(of: message.sender) }
+    /// The first incoming message after the seen boundary, where the New Messages line goes.
+    static func firstUnread(in rows: [MessageRow], after boundary: Int64?) -> String? {
+        guard let boundary else { return nil }
+        return rows.first { row in
+            !row.message.isFromMe && row.message.kind == .message && !row.message.isUnsent && (Int64(row.message.id) ?? 0) > boundary
+        }?.id
     }
 
     var body: some View {
         let rows = MessageRow.rows(for: conversation)
         let content = ThreadContent(first: rows.first?.id, last: rows.last?.id, count: rows.count)
         let ids = rows.map(\.id)
+        let reactions = Reactions.reduce(conversation.reactions)
+        let byGUID = Dictionary(conversation.messages.compactMap { message in message.guid.map { ($0, message) } }, uniquingKeysWith: { first, _ in first })
+        // The New Messages line only while reading above them; at the tail everything is being seen.
+        let firstUnread = isNearBottom ? nil : Self.firstUnread(in: rows, after: seenBoundary)
+        ScrollViewReader { proxy in
         ScrollView {
             // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
             // which made rows jump.
@@ -221,11 +262,19 @@ struct MessageList: View, Equatable {
                             Text(day).font(.system(size: 10 * zoom, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
                         }
+                        if row.id == firstUnread { UnreadDivider() }
                         MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
                                       senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
                                       live: isLive, service: conversation.service,
-                                      showsStatus: row.showsStatus, showsTime: row.showsTime)
+                                      showsStatus: row.showsStatus, showsTime: row.showsTime,
+                                      authorName: author(of: row.message),
+                                      reactions: row.message.guid.flatMap { reactions[$0] } ?? [],
+                                      reply: replyContext(for: row.message, in: byGUID),
+                                      highlighted: highlightedID == row.id,
+                                      actorName: { name(of: $0) }, replyAuthor: { author(of: $0) },
+                                      onShowOriginal: { original in jump(to: original.presentationID, proxy: proxy) })
                     }
+                    .id(row.id)
                     // Messages in a run from the same person sit close together; a new run gets the full gap.
                     .padding(.top, row.continuesRun ? -7 * zoom : 0)
                     // A row that just arrived at the tail settles in once; everything else is still.
@@ -244,19 +293,39 @@ struct MessageList: View, Equatable {
                 if isNearBottom != near { isNearBottom = near }
             })
         }
+        }
         .overlay(alignment: .bottomTrailing) {
             if !isNearBottom {
                 Button { latestRequest += 1 } label: {
-                    Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
+                    Label(conversation.unreadCount > 0 ? "\(conversation.unreadCount) new" : "Latest", systemImage: "arrow.down")
+                        .font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                 }.buttonStyle(.plain).padding(12)
+                .accessibilityLabel(conversation.unreadCount > 0 ? "\(conversation.unreadCount) new messages; go to the latest" : "Go to the latest message")
             }
         }
+        .onAppear { if isNearBottom { onTailSeen() } }
+        .onChange(of: isNearBottom) { _, near in if near { onTailSeen() } }
         .onChange(of: ids) { old, new in
             // Only rows appended at the tail animate: never the initial load (no change event),
             // an older page loading above, a reconnect or confirmation (same identities), a
             // removal, or a large burst.
             freshIDs = animateNew ? Self.freshTailIDs(old: old, new: new) : []
+            if isNearBottom { onTailSeen() }
         }
+    }
+
+    /// What a reply answers: a message in the page, one above it, or nothing Mosaic can find.
+    private func replyContext(for message: Message, in byGUID: [String: Message]) -> ReplyContext? {
+        guard let target = message.replyToGUID else { return nil }
+        if let loaded = byGUID[target] { return .loaded(loaded) }
+        if let earlier = conversation.referencedMessages[target] { return .earlier(earlier) }
+        return .missing
+    }
+    /// Goes to a reply's original and outlines it for a moment.
+    private func jump(to id: String, proxy: ScrollViewProxy) {
+        proxy.scrollTo(id, anchor: .center)
+        highlightedID = id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { if highlightedID == id { highlightedID = nil } }
     }
 
     /// How many appended rows animate at once; a bigger batch arrives silently.
@@ -338,7 +407,8 @@ struct MessageRow: Identifiable, Equatable {
     }
     /// Same side, same sender, and close in time.
     static func sameRun(_ first: Message, _ second: Message) -> Bool {
-        first.isFromMe == second.isFromMe && first.sender == second.sender && second.date.timeIntervalSince(first.date) < runGap
+        first.kind == .message && second.kind == .message && !first.isUnsent && !second.isUnsent
+            && first.isFromMe == second.isFromMe && first.sender == second.sender && second.date.timeIntervalSince(first.date) < runGap
     }
 }
 
@@ -397,16 +467,39 @@ struct MessageBubble: View {
     var showsStatus = true
     /// The time appears under the last message of a run, not under every message.
     var showsTime = true
+    /// Who wrote it, for lines like "Alex unsent a message".
+    var authorName = ""
+    var reactions: [ReactionSummary] = []
+    var reply: ReplyContext? = nil
+    /// The original of a reply that was just jumped to.
+    var highlighted = false
+    var actorName: (ReactionActor) -> String = { _ in "Someone" }
+    var replyAuthor: (Message) -> String = { _ in "" }
+    var onShowOriginal: (Message) -> Void = { _ in }
 
     var body: some View {
+        if message.isUnsent {
+            ThreadNote(text: message.isFromMe ? "You unsent a message." : "\(authorName) unsent a message.")
+        } else if message.kind == .activity {
+            ThreadNote(text: message.text)
+        } else {
+            bubble
+        }
+    }
+
+    private var bubble: some View {
         let fromMe = message.isFromMe
         let previewURL = LinkDetector.previewURL(in: message.text)
         let showsText = !message.text.isEmpty && !LinkDetector.isOnlyLink(message.text)
-        VStack(alignment: fromMe ? .trailing : .leading, spacing: 4 * zoom) {
+        return VStack(alignment: fromMe ? .trailing : .leading, spacing: 4 * zoom) {
             if group && !fromMe, let senderName {
                 Text(senderName).font(.system(size: 9 * zoom, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 4 * zoom)
             }
-            ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment) }
+            if let reply {
+                ReplyExcerpt(context: reply, senderName: replyAuthor, onShowOriginal: onShowOriginal)
+            }
+            VStack(alignment: fromMe ? .trailing : .leading, spacing: 4 * zoom) {
+            ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment, extraActions: { replyActions }) }
             if showsText {
                 // Plain Text, not selectable: on macOS a selectable Text is a full text view (it
                 // supports mouse range selection), and three or four hundred of them made opening
@@ -426,13 +519,29 @@ struct MessageBubble: View {
                         ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
                             Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
                         }
+                        replyActions
                         failedSendActions
                     }
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
-            if showsTime || message.sendState != nil || (fromMe && showsStatus && (message.isRead || message.isDelivered)) {
+            }
+            // Room for the reactions above the content, reserved only when there are some, so a
+            // badge never covers the message above.
+            .padding(.top, reactions.isEmpty ? 0 : 12 * zoom)
+            .overlay(alignment: fromMe ? .topLeading : .topTrailing) {
+                if !reactions.isEmpty {
+                    ReactionBadges(reactions: reactions, names: actorName).offset(x: (fromMe ? -10 : 10) * zoom)
+                }
+            }
+            .background {
+                if highlighted {
+                    RoundedRectangle(cornerRadius: 18 * zoom, style: .continuous).fill(Palette.accent.opacity(0.16)).padding(-5 * zoom)
+                }
+            }
+            if showsTime || message.isEdited || message.sendState != nil || (fromMe && showsStatus && (message.isRead || message.isDelivered)) {
                 HStack(spacing: 4) {
                     Text(MessageText.time(message.date))
+                    if message.isEdited { Text("· Edited") }
                     if fromMe {
                         switch message.sendState {
                         // Being handed to Messages, handed over, or refused: the database has not
@@ -456,6 +565,18 @@ struct MessageBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
         .padding(fromMe ? .leading : .trailing, 36 * zoom)
+    }
+
+    /// Quoting a message in a reply. Messages can't thread a reply sent from another app, so the
+    /// quote goes in the text; Reply in Messages hands the conversation over for a real one.
+    @ViewBuilder private var replyActions: some View {
+        if message.sendState == nil || message.sendState == .submitted {
+            Divider()
+            Button("Quote in Reply") { store.beginQuotedReply(to: message, in: threadID) }
+            if let conversation = store.conversations.first(where: { $0.id == threadID }), store.isLive {
+                Button("Reply in Messages") { store.openMessages(conversation) }
+            }
+        }
     }
 
     /// What can be done with a message Messages refused: send it as it was, take it back into the

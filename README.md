@@ -12,6 +12,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
 - **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else, and received pictures can be copied or saved with a right-click.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them.
+- **Reactions, replies, edits** — Tapbacks (including custom emoji) show as badges on the message, with who reacted on click; replies show what they answer and jump to it; edited messages are marked and unsent ones become a note. Unread counts are counted per message.
 - **Media and links** — Photo and video thumbnails, file chips, and link previews, all sized before they load so nothing jumps.
 - **Contact names** — Phone numbers and addresses become names with Contacts access. Names stay in memory.
 - **Zoom** — ⌘+ / ⌘− / ⌘0 scale every conversation together: text, bubbles, media and the composer, in all tiles at once. Tiles, sidebar and window keep their size.
@@ -69,6 +70,8 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
 - The **+** button at the left of the composer opens a grid of your Photos library (newest first; click to choose, **Add** to attach) or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text, with a remove badge, and go out with the next Return — each file as its own message, before the text.
 - Click a photo or video to open it; right-click to copy it, save it to Downloads or elsewhere, or show it in Finder. Right-click a bubble to copy its text or open its links.
+- Right-click a message → **Quote in Reply** to quote it above your next message (Esc cancels). Messages can't start a reply thread from another app, so the quote is sent as ordinary text — "> Alex: Lunch?" above your reply — and **Reply in Messages** hands the conversation over for a real one. Click a reply's quote line to jump to the original.
+- Click a reaction badge to see who reacted. While you read older messages, new ones are counted on the **N new** button and marked with a New Messages line.
 - **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
 
 ## Scope
@@ -76,12 +79,12 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 Mosaic covers existing conversations and text replies. It reads `~/Library/Messages/chat.db` over a read-only SQLite connection and sends through Messages' AppleScript dictionary; no private frameworks are used.
 
 - The sidebar lists the 500 most recent conversations plus any open ones. Search covers names, participants and previews.
-- Plain text and common rich bodies are shown; unknown formats offer **Open in Messages**. Edits, unsends, formatting and tapbacks are not rendered.
+- Plain text and common rich bodies are shown; unknown formats offer **Open in Messages**. Formatting is not rendered. Reactions are shown on the whole message (not the exact part of a multi-part message); an edit shows the current text with an Edited mark, not the history.
 - Attachments come from the copies Messages keeps locally; one never downloaded to this Mac says so. Link previews use LinkPresentation and are kept in memory.
-- Reactions, calls and brand-new groups are done in Messages; **Open Messages** takes you there.
+- Sending reactions, threaded replies, edits and unsends, calls and brand-new groups is done in Messages — its scripting dictionary sends only text and files; **Reply in Messages** and **Open Messages** take you there.
 - Photos' own search (people, places, things) is not available to other apps, so the Photos grid is a plain library view.
 - Messages from one sender within fifteen minutes form a run with a single time stamp. **Delivered** / **Read** appears under the latest sent message once Messages reports it. Sends are never retried automatically.
-- Mosaic does not write to Apple's database. Unread indicators are local to the session.
+- Mosaic does not write to Apple's database or send read receipts. Its unread counts are its own: incoming messages after the newest one you had in view.
 - The database schema is Apple's and undocumented; a macOS release may require an update.
 
 ## Privacy

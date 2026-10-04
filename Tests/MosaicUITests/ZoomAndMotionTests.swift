@@ -81,6 +81,33 @@ final class ZoomAndMotionTests: XCTestCase {
         XCTAssertEqual(List.freshTailIDs(old: ["a", "b"], new: ["a", "b"]), [], "a receipt or confirmation changes no identities")
     }
 
+    /// The New Messages line goes above the first incoming message after the seen boundary;
+    /// sent messages, notes and unsent messages never start it.
+    func testUnreadDividerPlacement() {
+        let date = Date()
+        let conversation = Conversation(id: "c", name: "Alex", participants: ["a"], messages: [
+            Message(id: "10", text: "seen", date: date, isFromMe: false),
+            Message(id: "11", text: "mine", date: date, isFromMe: true),
+            Message(id: "12", text: "", date: date, isFromMe: false, dateRetracted: date),
+            Message(id: "13", text: "joined", date: date, isFromMe: false, kind: .activity),
+            Message(id: "14", text: "new one", date: date, isFromMe: false),
+        ])
+        let rows = MessageRow.rows(for: conversation)
+        XCTAssertEqual(MessageList.firstUnread(in: rows, after: 10), "14")
+        XCTAssertNil(MessageList.firstUnread(in: rows, after: 14))
+        XCTAssertNil(MessageList.firstUnread(in: rows, after: nil))
+        // Notes and unsent rows break runs: the message after them starts its own.
+        XCTAssertFalse(rows[4].continuesRun)
+    }
+
+    /// The demo shows reactions, replies and an edit, all fictional.
+    func testDemoCarriesReactionsRepliesAndEdits() {
+        let demo = DemoData.conversations()
+        XCTAssertFalse(Reactions.reduce(demo[0].reactions).isEmpty)
+        XCTAssertTrue(demo[1].messages.contains { $0.replyToGUID != nil })
+        XCTAssertTrue(demo[4].messages.contains { $0.isEdited })
+    }
+
     /// The animation preference is persisted and off means no fresh rows at all.
     @MainActor func testAnimateMessagesPreferencePersists() {
         let suite = "MosaicTest-\(UUID())"

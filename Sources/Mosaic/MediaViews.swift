@@ -76,8 +76,10 @@ struct AspectBox: Layout {
     }
 }
 
-struct AttachmentView: View {
+struct AttachmentView<Extra: View>: View {
     let attachment: Attachment
+    /// More items for the context menu (Quote in Reply).
+    @ViewBuilder var extraActions: () -> Extra
     @State private var image: NSImage?
     @State private var failed = false
     @Environment(\.zoomScale) private var zoom
@@ -159,6 +161,7 @@ struct AttachmentView: View {
             Divider()
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
         }
+        extraActions()
     }
     private func open() {
         guard let path = attachment.path else { return }
@@ -177,7 +180,7 @@ struct AttachmentView: View {
     }
     private func saveToDownloads() {
         guard let path = attachment.path, let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return }
-        let destination = Self.freeName(for: attachment.name, in: downloads)
+        let destination = SavedFiles.freeName(for: attachment.name, in: downloads)
         do {
             try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destination)
             NSWorkspace.shared.activateFileViewerSelecting([destination])
@@ -195,6 +198,10 @@ struct AttachmentView: View {
             try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: destination)
         } catch { NSSound.beep() }
     }
+}
+
+/// Names for files saved out of a conversation.
+enum SavedFiles {
     /// `name`, or `name 2`, `name 3`… when the folder already has one.
     static func freeName(for name: String, in folder: URL) -> URL {
         let base = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
