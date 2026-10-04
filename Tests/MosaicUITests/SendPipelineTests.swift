@@ -166,39 +166,6 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertEqual(store.conversations[0].messages.filter { $0.text == "See you at 5" }.count, 1)
     }
 
-    /// Quote in Reply: the quote travels as ordinary text above the reply (Messages cannot thread a
-    /// reply from another app); with only files, the quote is the text; Esc's cancel clears it.
-    @MainActor func testQuotedRepliesAreSentAsTextAboveTheReply() async throws {
-        let transport = RecordingTransport()
-        let (store, _) = try await liveStore(transport: transport)
-        store.open(Self.alex)
-        let hello = try XCTUnwrap(store.conversations[0].messages.first { $0.text == "Hello" })
-        store.beginQuotedReply(to: hello, in: Self.alex)
-        XCTAssertEqual(store.replyTargets[Self.alex]?.excerpt, "Hello")
-        store.workspace.drafts[Self.alex] = "Sure"
-        await store.send(Self.alex)
-        guard case .text(let sent, .chat(Self.alex)) = try XCTUnwrap(transport.submissions.last) else { return XCTFail("a text was sent") }
-        XCTAssertTrue(sent.hasPrefix("> "), sent)
-        XCTAssertTrue(sent.hasSuffix(": Hello\nSure"), sent)
-        XCTAssertNil(store.replyTargets[Self.alex], "the quote goes with one message")
-        // Files alone still carry the quote, as the text after them.
-        store.beginQuotedReply(to: hello, in: Self.alex)
-        let picture = directory.appending(path: "photo.png")
-        try Data([1, 2, 3]).write(to: picture)
-        store.attach([picture], to: Self.alex)
-        await store.send(Self.alex)
-        XCTAssertEqual(transport.submissions.suffix(2).first, .file(picture, .chat(Self.alex)))
-        guard case .text(let quoteOnly, _) = try XCTUnwrap(transport.submissions.last) else { return XCTFail("the quote was sent") }
-        XCTAssertTrue(quoteOnly.hasPrefix("> ") && quoteOnly.hasSuffix(": Hello"), quoteOnly)
-        // Cancelling (Esc, or the bar's ×) sends nothing extra.
-        store.beginQuotedReply(to: hello, in: Self.alex)
-        store.cancelReply(Self.alex)
-        store.workspace.drafts[Self.alex] = "Plain"
-        await store.send(Self.alex)
-        XCTAssertEqual(transport.submissions.last, .text("Plain", .chat(Self.alex)))
-        XCTAssertFalse(store.transport.capabilities.nativeReply, "a quote is never presented as a threaded reply")
-    }
-
     /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it
     /// counts, sent ones never do, and reading the newest message clears the count.
     @MainActor func testUnreadCountsFollowIncomingMessagesAndTheSeenBoundary() async throws {

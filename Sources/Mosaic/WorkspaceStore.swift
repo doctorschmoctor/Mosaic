@@ -45,9 +45,6 @@ import MosaicCore
     var outgoing: [String: [OutgoingAttachment]] = [:]
     /// A line under a composer about its send: waiting for photos, or why a send stopped.
     var sendNotes: [String: String] = [:]
-    /// The message each tile's next send quotes (Quote in Reply). Messages cannot thread a reply
-    /// sent from another app, so the quote travels in the text, above the reply.
-    var replyTargets: [String: ReplyTarget] = [:]
     var showSetup = false
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
@@ -258,11 +255,9 @@ import MosaicCore
     }
     /// A closed or replaced tile's composer files are let go: a photo still arriving for it lands
     /// nowhere (its file is removed when it does), and a send waiting for those photos stops waiting.
-    /// A closed tile's history goes back to the standard depth (the next load releases the rest),
-    /// and its reply target is gone.
+    /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
         historyLimits[id] = nil
-        replyTargets[id] = nil
     }
     private func dropImports(for id: String) {
         for file in outgoing[id] ?? [] where file.isOwnedByMosaic { try? FileManager.default.removeItem(at: file.url!) }
@@ -505,12 +500,6 @@ import MosaicCore
                 }
             }
             if !newBoundaries.isEmpty { seenMessageIDs.merge(newBoundaries) { current, _ in current } }
-            // A quoted reply whose original was unsent quotes nothing any more.
-            for (tile, target) in replyTargets {
-                guard let thread = loaded.first(where: { $0.id == tile }),
-                      let original = thread.messages.first(where: { $0.presentationID == target.presentationID }) else { continue }
-                if original.isUnsent { replyTargets[tile] = nil }
-            }
             // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
             unhideChanged(in: loaded)
@@ -601,12 +590,9 @@ import MosaicCore
     /// each item in the thread. Nil when there is nothing to send.
     private func acceptSend(from tileID: String, to target: SendTarget, into threadID: String) -> Outbound? {
         let originalDraft = drafts[tileID] ?? ""
-        let typed = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let files = (outgoing[tileID] ?? []).filter { $0.state == .ready }
-        guard !typed.isEmpty || !files.isEmpty else { return nil }
-        // A quoted reply: the quote line goes above what was typed, as ordinary text.
-        let quote = replyTargets[tileID]
-        let text = quote.map { QuotedReply.compose(quoting: $0.excerpt, from: $0.senderName, reply: typed) } ?? typed
+        guard !text.isEmpty || !files.isEmpty else { return nil }
         var items: [(item: Outbound.Item, message: Message)] = []
         let now = Date()
         for file in files {
@@ -625,7 +611,6 @@ import MosaicCore
             if drafts[tileID] == originalDraft { drafts[tileID] = tileID == threadID ? "" : nil }
             outgoing[tileID] = nil
             sendErrors[tileID] = nil
-            replyTargets[tileID] = nil
             place(batch.items.map(\.message), in: threadID, preview: Self.preview(text: text, files: files))
         }
         pending[threadID, default: []].append(contentsOf: batch.items.map(\.message))
@@ -748,26 +733,6 @@ import MosaicCore
     private func localFailures(in threadID: String) -> Int {
         (conversations.first { $0.id == threadID }?.messages ?? composeDrafts[threadID]?.sent ?? []).filter { $0.sendState?.isFailed == true }.count
     }
-    // MARK: Quoted replies
-
-    /// Quote in Reply: the tile's next message carries a quote of this one above it.
-    func beginQuotedReply(to message: Message, in threadID: String) {
-        guard openIDs.contains(threadID), !message.isUnsent, message.kind == .message, !message.isLocal || message.sendState == .submitted else { return }
-        let conversation = conversations.first { $0.id == threadID }
-        // The quote names who wrote the message: oneself as "Me"; in a group, the sender; in a
-        // one-to-one chat, the other person.
-        let sender: String?
-        if message.isFromMe { sender = "Me" }
-        else if conversation?.isGroup == true { sender = message.sender.map { name(for: $0) } }
-        else { sender = conversation?.name }
-        instantly { replyTargets[threadID] = ReplyTarget(presentationID: message.presentationID, guid: message.guid,
-                                                         senderName: sender, excerpt: QuotedReply.excerpt(of: message)) }
-        requestComposerFocus(threadID)
-    }
-    func cancelReply(_ threadID: String) {
-        if replyTargets[threadID] != nil { instantly { replyTargets[threadID] = nil } }
-    }
-
     /// The sidebar preview after a send: the text, else what the last file was.
     static func preview(text: String, files: [OutgoingAttachment]) -> String {
         if !text.isEmpty { return text }
@@ -1075,15 +1040,6 @@ import MosaicCore
         if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id))) }
         workspace = state
     }
-}
-
-/// The message a tile's next send quotes.
-struct ReplyTarget: Equatable {
-    let presentationID: String
-    let guid: String?
-    /// Who wrote it, as the quote names them ("Me" for one's own message); nil leaves the name out.
-    let senderName: String?
-    let excerpt: String
 }
 
 struct WorkspaceAlert: Identifiable, Equatable {

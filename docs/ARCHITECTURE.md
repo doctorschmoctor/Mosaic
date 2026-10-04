@@ -36,7 +36,7 @@ The list is a SwiftUI `List` for its swipe actions. Rows are highlighted only by
 
 The reader keeps reaction rows (`associated_message_type` 2000–3999) out of the history page and loads those pointing at the page's GUIDs separately; `Reactions.reduce` rebuilds the current state from whatever rows exist — per actor and part the latest row decides, a removal clears only the same actor's matching kind — so a deleted row simply disappears. Replies carry `thread_originator_guid`/part; originals above the page are fetched by GUID within the same chat (at most fifty), so a quote never needs the history above it and never shows another chat's message. Unsent rows keep their place with all content dropped at read time (so nothing stale can be copied, quoted or previewed). Unread counts are counted by the reader from a per-conversation seen boundary (a row id), incoming ordinary messages only; the boundary moves when a thread's newest message is in view or the reader sends, never on open or focus alone.
 
-Quoted replies are ordinary text: `QuotedReply.compose` puts "> Name: excerpt" above the reply, because Messages' dictionary has no reply command (`TransportCapabilities.nativeReply` is false and nothing presents a quote as a threaded reply).
+Mosaic shows reactions and replies but does not send them: Messages' scripting dictionary sends only text and files (`TransportCapabilities.nativeReply` and `.nativeReaction` are false), and Mosaic does not imitate either with ordinary text.
 
 ## Composing
 

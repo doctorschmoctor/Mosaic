@@ -76,10 +76,8 @@ struct AspectBox: Layout {
     }
 }
 
-struct AttachmentView<Extra: View>: View {
+struct AttachmentView: View {
     let attachment: Attachment
-    /// More items for the context menu (Quote in Reply).
-    @ViewBuilder var extraActions: () -> Extra
     @State private var image: NSImage?
     @State private var failed = false
     @Environment(\.zoomScale) private var zoom
@@ -161,7 +159,6 @@ struct AttachmentView<Extra: View>: View {
             Divider()
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
         }
-        extraActions()
     }
     private func open() {
         guard let path = attachment.path else { return }

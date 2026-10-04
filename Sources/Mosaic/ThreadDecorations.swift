@@ -136,7 +136,7 @@ struct ReplyExcerpt: View {
     private var label: String {
         switch context {
         case .loaded(let message), .earlier(let message):
-            return "\(senderName(message)): \(QuotedReply.excerpt(of: message))"
+            return "\(senderName(message)): \(MessageExcerpt.of(message))"
         case .missing:
             return "Original message unavailable"
         }
@@ -152,35 +152,12 @@ struct ReplyExcerpt: View {
         if case .earlier(let message) = context {
             VStack(alignment: .leading, spacing: 6) {
                 Text(senderName(message)).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                Text(message.isUnsent ? "This message was unsent." : message.text.isEmpty ? QuotedReply.excerpt(of: message) : message.text)
+                Text(message.isUnsent ? "This message was unsent." : message.text.isEmpty ? MessageExcerpt.of(message) : message.text)
                     .font(.callout).fixedSize(horizontal: false, vertical: true)
                 Text(MessageText.day(message.date) + ", " + MessageText.time(message.date)).font(.caption2).foregroundStyle(.tertiary)
                 Text("Earlier than the loaded history").font(.caption2).foregroundStyle(.tertiary)
             }
         }
-    }
-}
-
-/// The line under a composer that is quoting a message, with the quote as it will be sent.
-struct ReplyBar: View {
-    let target: ReplyTarget
-    let onCancel: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "text.quote").foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Quoting \(target.senderName ?? "message")").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-                Text(target.excerpt).font(.system(size: 11)).lineLimit(1).foregroundStyle(.primary)
-            }
-            Spacer(minLength: 4)
-            Button(action: onCancel) { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                .buttonStyle(.plain).accessibilityLabel("Cancel the quote")
-        }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .help("Messages can't start a reply thread from another app, so the quote is sent as ordinary text above your message: “" + QuotedReply.compose(quoting: target.excerpt, from: target.senderName, reply: "…") + "”. Esc cancels.")
-        .accessibilityElement(children: .combine)
     }
 }
 

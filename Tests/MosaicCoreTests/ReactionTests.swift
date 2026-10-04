@@ -51,19 +51,15 @@ final class ReactionTests: XCTestCase {
         XCTAssertTrue(Reactions.reduce([]).isEmpty)
     }
 
-    /// Quoted replies are ordinary text: a quote line, then the reply.
-    func testQuotedReplyExcerptAndComposition() {
+    /// The line above a reply names what it answers in one short line.
+    func testReplyExcerpts() {
         let short = Message(id: "1", text: "Lunch?\nor dinner", date: base, isFromMe: false)
-        XCTAssertEqual(QuotedReply.excerpt(of: short), "Lunch?", "the first line only")
+        XCTAssertEqual(MessageExcerpt.of(short), "Lunch?", "the first line only")
         let long = Message(id: "2", text: String(repeating: "word ", count: 40), date: base, isFromMe: false)
-        let excerpt = QuotedReply.excerpt(of: long)
-        XCTAssertTrue(excerpt.hasSuffix("…"))
-        XCTAssertLessThanOrEqual(excerpt.count, QuotedReply.excerptLimit)
+        XCTAssertTrue(MessageExcerpt.of(long).hasSuffix("…"))
+        XCTAssertLessThanOrEqual(MessageExcerpt.of(long).count, MessageExcerpt.limit)
         let photo = Message(id: "3", text: "", date: base, isFromMe: false, attachments: [Attachment(id: "a", path: nil, name: "x.jpg", mimeType: "image/jpeg")])
-        XCTAssertEqual(QuotedReply.excerpt(of: photo), "Photo")
-        let unsent = Message(id: "4", text: "", date: base, isFromMe: false, dateRetracted: base)
-        XCTAssertEqual(QuotedReply.excerpt(of: unsent), "Unsent message")
-        XCTAssertEqual(QuotedReply.compose(quoting: "Lunch?", from: "Alex", reply: "Yes, at one"), "> Alex: Lunch?\nYes, at one")
-        XCTAssertEqual(QuotedReply.compose(quoting: "Lunch?", from: nil, reply: ""), "> Lunch?", "files alone still carry the quote")
+        XCTAssertEqual(MessageExcerpt.of(photo), "Photo")
+        XCTAssertEqual(MessageExcerpt.of(Message(id: "4", text: "", date: base, isFromMe: false, dateRetracted: base)), "Unsent message")
     }
 }

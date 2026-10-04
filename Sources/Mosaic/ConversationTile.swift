@@ -116,9 +116,6 @@ struct ConversationTile: View {
             } else if let note = store.sendNotes[conversation.id] {
                 Text(note).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let target = store.replyTargets[conversation.id] {
-                ReplyBar(target: target) { store.cancelReply(conversation.id) }
-            }
             HStack(alignment: .bottom, spacing: 8) {
                 // Photos and files, as in Messages.
                 AttachmentMenuButton(conversationName: conversation.name,
@@ -139,10 +136,7 @@ struct ConversationTile: View {
                         onFocus: { store.focus(conversation.id) },
                         onSend: { Task { await store.send(conversation.id) } },
                         onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
-                        // Esc cancels a quote first; then it closes a New Message tile; otherwise nothing.
-                        onCancel: store.replyTargets[conversation.id] != nil || conversation.isComposeDraft ? { [store, id = conversation.id] in
-                            if store.replyTargets[id] != nil { store.cancelReply(id) } else { store.close(id) }
-                        } : nil,
+                        onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil,
                         onAttachFiles: { urls in store.attach(urls, to: conversation.id) },
                         onAttachPicture: { data, type in store.attachPicture(data, type: type, to: conversation.id) })
                         .frame(height: composerHeight)
@@ -499,7 +493,7 @@ struct MessageBubble: View {
                 ReplyExcerpt(context: reply, senderName: replyAuthor, onShowOriginal: onShowOriginal)
             }
             VStack(alignment: fromMe ? .trailing : .leading, spacing: 4 * zoom) {
-            ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment, extraActions: { replyActions }) }
+            ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment) }
             if showsText {
                 // Plain Text, not selectable: on macOS a selectable Text is a full text view (it
                 // supports mouse range selection), and three or four hundred of them made opening
@@ -519,7 +513,6 @@ struct MessageBubble: View {
                         ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
                             Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
                         }
-                        replyActions
                         failedSendActions
                     }
             }
@@ -565,18 +558,6 @@ struct MessageBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
         .padding(fromMe ? .leading : .trailing, 36 * zoom)
-    }
-
-    /// Quoting a message in a reply. Messages can't thread a reply sent from another app, so the
-    /// quote goes in the text; Reply in Messages hands the conversation over for a real one.
-    @ViewBuilder private var replyActions: some View {
-        if message.sendState == nil || message.sendState == .submitted {
-            Divider()
-            Button("Quote in Reply") { store.beginQuotedReply(to: message, in: threadID) }
-            if let conversation = store.conversations.first(where: { $0.id == threadID }), store.isLive {
-                Button("Reply in Messages") { store.openMessages(conversation) }
-            }
-        }
     }
 
     /// What can be done with a message Messages refused: send it as it was, take it back into the

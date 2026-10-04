@@ -280,13 +280,10 @@ public enum Reactions {
     }
 }
 
-/// A reply Mosaic sends as ordinary text. Messages' scripting dictionary cannot make a threaded
-/// reply, so the quoted message travels in the text itself, above the reply, and the recipient
-/// sees exactly that: a quote line, then the message.
-public enum QuotedReply {
-    public static let excerptLimit = 80
-    /// A one-line excerpt of a message, shortened with an ellipsis.
-    public static func excerpt(of message: Message) -> String {
+/// A one-line excerpt of a message, for the line above a reply that names what it answers.
+public enum MessageExcerpt {
+    public static let limit = 80
+    public static func of(_ message: Message) -> String {
         if message.isUnsent { return "Unsent message" }
         let firstLine = message.text.split(whereSeparator: \.isNewline).first.map(String.init)?.trimmingCharacters(in: .whitespaces) ?? ""
         if firstLine.isEmpty {
@@ -298,13 +295,7 @@ public enum QuotedReply {
             case nil: return message.attachmentCount > 0 ? "Attachment" : "Message"
             }
         }
-        return firstLine.count > excerptLimit ? String(firstLine.prefix(excerptLimit - 1)).trimmingCharacters(in: .whitespaces) + "…" : firstLine
-    }
-    /// The text that is sent: the quote line, then the reply (which may be empty when only files
-    /// go with the quote).
-    public static func compose(quoting excerpt: String, from sender: String?, reply: String) -> String {
-        let quote = "> " + (sender.map { "\($0): " } ?? "") + excerpt
-        return reply.isEmpty ? quote : quote + "\n" + reply
+        return firstLine.count > limit ? String(firstLine.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…" : firstLine
     }
 }
 
