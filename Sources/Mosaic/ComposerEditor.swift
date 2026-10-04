@@ -5,20 +5,22 @@ import UniformTypeIdentifiers
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
 struct ComposerEditor: NSViewRepresentable {
-    static let baseFontSize: CGFloat = 12
-    /// Text sits 8pt (scaled by zoom) from the field's left, top and right edges; one line of text
-    /// plus those margins is the field's resting height, whatever font metrics the Mac uses.
-    static let baseMargin: CGFloat = 8
+    /// The text size at 100%. The shared zoom scales the text only: the field, the + button and
+    /// the emoji button keep their size at every zoom.
+    static let baseFontSize: CGFloat = 11
+    /// The field's resting height, one line, at every zoom (the + and emoji buttons are as tall).
+    static let barHeight: CGFloat = 31
+    /// Text sits 8pt from the field's left and right edges.
+    static let sideMargin: CGFloat = 8
     static func font(zoom: CGFloat) -> NSFont { .systemFont(ofSize: (baseFontSize * zoom).rounded()) }
-    static func margin(zoom: CGFloat) -> CGFloat { (baseMargin * zoom).rounded() }
-    static func minimumHeight(zoom: CGFloat) -> CGFloat {
-        (NSLayoutManager().defaultLineHeight(for: font(zoom: zoom)) + margin(zoom: zoom) * 2).rounded(.up)
-    }
-    /// After about six lines the field stops growing and scrolls.
-    static func maximumHeight(zoom: CGFloat) -> CGFloat {
-        (NSLayoutManager().defaultLineHeight(for: font(zoom: zoom)) * 6 + margin(zoom: zoom) * 2).rounded(.up)
-    }
-    static let minimumHeight = minimumHeight(zoom: 1)
+    static func lineHeight(zoom: CGFloat) -> CGFloat { NSLayoutManager().defaultLineHeight(for: font(zoom: zoom)) }
+    /// Above and below the text: one line sits centered in the bar, whatever its size.
+    static func verticalMargin(zoom: CGFloat) -> CGFloat { max(2, (barHeight - lineHeight(zoom: zoom)) / 2) }
+    static func minimumHeight(zoom: CGFloat) -> CGFloat { barHeight }
+    /// The field grows with the draft up to this height (about six lines at 100%), then scrolls.
+    static let maximumHeight: CGFloat = (barHeight + lineHeight(zoom: 1) * 5).rounded(.up)
+    static func maximumHeight(zoom: CGFloat) -> CGFloat { maximumHeight }
+    static let minimumHeight = barHeight
 
     @Binding var text: String
     var placeholder = ""
@@ -59,7 +61,7 @@ struct ComposerEditor: NSViewRepresentable {
         // state, including an empty field, where the default stack could draw the caret at the edge.
         let editor = DraftTextView(usingTextLayoutManager: false)
         editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainerInset = NSSize(width: Self.margin(zoom: zoom), height: Self.margin(zoom: zoom))
+        editor.textContainerInset = NSSize(width: Self.sideMargin, height: Self.verticalMargin(zoom: zoom))
         editor.textContainer?.widthTracksTextView = true
         // Insets first, then the frame: the container's width is derived from both at frame time.
         editor.frame = NSRect(origin: .zero, size: scroll.contentSize)
@@ -119,12 +121,12 @@ struct ComposerEditor: NSViewRepresentable {
 
     private func apply(to editor: DraftTextView, coordinator: Coordinator) {
         // The zoom changed: the same editor keeps its text, selection, undo and marked text; only
-        // the font and margins move.
+        // the font changes, re-centered in the same bar.
         let font = Self.font(zoom: zoom)
         if editor.font?.pointSize != font.pointSize {
             editor.font = font
             editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
-            editor.textContainerInset = NSSize(width: Self.margin(zoom: zoom), height: Self.margin(zoom: zoom))
+            editor.textContainerInset = NSSize(width: Self.sideMargin, height: Self.verticalMargin(zoom: zoom))
             editor.needsDisplay = true
             if let scroll = editor.enclosingScrollView { editor.fitToClip(scroll.contentSize) }
             editor.reportHeight()

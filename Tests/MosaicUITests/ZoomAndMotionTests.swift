@@ -50,14 +50,22 @@ final class ZoomAndMotionTests: XCTestCase {
         XCTAssertNil(KeyboardRouter.zoomAction(for: "o"))
     }
 
-    /// The composer's font and margins follow the zoom, in place: the same editor keeps its text
-    /// and selection, and the height bounds scale with the font.
-    @MainActor func testComposerMetricsFollowZoomInPlace() {
-        XCTAssertGreaterThan(ComposerEditor.minimumHeight(zoom: 1.6), ComposerEditor.minimumHeight(zoom: 1))
-        XCTAssertGreaterThan(ComposerEditor.minimumHeight(zoom: 1), ComposerEditor.minimumHeight(zoom: 0.8))
-        XCTAssertGreaterThan(ComposerEditor.maximumHeight(zoom: 1), ComposerEditor.minimumHeight(zoom: 1) * 3, "about six lines fit before the field scrolls")
-        XCTAssertEqual(ComposerEditor.minimumHeight, ComposerEditor.minimumHeight(zoom: 1))
-        XCTAssertEqual(ComposerEditor.font(zoom: 1.5).pointSize, 18)
+    /// The zoom scales the composer's text only: the field keeps its height at every zoom, one
+    /// line of text fits centered in it at every step, and the same editor keeps its text and
+    /// selection when the font changes.
+    @MainActor func testComposerZoomChangesTheTextNotTheBar() {
+        XCTAssertEqual(ComposerEditor.font(zoom: 1).pointSize, 11)
+        XCTAssertEqual(ComposerEditor.font(zoom: 0.8).pointSize, 9)
+        XCTAssertEqual(ComposerEditor.font(zoom: 1.6).pointSize, 18)
+        for step in stride(from: Workspace.zoomRange.lowerBound, through: Workspace.zoomRange.upperBound, by: Workspace.zoomStep) {
+            let zoom = CGFloat(step)
+            XCTAssertEqual(ComposerEditor.minimumHeight(zoom: zoom), ComposerEditor.barHeight)
+            XCTAssertEqual(ComposerEditor.maximumHeight(zoom: zoom), ComposerEditor.maximumHeight)
+            let line = ComposerEditor.lineHeight(zoom: zoom) + ComposerEditor.verticalMargin(zoom: zoom) * 2
+            XCTAssertLessThanOrEqual(line, ComposerEditor.barHeight + 0.5, "one line fits the bar at \(step)")
+        }
+        XCTAssertEqual(ComposerEditor.minimumHeight, ComposerEditor.barHeight)
+        XCTAssertGreaterThan(ComposerEditor.maximumHeight, ComposerEditor.barHeight * 3, "about six lines fit before the field scrolls")
         let editor = DraftTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 50))
         editor.font = ComposerEditor.font(zoom: 1)
         editor.string = "Hello there"

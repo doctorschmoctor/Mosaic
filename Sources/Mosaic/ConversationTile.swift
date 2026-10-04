@@ -126,7 +126,7 @@ struct ConversationTile: View {
                     onFiles: { urls in store.attach(urls, to: conversation.id) },
                     onBeginAdding: { count in store.beginImports(count, to: conversation.id) },
                     onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) })
-                    .frame(width: 31, height: 31).padding(.bottom, max(0, (ComposerEditor.minimumHeight(zoom: zoom) - 31) / 2))
+                    .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.barHeight - 31) / 2)
                 VStack(spacing: 0) {
                     if let files = store.outgoing[conversation.id], !files.isEmpty {
                         // Pictures and files going out with the next message, above the text.
@@ -149,7 +149,7 @@ struct ConversationTile: View {
                 .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
-                emojiButton.padding(.bottom, max(0, (ComposerEditor.minimumHeight(zoom: zoom) - 31) / 2))
+                emojiButton.padding(.bottom, (ComposerEditor.barHeight - 31) / 2)
             }
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
     }
