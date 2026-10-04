@@ -74,7 +74,8 @@ final class SendPipelineTests: XCTestCase {
         store.open(Self.alex)
         store.workspace.drafts[Self.alex] = "On my way"
         let sending = Task { await store.send(Self.alex) }
-        try await Task.sleep(for: .milliseconds(80))
+        // Until Messages is being asked (on a slow machine this takes more than a moment).
+        for _ in 0..<400 where transport.submissions.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
         let thread = store.conversations[0].messages
         XCTAssertEqual(thread.last?.text, "On my way")
         XCTAssertEqual(thread.last?.sendState, .sending, "the bubble is in the thread while Messages is still being asked")

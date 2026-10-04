@@ -90,10 +90,14 @@ struct TransportError: LocalizedError {
     /// Suspends every submission until `release()` is called (to look at the state in between).
     var holds = false
     private var held: [CheckedContinuation<Void, Never>] = []
+    /// A release that came before any submission was held lets the next one through, so a test
+    /// cannot hang on a submission that arrived late.
+    private var releasedAhead = 0
 
     func release() {
         let waiting = held
         held = []
+        if waiting.isEmpty { releasedAhead += 1 }
         for continuation in waiting { continuation.resume() }
     }
     func send(text: String, to target: SendTarget) async throws {
@@ -105,7 +109,9 @@ struct TransportError: LocalizedError {
     private func submit(_ submission: Submission) async throws {
         let index = submissions.count
         submissions.append(submission)
-        if holds { await withCheckedContinuation { held.append($0) } }
+        if holds {
+            if releasedAhead > 0 { releasedAhead -= 1 } else { await withCheckedContinuation { held.append($0) } }
+        }
         if latency > .zero { try? await Task.sleep(for: latency) }
         if let failure = failures[index] { throw TransportError(failure) }
     }
