@@ -430,6 +430,7 @@ import MosaicCore
             startWatchingDatabase()
             guard let snapshot else { return } // unchanged since the last load
             lastLoad = snapshot.token
+            let ids = request.openIDs
             var loaded = snapshot.conversations
             let previousByID = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             for index in loaded.indices {
