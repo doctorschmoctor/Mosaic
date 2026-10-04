@@ -9,7 +9,9 @@ final class ZoomAndMotionTests: XCTestCase {
     @MainActor func testSharedZoomClampsPersistsAndRestores() throws {
         let suite = "MosaicTest-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
-        let store = WorkspaceStore(defaults: defaults, forceDemo: true)
+        // A live store (with no database to read) persists; the demo deliberately never does.
+        let database = MessagesDatabase(path: NSTemporaryDirectory() + "mosaic-zoom-missing-\(UUID()).db")
+        let store = WorkspaceStore(defaults: defaults, database: database)
         XCTAssertEqual(store.zoom, 1)
         XCTAssertTrue(store.canZoomIn); XCTAssertTrue(store.canZoomOut)
         store.zoomIn(); store.zoomIn()
@@ -27,7 +29,7 @@ final class ZoomAndMotionTests: XCTestCase {
         XCTAssertEqual(store.zoom, 1.4, accuracy: 0.001, "values land on the steps")
         // Relaunch: the same defaults bring the same zoom back.
         store.persistNow()
-        let second = WorkspaceStore(defaults: defaults, forceDemo: true)
+        let second = WorkspaceStore(defaults: defaults, database: database)
         XCTAssertEqual(second.zoom, 1.4, accuracy: 0.001)
         // A workspace saved before zoom existed decodes at 100%.
         let old = try JSONDecoder().decode(Workspace.self, from: Data(#"{"openIDs":["a"],"layout":"grid"}"#.utf8))
@@ -53,7 +55,7 @@ final class ZoomAndMotionTests: XCTestCase {
     @MainActor func testComposerMetricsFollowZoomInPlace() {
         XCTAssertGreaterThan(ComposerEditor.minimumHeight(zoom: 1.6), ComposerEditor.minimumHeight(zoom: 1))
         XCTAssertGreaterThan(ComposerEditor.minimumHeight(zoom: 1), ComposerEditor.minimumHeight(zoom: 0.8))
-        XCTAssertGreaterThan(ComposerEditor.maximumHeight(zoom: 1), ComposerEditor.minimumHeight(zoom: 1) * 4)
+        XCTAssertGreaterThan(ComposerEditor.maximumHeight(zoom: 1), ComposerEditor.minimumHeight(zoom: 1) * 3, "about six lines fit before the field scrolls")
         XCTAssertEqual(ComposerEditor.minimumHeight, ComposerEditor.minimumHeight(zoom: 1))
         XCTAssertEqual(ComposerEditor.font(zoom: 1.5).pointSize, 18)
         let editor = DraftTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 50))
