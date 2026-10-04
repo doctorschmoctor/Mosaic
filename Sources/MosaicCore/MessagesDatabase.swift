@@ -360,14 +360,14 @@ public final class MessagesReader: @unchecked Sendable {
             : []
         let pageGUIDs = Set(rows.compactMap(\.guid))
         let missing = Set(rows.compactMap(\.replyToGUID)).subtracting(pageGUIDs)
-        let referenced = schema.message.contains("guid") ? try messages(db, chatID: chatID, schema: schema, guids: missing) : [:]
+        let referenced = schema.message.contains("guid") ? try originals(db, chatID: chatID, schema: schema, guids: missing) : [:]
         return LoadedThread(messages: messages, reactions: reactions, referenced: referenced)
     }
 
     /// Messages of this chat by GUID (what replies answer, above the page), at most fifty, with
     /// their text and files' kinds — enough for a quote, never the history around them. A GUID
     /// from another chat is not found here: a reply never shows another conversation's message.
-    private func messages(_ db: OpaquePointer, chatID: Int64, schema: Schema, guids: Set<String>) throws -> [String: Message] {
+    private func originals(_ db: OpaquePointer, chatID: Int64, schema: Schema, guids: Set<String>) throws -> [String: Message] {
         let wanted = Array(guids.prefix(50))
         guard !wanted.isEmpty else { return [:] }
         func col(_ name: String, _ fallback: String = "0") -> String { schema.col(name, prefix: "m", fallback: fallback) }
