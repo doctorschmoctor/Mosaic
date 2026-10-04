@@ -107,17 +107,58 @@ final class ThinScroller: NSScroller {
     }
 }
 
-/// Keeps a conversation's scroll position meaningful while its content and its frame change: the
-/// distance from the bottom is preserved, so a list that shows the newest message stays on it when
-/// a tile is resized, the layout switches, history arrives or a message is added, and a list the
-/// reader scrolled up stays on the same rows when older messages load above them. This is done in
-/// AppKit, synchronously with the size change, so nothing is drawn at an interim position first.
+/// What a conversation's scroll view currently holds, by message identity: enough to tell an
+/// append (a new message at the end) from a prepend (older history above) when the content
+/// changes size, which pixel arithmetic alone cannot.
+struct ThreadContent: Equatable {
+    var first: String?
+    var last: String?
+    var count = 0
+}
+
+/// Where each message row sits within the thread's content, in the content's own coordinates
+/// (which do not move when the thread scrolls). Rows report their frames as layout places them;
+/// nothing observes this class, so updates cost no view invalidation. The pinner uses it to put
+/// the same message back at the same place after a reflow (a width change, a zoom change).
+final class ThreadRowRegistry {
+    private(set) var frames: [String: CGRect] = [:]
+    func update(_ id: String, _ frame: CGRect) { frames[id] = frame }
+    /// The row at this offset from the content's top, else the nearest one below it.
+    func row(at y: CGFloat) -> (id: String, frame: CGRect)? {
+        var below: (id: String, frame: CGRect)?
+        for (id, frame) in frames {
+            if frame.minY <= y && y < frame.maxY { return (id, frame) }
+            if frame.minY >= y, below == nil || frame.minY < below!.frame.minY { below = (id, frame) }
+        }
+        return below
+    }
+}
+
+/// Keeps a conversation's scroll position meaningful while its content and its frame change.
+/// Near the bottom, the list follows the newest message (tail mode). Scrolled up, the reader is
+/// reading history, and what they are reading stays put: a new message appended below moves
+/// nothing, older messages prepended above keep the same rows in view, a viewport resize keeps
+/// the row at the top of the view, and a reflow (width or zoom change) puts the remembered
+/// message back at its remembered place using the row registry. Pixel adjustments happen in
+/// AppKit, synchronously with the size change, so nothing is drawn at an interim position first;
+/// the reflow correction lands one turn later, once layout has reported the new row frames.
 final class ScrollPinner: NSObject {
     /// Within this many points of the end the list counts as following the newest message.
     static let nearBottomTolerance: CGFloat = 24
     private(set) weak var scrollView: NSScrollView?
     var onNearBottomChanged: ((Bool) -> Void)?
     private(set) var distanceFromBottom: CGFloat = 0
+    /// The distance between the visible area's top edge and the content's top.
+    private(set) var distanceFromTop: CGFloat = 0
+    /// Row frames by message, for reflow anchoring; nil outside a message thread.
+    var registry: ThreadRowRegistry?
+    /// The message at the top of the view and how far into it the view starts, captured whenever
+    /// the reader scrolls; what a reflow puts back.
+    private(set) var anchor: (id: String, offset: CGFloat)?
+    /// What the thread holds now, and what the next layout will hold (set by SwiftUI before
+    /// AppKit lays the new content out, so the size change can be classified when it arrives).
+    private var content = ThreadContent()
+    private var pendingContent: ThreadContent?
     private(set) var isNearBottom = true {
         didSet {
             guard isNearBottom != oldValue else { return }
@@ -168,6 +209,12 @@ final class ScrollPinner: NSObject {
         observers = []
         scrollView = nil
     }
+    /// The content the next layout pass will show. Called from the SwiftUI update, which runs
+    /// before AppKit resizes the document for it.
+    func expect(_ next: ThreadContent) {
+        guard next != (pendingContent ?? content) else { return }
+        pendingContent = next
+    }
 
     private var geometry: (clip: NSClipView, documentHeight: CGFloat, flipped: Bool)? {
         guard let scrollView, let document = scrollView.documentView else { return nil }
@@ -179,6 +226,12 @@ final class ScrollPinner: NSObject {
         let (clip, documentHeight, flipped) = geometry
         return max(0, flipped ? documentHeight - clip.bounds.maxY : clip.bounds.minY)
     }
+    /// The visible area's top edge, as an offset from the content's top.
+    private func currentTop() -> CGFloat? {
+        guard let geometry else { return nil }
+        let (clip, documentHeight, flipped) = geometry
+        return max(0, flipped ? clip.bounds.minY : documentHeight - clip.bounds.maxY)
+    }
 
     private func clipBoundsChanged() {
         guard !adjusting, let scrollView else { return }
@@ -186,21 +239,99 @@ final class ScrollPinner: NSObject {
         let documentSize = scrollView.documentView?.frame.size ?? .zero
         if clipSize != lastClipSize || documentSize != lastDocumentSize { sizeChanged() } else { remember() }
     }
-    /// The viewport or the content changed size: put the content back at the remembered distance.
+    /// What kind of change a size change was, from the content descriptors around it.
+    enum ContentChange { case none, append, prepend, mixed }
+    static func classify(from old: ThreadContent, to new: ThreadContent) -> ContentChange {
+        guard old.count > 0, new.count > 0, new != old else { return .none }
+        if old.first == new.first, old.last == new.last { return .none }
+        if old.first == new.first { return .append }
+        if old.last == new.last { return .prepend }
+        return .mixed
+    }
+
+    /// The viewport or the content changed size: keep the reader's place.
     private func sizeChanged() {
         guard !adjusting, let geometry else { return }
         let (clip, documentHeight, flipped) = geometry
+        let documentGrewOrShrank = abs(documentHeight - lastDocumentSize.height) > 0.5
+        let widthChanged = abs(clip.bounds.width - lastClipSize.width) > 0.5
+        let change = pendingContent.map { Self.classify(from: content, to: $0) } ?? ContentChange.none
+        if let pendingContent { content = pendingContent; self.pendingContent = nil }
         lastClipSize = clip.bounds.size
         lastDocumentSize = scrollView?.documentView?.frame.size ?? .zero
         let maximum = max(0, documentHeight - clip.bounds.height)
-        let distance = min(distanceFromBottom, maximum)
-        let targetY = flipped ? maximum - distance : distance
-        if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+        if isNearBottom {
+            // Tail mode: stay on the newest message through everything.
+            let targetY = flipped ? maximum : 0
+            if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+            distanceFromBottom = 0
+            distanceFromTop = currentTop() ?? 0
+            return
+        }
+        func keepTop() {
+            let top = min(distanceFromTop, maximum)
+            let targetY = flipped ? top : maximum - top
+            if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+        }
+        func keepBottom() {
+            let distance = min(distanceFromBottom, maximum)
+            let targetY = flipped ? maximum - distance : distance
+            if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+        }
+        switch change {
+        case .append:
+            // New messages below what is being read: nothing in view moves.
+            keepTop()
+        case .prepend:
+            // Older messages above: the same rows stay in view.
+            keepBottom()
+        case .mixed:
+            keepBottom()
+            scheduleAnchorCorrection()
+        case .none:
+            if documentGrewOrShrank || widthChanged {
+                // The content itself changed height with no classification: a reflow (width or
+                // zoom change), or an unclassified update. Hold the bottom distance for now and
+                // put the remembered message back once layout has reported the new row frames.
+                keepBottom()
+                scheduleAnchorCorrection()
+            } else {
+                // Only the viewport changed (a tile resize): the row at the top stays the row at the top.
+                keepTop()
+            }
+        }
+        distanceFromBottom = currentDistance() ?? distanceFromBottom
+        distanceFromTop = currentTop() ?? distanceFromTop
     }
     private func remember() {
         guard let distance = currentDistance() else { return }
         distanceFromBottom = distance
+        distanceFromTop = currentTop() ?? 0
         isNearBottom = distance <= Self.nearBottomTolerance
+        // The row under the view's top edge, for putting the same message back after a reflow.
+        if !isNearBottom, let registry, let top = currentTop(), let row = registry.row(at: top) {
+            anchor = (row.id, top - row.frame.minY)
+        } else if isNearBottom {
+            anchor = nil
+        }
+    }
+    /// After a reflow, put the remembered message back where it was. Runs one turn after the
+    /// synchronous adjustment, once SwiftUI layout has reported the new row frames.
+    private func scheduleAnchorCorrection() {
+        guard anchor != nil, registry != nil else { return }
+        DispatchQueue.main.async { [weak self] in self?.correctToAnchor() }
+    }
+    private func correctToAnchor() {
+        guard !isNearBottom, let anchor, let registry, let frame = registry.frames[anchor.id],
+              let geometry else { return }
+        let (clip, documentHeight, flipped) = geometry
+        let maximum = max(0, documentHeight - clip.bounds.height)
+        // The offset into the row is kept, bounded to the row as it is now.
+        let target = min(max(0, frame.minY + min(anchor.offset, max(0, frame.height - 1))), maximum)
+        let targetY = flipped ? target : maximum - target
+        if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+        distanceFromBottom = currentDistance() ?? distanceFromBottom
+        distanceFromTop = currentTop() ?? distanceFromTop
     }
     private func scroll(toY y: CGFloat) {
         guard let scrollView else { return }
@@ -217,7 +348,9 @@ final class ScrollPinner: NSObject {
         let maximum = max(0, documentHeight - clip.bounds.height)
         scroll(toY: flipped ? maximum : 0)
         distanceFromBottom = 0
+        distanceFromTop = currentTop() ?? 0
         isNearBottom = true
+        anchor = nil
     }
 }
 
@@ -275,6 +408,9 @@ struct ThinScrollerInstaller: NSViewRepresentable {
 struct MessageScrollSupport: NSViewRepresentable {
     /// Changes when the reader asks for the newest message.
     var scrollToBottomRequest: Int
+    /// What the thread is about to show, so a size change can be told apart: append, prepend or reflow.
+    var content = ThreadContent()
+    var registry: ThreadRowRegistry? = nil
     var onNearBottomChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -282,11 +418,17 @@ struct MessageScrollSupport: NSViewRepresentable {
         let view = InstallerView()
         view.pinner = context.coordinator.pinner
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
+        context.coordinator.pinner.registry = registry
+        context.coordinator.pinner.expect(content)
         context.coordinator.request = scrollToBottomRequest
         return view
     }
     func updateNSView(_ view: InstallerView, context: Context) {
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
+        context.coordinator.pinner.registry = registry
+        // SwiftUI updates run before the document is laid out for the new content, so the pinner
+        // knows what the coming size change means before it arrives.
+        context.coordinator.pinner.expect(content)
         view.install()
         if scrollToBottomRequest != context.coordinator.request {
             context.coordinator.request = scrollToBottomRequest

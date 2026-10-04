@@ -70,8 +70,12 @@ struct WorkspaceView: View {
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(name: "workspace")
         .tint(Palette.accent)
-        // No motion anywhere in the workspace: every change lands on the next frame.
-        .transaction { transaction in transaction.animation = nil; transaction.disablesAnimations = true }
+        // Every tile reads the same conversation scale (⌘+ / ⌘− / ⌘0).
+        .environment(\.zoomScale, CGFloat(store.zoom))
+        // Workspace changes — tiles opening, closing, moving, resizing, layouts switching — land
+        // on the next frame: every store mutation runs in a transaction without animation
+        // (`instantly`), and nothing in the chrome declares one. The only motion is the scoped
+        // settling of a newly arrived message inside a thread (NewMessageEffect).
         .background(WindowReader { window in
             WindowChrome.apply(to: window)
             keyboard.attach(window: window, store: store, sidebar: sidebarKeyboard)
@@ -510,10 +514,23 @@ struct DividerHandle: View {
     func handle(_ event: NSEvent) -> Bool {
         guard let store, let window, event.window === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
-        if modifiers == .command, let key = event.charactersIgnoringModifiers?.lowercased() {
-            if key == "f" { NotificationCenter.default.post(name: .focusSearch, object: nil); return true }
-            if key == "l" { NotificationCenter.default.post(name: .focusConversationList, object: nil); return true }
-            return false
+        if let key = event.charactersIgnoringModifiers?.lowercased() {
+            if modifiers == .command {
+                if key == "f" { NotificationCenter.default.post(name: .focusSearch, object: nil); return true }
+                if key == "l" { NotificationCenter.default.post(name: .focusConversationList, object: nil); return true }
+            }
+            // ⌘+ (which is ⌘⇧= on most layouts), ⌘=, ⌘−, ⌘0: the shared zoom, from anywhere in
+            // the window — a composer, the search field, the list — without inserting characters.
+            // One action path: consuming the event here means the menu equivalents never also fire.
+            if modifiers.subtracting(.shift) == .command, let action = Self.zoomAction(for: key) {
+                switch action {
+                case .zoomIn: store.zoomIn()
+                case .zoomOut: store.zoomOut()
+                case .reset: store.resetZoom()
+                }
+                return true
+            }
+            if modifiers == .command { return false }
         }
         let inSearchField = searchFieldHasFocus && window.firstResponder is NSTextView
         switch event.keyCode {
@@ -531,6 +548,20 @@ struct DividerHandle: View {
             return true
         default:
             return false
+        }
+    }
+}
+
+extension KeyboardRouter {
+    enum ZoomAction { case zoomIn, zoomOut, reset }
+    /// The zoom keys, by the character the press stands for: = and + zoom in (⌘= is the unshifted
+    /// plus key), - and _ zoom out, 0 resets. Keypad + and - arrive as the same characters.
+    static func zoomAction(for key: String) -> ZoomAction? {
+        switch key {
+        case "=", "+": return .zoomIn
+        case "-", "_": return .zoomOut
+        case "0": return .reset
+        default: return nil
         }
     }
 }

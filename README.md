@@ -14,7 +14,8 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them.
 - **Media and links** — Photo and video thumbnails, file chips, and link previews, all sized before they load so nothing jumps.
 - **Contact names** — Phone numbers and addresses become names with Contacts access. Names stay in memory.
-- **Instant** — No animations anywhere. Tiles open, close, move and switch on the next frame.
+- **Zoom** — ⌘+ / ⌘− / ⌘0 scale every conversation together: text, bubbles, media and the composer, in all tiles at once. Tiles, sidebar and window keep their size.
+- **Instant** — Tiles open, close, move, resize and switch on the next frame, with no animation. The one motion is a new message settling into its thread (a subtle fade; off in Settings or with Reduce Motion).
 
 ## Install
 
@@ -52,6 +53,7 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **Tab / ⇧Tab** | Next / previous tile |
 | **Return** | Send · **⇧Return** inserts a line break |
 | **Esc** | Close a New Message tile |
+| **⌘+ / ⌘− / ⌘0** | Zoom the conversations in · out · back to 100% (all tiles together) |
 | **⌘⌥1 · ⌘⌥2 · ⌘⌥3** | Grid · Columns · Focus |
 | **⌘⇧W** | Close the focused tile |
 | **⌘R** | Refresh |

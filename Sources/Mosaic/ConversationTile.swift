@@ -11,6 +11,7 @@ struct ConversationTile: View {
     var onDragEnded: (() -> Void)? = nil
     @State private var isDropTarget = false
     @State private var composerHeight = ComposerEditor.minimumHeight
+    @Environment(\.zoomScale) private var zoom
     @State private var closeHovered = false
     private var isFocused: Bool { store.focusedID == conversation.id }
 
@@ -23,14 +24,16 @@ struct ConversationTile: View {
                 if conversation.messages.isEmpty {
                     Spacer(minLength: 0)
                 } else {
-                    MessageList(conversation: conversation, isLive: store.isLive, canLoadMore: false, senderNames: [:], onLoadMore: {})
+                    MessageList(conversation: conversation, isLive: store.isLive, canLoadMore: false, senderNames: [:], zoom: zoom,
+                            animateNew: store.animateMessages, onLoadMore: {})
                         .equatable()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else {
                 MessageList(conversation: conversation, isLive: store.isLive,
                             canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
-                            senderNames: senderNames, onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
+                            senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
+                            onLoadMore: { [store, id = conversation.id] in store.loadMore(id) })
                     .equatable()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A click anywhere in the thread puts the keyboard in this tile's composer; links
@@ -117,7 +120,7 @@ struct ConversationTile: View {
                     onFiles: { urls in store.attach(urls, to: conversation.id) },
                     onBeginAdding: { count in store.beginImports(count, to: conversation.id) },
                     onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) })
-                    .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
+                    .frame(width: 31, height: 31).padding(.bottom, max(0, (ComposerEditor.minimumHeight(zoom: zoom) - 31) / 2))
                 VStack(spacing: 0) {
                     if let files = store.outgoing[conversation.id], !files.isEmpty {
                         // Pictures and files going out with the next message, above the text.
@@ -126,6 +129,7 @@ struct ConversationTile: View {
                     ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
                         accessibilityLabel: "Message to \(conversation.name)",
                         focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
+                        zoom: zoom,
                         height: $composerHeight,
                         onFocus: { store.focus(conversation.id) },
                         onSend: { Task { await store.send(conversation.id) } },
@@ -139,7 +143,7 @@ struct ConversationTile: View {
                 .background(Palette.surface, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .strokeBorder(Color.primary.opacity(0.22), lineWidth: 1).allowsHitTesting(false))
-                emojiButton.padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
+                emojiButton.padding(.bottom, max(0, (ComposerEditor.minimumHeight(zoom: zoom) - 31) / 2))
             }
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 12)
     }
@@ -177,20 +181,33 @@ struct MessageList: View, Equatable {
     let isLive: Bool
     let canLoadMore: Bool
     let senderNames: [String: String]
+    /// The shared conversation zoom: fonts, bubbles and media scale; the tile around them does not.
+    var zoom: CGFloat = 1
+    /// Whether a newly arrived or sent message settles in with a short effect (Settings).
+    var animateNew = true
     let onLoadMore: () -> Void
     @State private var isNearBottom = true
     @State private var latestRequest = 0
+    /// Where each row sits in the content, for the scroll anchor; a class, so rows reporting
+    /// their frames cost no view invalidation.
+    @State private var registry = ThreadRowRegistry()
+    /// The rows that just arrived at the tail and settle in once.
+    @State private var freshIDs: Set<String> = []
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
-        lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore && lhs.senderNames == rhs.senderNames
+        lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore
+            && lhs.senderNames == rhs.senderNames && lhs.zoom == rhs.zoom && lhs.animateNew == rhs.animateNew
     }
 
     var body: some View {
         let rows = MessageRow.rows(for: conversation)
+        let content = ThreadContent(first: rows.first?.id, last: rows.last?.id, count: rows.count)
+        let ids = rows.map(\.id)
         ScrollView {
             // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
             // which made rows jump.
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 10 * zoom) {
                 if canLoadMore {
                     Button("Load earlier messages", action: onLoadMore).font(.caption).frame(maxWidth: .infinity)
                 }
@@ -199,10 +216,10 @@ struct MessageList: View, Equatable {
                         .frame(maxWidth: .infinity).padding(.top, 24)
                 }
                 ForEach(rows) { row in
-                    VStack(spacing: 10) {
+                    VStack(spacing: 10 * zoom) {
                         if let day = row.dayLabel {
-                            Text(day).font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
+                            Text(day).font(.system(size: 10 * zoom, weight: .medium))
+                                .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
                         }
                         MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
                                       senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
@@ -210,11 +227,20 @@ struct MessageList: View, Equatable {
                                       showsStatus: row.showsStatus, showsTime: row.showsTime)
                     }
                     // Messages in a run from the same person sit close together; a new run gets the full gap.
-                    .padding(.top, row.continuesRun ? -7 : 0)
+                    .padding(.top, row.continuesRun ? -7 * zoom : 0)
+                    // A row that just arrived at the tail settles in once; everything else is still.
+                    .modifier(NewMessageEffect(animated: freshIDs.contains(row.id),
+                                               incoming: !row.message.isFromMe, reduceMotion: reduceMotion))
+                    // The row's place within the thread, reported as layout places it (not as it
+                    // scrolls: the thread's own space does not move with the scroll).
+                    .onGeometryChange(for: CGRect.self) { proxy in proxy.frame(in: .named("thread")) } action: { frame in
+                        registry.update(row.id, frame)
+                    }
                 }
             }
-            .padding(16)
-            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest) { near in
+            .coordinateSpace(name: "thread")
+            .padding(16 * zoom)
+            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
         }
@@ -224,6 +250,51 @@ struct MessageList: View, Equatable {
                     Label("Latest", systemImage: "arrow.down").font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                 }.buttonStyle(.plain).padding(12)
             }
+        }
+        .onChange(of: ids) { old, new in
+            // Only rows appended at the tail animate: never the initial load (no change event),
+            // an older page loading above, a reconnect or confirmation (same identities), a
+            // removal, or a large burst.
+            freshIDs = animateNew ? Self.freshTailIDs(old: old, new: new) : []
+        }
+    }
+
+    /// How many appended rows animate at once; a bigger batch arrives silently.
+    static let animatedBatchLimit = 8
+    /// The rows that were appended at the end — the old rows still end where they ended, and the
+    /// new ones follow. Anything else (prepend, removal, replacement, a burst) returns nothing.
+    static func freshTailIDs(old: [String], new: [String]) -> Set<String> {
+        guard !old.isEmpty, new.count > old.count, new.count - old.count <= animatedBatchLimit else { return [] }
+        let added = new.count - old.count
+        guard Array(new.prefix(old.count)) == old else { return [] }
+        return Set(new.suffix(added))
+    }
+}
+
+/// A new message settles in once: an outgoing bubble rises a little as it fades in, an incoming
+/// one settles down a touch. With Reduce Motion, only the fade. The offset is visual (it does not
+/// change layout), so the scroll pinning underneath is untouched; the row's own state keeps a
+/// confirmation (the same presentation identity) from pulsing again.
+struct NewMessageEffect: ViewModifier {
+    let animated: Bool
+    let incoming: Bool
+    let reduceMotion: Bool
+    @State private var settled = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(animated && !settled ? 0 : 1)
+            .offset(y: animated && !settled && !reduceMotion ? (incoming ? -5 : 9) : 0)
+            .onAppear(perform: settle)
+            .onChange(of: animated) { _, _ in settle() }
+    }
+    /// The row is laid out at its final place, hidden, and settles on the next turn — an explicit,
+    /// one-time effect, not an animation tied to appearance (older rows appear all the time).
+    private func settle() {
+        guard animated, !settled else { return }
+        DispatchQueue.main.async {
+            guard !settled else { return }
+            withAnimation(.easeOut(duration: incoming ? 0.16 : 0.2)) { settled = true }
         }
     }
 }
@@ -314,6 +385,7 @@ enum MessageText {
 
 struct MessageBubble: View {
     @Environment(WorkspaceStore.self) private var store
+    @Environment(\.zoomScale) private var zoom
     let message: Message
     /// The conversation (or New Message tile) the message is shown in, for retrying a refused send.
     var threadID = ""
@@ -330,22 +402,22 @@ struct MessageBubble: View {
         let fromMe = message.isFromMe
         let previewURL = LinkDetector.previewURL(in: message.text)
         let showsText = !message.text.isEmpty && !LinkDetector.isOnlyLink(message.text)
-        VStack(alignment: fromMe ? .trailing : .leading, spacing: 4) {
+        VStack(alignment: fromMe ? .trailing : .leading, spacing: 4 * zoom) {
             if group && !fromMe, let senderName {
-                Text(senderName).font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 4)
+                Text(senderName).font(.system(size: 9 * zoom, weight: .medium)).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 4 * zoom)
             }
             ForEach(message.attachments) { attachment in AttachmentView(attachment: attachment) }
             if showsText {
                 // Plain Text, not selectable: on macOS a selectable Text is a full text view (it
                 // supports mouse range selection), and three or four hundred of them made opening
                 // or resizing tiles visibly slow. Copy is in the context menu instead.
-                bubbleText.font(.system(size: 12)).lineSpacing(2)
+                bubbleText.font(.system(size: 12 * zoom)).lineSpacing(2 * zoom)
                     .foregroundStyle(fromMe ? Color.white : Color.primary)
                     .tint(fromMe ? Color.white : Palette.accent)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
+                    .padding(.horizontal, 12 * zoom).padding(.vertical, 8 * zoom)
                     .background(fromMe ? Palette.outgoing(service: service) : Palette.incoming,
-                                in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                in: RoundedRectangle(cornerRadius: 15 * zoom, style: .continuous))
                     .contextMenu {
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
@@ -378,12 +450,12 @@ struct MessageBubble: View {
                             else if showsStatus && message.isDelivered { Text("· Delivered") }
                         }
                     }
-                }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
+                }.font(.system(size: 9 * zoom)).foregroundStyle(.tertiary).padding(.horizontal, 3 * zoom)
                 .contextMenu { failedSendActions }
             }
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
-        .padding(fromMe ? .leading : .trailing, 36)
+        .padding(fromMe ? .leading : .trailing, 36 * zoom)
     }
 
     /// What can be done with a message Messages refused: send it as it was, take it back into the

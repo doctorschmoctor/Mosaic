@@ -121,18 +121,81 @@ final class ChromeAndHandleTests: XCTestCase {
         scroll.reflectScrolledClipView(scroll.contentView)
         XCTAssertEqual(pinner.distanceFromBottom, 300, accuracy: 0.5)
         XCTAssertFalse(pinner.isNearBottom)
-        // Older messages load above: the same rows stay in view.
+        // Older messages load above (no classification: height change defaults to prepend
+        // behavior): the same rows stay in view.
         document.setFrameSize(NSSize(width: 300, height: 1600))
         XCTAssertEqual(scroll.contentView.bounds.origin.y, 1100, accuracy: 0.5)
-        // A resize while scrolled up also keeps the distance.
+        // A viewport resize while reading keeps the row at the top of the view where it is.
         scroll.setFrameSize(NSSize(width: 300, height: 300))
-        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1000, accuracy: 0.5)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1100, accuracy: 0.5)
         pinner.scrollToBottom()
         XCTAssertEqual(scroll.contentView.bounds.origin.y, 1300, accuracy: 0.5)
         XCTAssertTrue(pinner.isNearBottom)
         // Shorter content than the viewport sits at the top without going negative.
         document.setFrameSize(NSSize(width: 300, height: 100))
         XCTAssertEqual(scroll.contentView.bounds.origin.y, 0, accuracy: 0.5)
+    }
+
+    /// Reading history while messages arrive: an append below moves nothing in view, a prepend
+    /// above keeps the same rows, and a reflow puts the remembered message back by its row frame.
+    @MainActor func testScrollPinnerKeepsTheReadingPlaceThroughAppendPrependAndReflow() {
+        _ = NSApplication.shared
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let document = FlippedDocument(frame: NSRect(x: 0, y: 0, width: 300, height: 1000))
+        scroll.documentView = document
+        let registry = ThreadRowRegistry()
+        // Ten rows of 100 points.
+        for index in 0..<10 { registry.update("m\(index)", CGRect(x: 0, y: CGFloat(index) * 100, width: 300, height: 100)) }
+        let pinner = ScrollPinner()
+        pinner.registry = registry
+        pinner.attach(to: scroll)
+        pinner.expect(ThreadContent(first: "m0", last: "m9", count: 10))
+        document.setFrameSize(NSSize(width: 300, height: 1000.5)) // consume the first descriptor
+        document.setFrameSize(NSSize(width: 300, height: 1000))
+        // The reader scrolls up to row m4 (y 400..500), 30 points into it.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 430))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertFalse(pinner.isNearBottom)
+        XCTAssertEqual(pinner.anchor?.id, "m4")
+        XCTAssertEqual(pinner.anchor?.offset ?? -1, 30, accuracy: 0.5)
+        // Append: a new message below. Nothing in view moves.
+        pinner.expect(ThreadContent(first: "m0", last: "m10", count: 11))
+        registry.update("m10", CGRect(x: 0, y: 1000, width: 300, height: 120))
+        document.setFrameSize(NSSize(width: 300, height: 1120))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 430, accuracy: 0.5, "an append below leaves the reading place alone")
+        // Prepend: three older rows above. The same rows stay in view.
+        pinner.expect(ThreadContent(first: "old0", last: "m10", count: 14))
+        document.setFrameSize(NSSize(width: 300, height: 1420))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 730, accuracy: 0.5, "a prepend above keeps the same rows in view")
+        for index in 0..<10 { registry.update("m\(index)", CGRect(x: 0, y: 300 + CGFloat(index) * 100, width: 300, height: 100)) }
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 730))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertEqual(pinner.anchor?.id, "m4")
+        // Reflow: every row's height doubles (a zoom). The same message comes back at the same
+        // offset into its row once the registry reports the new frames.
+        pinner.expect(ThreadContent(first: "old0", last: "m10", count: 14))
+        for index in 0..<10 { registry.update("m\(index)", CGRect(x: 0, y: 600 + CGFloat(index) * 200, width: 300, height: 200)) }
+        registry.update("m10", CGRect(x: 0, y: 2600, width: 300, height: 240))
+        document.setFrameSize(NSSize(width: 300, height: 2840))
+        let corrected = expectation(description: "anchor correction")
+        DispatchQueue.main.async { corrected.fulfill() }
+        wait(for: [corrected], timeout: 2)
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1430, accuracy: 1, "m4 (now at 1400) is back at 30 points in")
+        // Tail mode after Latest: appends keep following the end.
+        pinner.scrollToBottom()
+        XCTAssertTrue(pinner.isNearBottom)
+        pinner.expect(ThreadContent(first: "old0", last: "m11", count: 15))
+        document.setFrameSize(NSSize(width: 300, height: 2990))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 2790, accuracy: 0.5)
+    }
+
+    func testThreadContentClassification() {
+        typealias C = ThreadContent
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "a", last: "e", count: 5)), .append)
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "z", last: "d", count: 7)), .prepend)
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "a", last: "d", count: 3)), .none, "a removal in the middle moves no ends")
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "z", last: "e", count: 9)), .mixed)
+        XCTAssertEqual(ScrollPinner.classify(from: C(), to: C(first: "a", last: "d", count: 4)), .none, "the first content is not an append")
     }
 
     @MainActor func testMessageRowsPrecomputeDaySeparatorsAndStatusOnce() {

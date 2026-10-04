@@ -3,7 +3,7 @@ import SwiftUI
 
 // Render the app's own view with fictional demo data. This captures the NSHostingView,
 // never the user's desktop, real conversations, or another application.
-// Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N] [--settle SECONDS]
+// Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N] [--settle SECONDS] [--zoom Z]
 
 MainActor.assumeIsolated {
     let output = CommandLine.arguments.dropFirst().first ?? "docs/workspace.png"
@@ -19,6 +19,7 @@ MainActor.assumeIsolated {
     app.setActivationPolicy(.prohibited)
     app.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
     let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicPreview-\(UUID())")!)
+    store.setZoom(option("--zoom", default: 1))
     if CommandLine.arguments.contains("--columns") { store.layout = .columns }
     if CommandLine.arguments.contains("--focus") { store.layout = .focus }
     if CommandLine.arguments.contains("--sms"), let chat = store.conversations.first {

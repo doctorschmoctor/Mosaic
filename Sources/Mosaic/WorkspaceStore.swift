@@ -21,6 +21,10 @@ import MosaicCore
     var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
     /// Conversations removed from Mosaic (they stay in Messages), with their newest message id then.
     var hidden: [String: String] = [:] { didSet { if hidden != oldValue { persist() } } }
+    /// The conversation-content scale every tile shares (⌘+ / ⌘− / ⌘0); persisted with the workspace.
+    var zoom: Double = 1 { didSet { if zoom != oldValue { persist() } } }
+    /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
+    var animateMessages: Bool { didSet { if animateMessages != oldValue { defaults.set(animateMessages, forKey: "Mosaic.animateMessages") } } }
     /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
     var composeDrafts: [String: ComposeDraft] = [:]
     /// Every contact with its handles, for addressing new messages.
@@ -106,6 +110,7 @@ import MosaicCore
          transport: MessageTransport? = nil) {
         self.defaults = defaults; self.database = database
         liveTransport = transport ?? AppleScriptTransport()
+        animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
         reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
         OutgoingFiles.purgeStale()
@@ -166,6 +171,7 @@ import MosaicCore
             var state = Workspace()
             state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
             state.drafts = drafts; state.seenMessageIDs = seenMessageIDs; state.hidden = hidden
+            state.zoom = zoom
             return state
         }
         set {
@@ -175,6 +181,7 @@ import MosaicCore
             if drafts != newValue.drafts { drafts = newValue.drafts }
             if seenMessageIDs != newValue.seenMessageIDs { seenMessageIDs = newValue.seenMessageIDs }
             if hidden != newValue.hidden { hidden = newValue.hidden }
+            if zoom != newValue.zoom { zoom = newValue.zoom }
         }
     }
     /// Applies a `Workspace` mutation, writing back only the fields it changed.
@@ -360,6 +367,22 @@ import MosaicCore
         close(id)
     }
     func setLayout(_ layout: WorkspaceLayout) { instantly { tileDrag = nil; self.layout = layout } }
+
+    // MARK: Zoom
+
+    /// The one action path for ⌘+/⌘−/⌘0, the Workspace menu and anything else: every tile shows
+    /// the same scale, clamped to the offered steps.
+    func setZoom(_ value: Double) {
+        let clamped = Workspace.clampZoom(value)
+        if zoom != clamped { instantly { zoom = clamped } }
+    }
+    func zoomIn() { setZoom(zoom + Workspace.zoomStep) }
+    func zoomOut() { setZoom(zoom - Workspace.zoomStep) }
+    func resetZoom() { setZoom(1) }
+    var canZoomIn: Bool { zoom < Workspace.zoomRange.upperBound - 0.001 }
+    var canZoomOut: Bool { zoom > Workspace.zoomRange.lowerBound + 0.001 }
+    /// "120%", for the menu.
+    var zoomLabel: String { "\(Int((zoom * 100).rounded()))%" }
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).

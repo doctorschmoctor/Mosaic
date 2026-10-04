@@ -251,13 +251,23 @@ public struct Workspace: Codable, Equatable, Sendable {
     /// Conversations removed from Mosaic, with the id of their newest message when they were
     /// removed: a newer message brings a conversation back, as in Messages.
     public var hidden: [String: String] = [:]
+    /// The conversation-content scale every tile shares (fonts, bubbles, media), 1 = 100%.
+    public var zoom: Double = 1
+
+    /// The zoom steps Mosaic offers.
+    public static let zoomRange: ClosedRange<Double> = 0.8...1.6
+    public static let zoomStep: Double = 0.1
+    /// A zoom value brought onto the offered steps.
+    public static func clampZoom(_ value: Double) -> Double {
+        min(zoomRange.upperBound, max(zoomRange.lowerBound, (value / zoomStep).rounded() * zoomStep))
+    }
 
     public init(openIDs: [String] = []) {
         var seen = Set<String>()
         self.openIDs = Array(openIDs.filter { seen.insert($0).inserted }.prefix(Self.maximumTiles))
         self.focusedID = self.openIDs.first
     }
-    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden }
+    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden, zoom }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         openIDs = try container.decodeIfPresent([String].self, forKey: .openIDs) ?? []
@@ -266,6 +276,7 @@ public struct Workspace: Codable, Equatable, Sendable {
         drafts = try container.decodeIfPresent([String: String].self, forKey: .drafts) ?? [:]
         seenMessageIDs = try container.decodeIfPresent([String: String].self, forKey: .seenMessageIDs) ?? [:]
         hidden = try container.decodeIfPresent([String: String].self, forKey: .hidden) ?? [:]
+        zoom = Self.clampZoom(try container.decodeIfPresent(Double.self, forKey: .zoom) ?? 1)
     }
     @discardableResult public mutating func open(_ id: String) -> Bool {
         if openIDs.contains(id) { focusedID = id; return true }

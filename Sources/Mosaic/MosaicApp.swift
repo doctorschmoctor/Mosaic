@@ -26,6 +26,12 @@ import SwiftUI
                 Button("Go to Conversations") { NotificationCenter.default.post(name: .focusConversationList, object: nil) }
                     .keyboardShortcut("l", modifiers: .command)
                 Divider()
+                // The same single action path as the keys (KeyboardRouter consumes ⌘+/⌘−/⌘0 in the
+                // workspace window, so a key press never triggers both the monitor and the menu).
+                Button("Zoom In") { store.zoomIn() }.keyboardShortcut("=", modifiers: .command).disabled(!store.canZoomIn)
+                Button("Zoom Out") { store.zoomOut() }.keyboardShortcut("-", modifiers: .command).disabled(!store.canZoomOut)
+                Button("Actual Size (\(store.zoomLabel))") { store.resetZoom() }.keyboardShortcut("0", modifiers: .command).disabled(store.zoom == 1)
+                Divider()
                 Button("Grid Layout") { store.setLayout(.grid) }.keyboardShortcut("1", modifiers: [.command, .option])
                 Button("Column Layout") { store.setLayout(.columns) }.keyboardShortcut("2", modifiers: [.command, .option])
                 Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])

@@ -36,3 +36,14 @@ struct HoverCursor: ViewModifier {
 extension View {
     func hoverCursor(_ cursor: NSCursor, enabled: Bool = true) -> some View { modifier(HoverCursor(cursor: cursor, enabled: enabled)) }
 }
+
+/// The shared conversation-content scale (⌘+ / ⌘− / ⌘0). Tiles' frames, the sidebar and the
+/// window chrome keep their size; what a conversation shows — text, bubbles, media, the composer
+/// — reads its metrics through this.
+private struct ZoomScaleKey: EnvironmentKey { static let defaultValue: CGFloat = 1 }
+extension EnvironmentValues {
+    var zoomScale: CGFloat {
+        get { self[ZoomScaleKey.self] }
+        set { self[ZoomScaleKey.self] = newValue }
+    }
+}

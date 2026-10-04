@@ -80,6 +80,7 @@ struct AttachmentView: View {
     let attachment: Attachment
     @State private var image: NSImage?
     @State private var failed = false
+    @Environment(\.zoomScale) private var zoom
 
     var body: some View {
         switch attachment.kind {
@@ -95,7 +96,7 @@ struct AttachmentView: View {
     }
     private var visual: some View {
         let sticker = attachment.isSticker
-        return AspectBox(ratio: ratio, maxWidth: sticker ? 110 : 240, maxHeight: sticker ? 110 : 300) {
+        return AspectBox(ratio: ratio, maxWidth: (sticker ? 110 : 240) * zoom, maxHeight: (sticker ? 110 : 300) * zoom) {
             Rectangle().fill(sticker ? Color.clear : Palette.incoming)
                 .overlay {
                     if let image {
@@ -117,7 +118,7 @@ struct AttachmentView: View {
                     }
                 }
         }
-        .clipShape(RoundedRectangle(cornerRadius: sticker ? 0 : 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: sticker ? 0 : 14 * zoom, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture { open() }
         .hoverCursor(.pointingHand, enabled: attachment.path != nil)
@@ -269,11 +270,12 @@ struct LinkPreview {
 struct LinkPreviewCard: View {
     let url: URL
     @State private var preview: LinkPreview?
+    @Environment(\.zoomScale) private var zoom
 
     var body: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Color.primary.opacity(0.06))
-                .frame(height: 128)
+                .frame(height: 128 * zoom)
                 .overlay {
                     if let image = preview?.image {
                         Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
@@ -288,17 +290,17 @@ struct LinkPreviewCard: View {
                 }
                 .clipped()
             VStack(alignment: .leading, spacing: 3) {
-                Text(preview?.title ?? LinkPreviewLoader.host(url)).font(.system(size: 12, weight: .semibold)).lineLimit(2)
+                Text(preview?.title ?? LinkPreviewLoader.host(url)).font(.system(size: 12 * zoom, weight: .semibold)).lineLimit(2)
                     .foregroundStyle(.primary)
-                Text(preview?.host ?? LinkPreviewLoader.host(url)).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                Text(preview?.host ?? LinkPreviewLoader.host(url)).font(.system(size: 10 * zoom)).foregroundStyle(.secondary).lineLimit(1)
             }
             .padding(.horizontal, 11).padding(.vertical, 9)
-            .frame(maxWidth: .infinity, minHeight: 62, maxHeight: 62, alignment: .topLeading)
+            .frame(maxWidth: .infinity, minHeight: 62 * zoom, maxHeight: 62 * zoom, alignment: .topLeading)
             .background(Palette.incoming)
         }
-        .frame(maxWidth: 250)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(maxWidth: 250 * zoom)
+        .clipShape(RoundedRectangle(cornerRadius: 14 * zoom, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 14 * zoom, style: .continuous))
         .onTapGesture { NSWorkspace.shared.open(url) }
         .hoverCursor(.pointingHand)
         .help(url.absoluteString)

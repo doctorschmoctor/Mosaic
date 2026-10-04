@@ -50,6 +50,8 @@ struct SetupView: View {
             }
             if let error = store.connectionError { Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
             Divider()
+            Toggle("Animate new messages", isOn: Binding(get: { store.animateMessages }, set: { store.animateMessages = $0 }))
+                .toggleStyle(.switch).controlSize(.small)
             HStack {
                 Button("Use demo workspace") { store.setMode(live: false); dismiss() }
                 Spacer()

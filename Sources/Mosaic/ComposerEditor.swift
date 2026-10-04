@@ -5,13 +5,20 @@ import UniformTypeIdentifiers
 /// Each tile owns a separate NSTextView. Send is dispatched from that editor's
 /// keyDown handler, so Return cannot invoke a different tile's default button.
 struct ComposerEditor: NSViewRepresentable {
-    static let font = NSFont.systemFont(ofSize: 12)
-    /// Text sits 8pt from the field's left, top and right edges; one line of text plus those margins
-    /// is the field's resting height, so the margins are the same whatever font metrics the Mac uses.
-    static let margin: CGFloat = 8
-    static let minimumHeight: CGFloat = (NSLayoutManager().defaultLineHeight(for: font) + margin * 2).rounded(.up)
+    static let baseFontSize: CGFloat = 12
+    /// Text sits 8pt (scaled by zoom) from the field's left, top and right edges; one line of text
+    /// plus those margins is the field's resting height, whatever font metrics the Mac uses.
+    static let baseMargin: CGFloat = 8
+    static func font(zoom: CGFloat) -> NSFont { .systemFont(ofSize: (baseFontSize * zoom).rounded()) }
+    static func margin(zoom: CGFloat) -> CGFloat { (baseMargin * zoom).rounded() }
+    static func minimumHeight(zoom: CGFloat) -> CGFloat {
+        (NSLayoutManager().defaultLineHeight(for: font(zoom: zoom)) + margin(zoom: zoom) * 2).rounded(.up)
+    }
     /// After about six lines the field stops growing and scrolls.
-    static let maximumHeight: CGFloat = (NSLayoutManager().defaultLineHeight(for: font) * 6 + margin * 2).rounded(.up)
+    static func maximumHeight(zoom: CGFloat) -> CGFloat {
+        (NSLayoutManager().defaultLineHeight(for: font(zoom: zoom)) * 6 + margin(zoom: zoom) * 2).rounded(.up)
+    }
+    static let minimumHeight = minimumHeight(zoom: 1)
 
     @Binding var text: String
     var placeholder = ""
@@ -19,6 +26,8 @@ struct ComposerEditor: NSViewRepresentable {
     let accessibilityLabel: String
     /// A changed non-zero value asks this editor to become first responder (keyboard traversal).
     var focusRequest: Int
+    /// The shared conversation zoom; the font and margins follow it, in place.
+    var zoom: CGFloat = 1
     var height: Binding<CGFloat>? = nil
     let onFocus: () -> Void
     let onSend: () -> Void
@@ -33,7 +42,7 @@ struct ComposerEditor: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> ComposerScrollView {
-        let scroll = ComposerScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: Self.minimumHeight))
+        let scroll = ComposerScrollView(frame: NSRect(x: 0, y: 0, width: 240, height: Self.minimumHeight(zoom: zoom)))
         let clip = PinnedClipView()
         clip.drawsBackground = false
         scroll.contentView = clip
@@ -45,12 +54,12 @@ struct ComposerEditor: NSViewRepresentable {
         // The field only scrolls once the text is taller than its maximum height; it never bounces.
         scroll.verticalScrollElasticity = .none
         scroll.horizontalScrollElasticity = .none
-        let font = Self.font
+        let font = Self.font(zoom: zoom)
         // TextKit 1, set up by AppKit itself: its insertion point follows textContainerInset in every
         // state, including an empty field, where the default stack could draw the caret at the edge.
         let editor = DraftTextView(usingTextLayoutManager: false)
         editor.textContainer?.lineFragmentPadding = 0
-        editor.textContainerInset = NSSize(width: Self.margin, height: Self.margin)
+        editor.textContainerInset = NSSize(width: Self.margin(zoom: zoom), height: Self.margin(zoom: zoom))
         editor.textContainer?.widthTracksTextView = true
         // Insets first, then the frame: the container's width is derived from both at frame time.
         editor.frame = NSRect(origin: .zero, size: scroll.contentSize)
@@ -85,7 +94,7 @@ struct ComposerEditor: NSViewRepresentable {
     /// `height` binding). SwiftUI must never size it through Auto Layout: a fitting-size query on an
     /// NSScrollView during the window's constraint pass can make that pass start over.
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: ComposerScrollView, context: Context) -> CGSize? {
-        CGSize(width: proposal.width ?? 240, height: proposal.height ?? Self.minimumHeight)
+        CGSize(width: proposal.width ?? 240, height: proposal.height ?? Self.minimumHeight(zoom: zoom))
     }
 
     func updateNSView(_ scroll: ComposerScrollView, context: Context) {
@@ -109,6 +118,17 @@ struct ComposerEditor: NSViewRepresentable {
     }
 
     private func apply(to editor: DraftTextView, coordinator: Coordinator) {
+        // The zoom changed: the same editor keeps its text, selection, undo and marked text; only
+        // the font and margins move.
+        let font = Self.font(zoom: zoom)
+        if editor.font?.pointSize != font.pointSize {
+            editor.font = font
+            editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor]
+            editor.textContainerInset = NSSize(width: Self.margin(zoom: zoom), height: Self.margin(zoom: zoom))
+            editor.needsDisplay = true
+            if let scroll = editor.enclosingScrollView { editor.fitToClip(scroll.contentSize) }
+            editor.reportHeight()
+        }
         editor.onFocus = onFocus
         editor.onSend = onSend
         editor.onTab = onTab
@@ -135,7 +155,7 @@ struct ComposerEditor: NSViewRepresentable {
             DispatchQueue.main.async { [weak editor] in editor?.requestFocus() }
         }
         func report(_ value: CGFloat) {
-            let clamped = min(max(value.rounded(.up), ComposerEditor.minimumHeight), ComposerEditor.maximumHeight)
+            let clamped = min(max(value.rounded(.up), ComposerEditor.minimumHeight(zoom: parent.zoom)), ComposerEditor.maximumHeight(zoom: parent.zoom))
             guard let height = parent.height, abs(height.wrappedValue - clamped) > 0.5 else { return }
             // Defer: this runs during AppKit layout, never mutate SwiftUI state inside a view update.
             DispatchQueue.main.async { if abs(height.wrappedValue - clamped) > 0.5 { height.wrappedValue = clamped } }
@@ -339,7 +359,7 @@ final class DraftTextView: NSTextView {
     /// Height of the laid-out text. An empty field measures as exactly one line, so every tile's
     /// composer is the same height whatever the layout manager reports for its empty line.
     private var textHeight: CGFloat {
-        let line = NSLayoutManager().defaultLineHeight(for: font ?? .systemFont(ofSize: 12))
+        let line = NSLayoutManager().defaultLineHeight(for: font ?? .systemFont(ofSize: ComposerEditor.baseFontSize))
         guard !string.isEmpty, let layoutManager, let textContainer else { return line }
         layoutManager.ensureLayout(for: textContainer)
         return max(layoutManager.usedRect(for: textContainer).height, line)
