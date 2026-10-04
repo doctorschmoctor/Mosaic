@@ -81,6 +81,8 @@ struct AttachmentView: View {
     @State private var image: NSImage?
     @State private var failed = false
     @Environment(\.zoomScale) private var zoom
+    /// The conversation's other attachments, for Quick Look's next and previous.
+    @Environment(\.threadAttachments) private var siblings
 
     var body: some View {
         switch attachment.kind {
@@ -140,7 +142,7 @@ struct AttachmentView: View {
                 .resizable().frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.name).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
-                Text(attachment.path == nil ? "Not downloaded · Open in Messages" : "Click to open").font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(attachment.path == nil ? "Not downloaded · Open in Messages" : "Click to preview").font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
@@ -152,7 +154,8 @@ struct AttachmentView: View {
     }
     @ViewBuilder private var menu: some View {
         if let path = attachment.path {
-            Button("Open") { open() }
+            Button("Quick Look") { open() }
+            Button("Open With \(Self.defaultAppName(for: path) ?? "Default App")") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
             Button(attachment.kind == .image ? "Copy Image" : "Copy") { copy() }
             Button("Save to Downloads") { saveToDownloads() }
             Button("Save As…") { saveAs() }
@@ -160,9 +163,14 @@ struct AttachmentView: View {
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
         }
     }
+    /// A click previews the file in Quick Look, like Space in the Finder; Open With hands it to its app.
     private func open() {
         guard let path = attachment.path else { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        QuickLook.shared.show(URL(fileURLWithPath: path), among: siblings)
+    }
+    static func defaultAppName(for path: String) -> String? {
+        NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+            .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") }
     }
     /// Puts the file on the pasteboard — as a file, and for a picture as image data too, so it
     /// pastes into another Mosaic composer, Messages, Mail or an image editor alike.

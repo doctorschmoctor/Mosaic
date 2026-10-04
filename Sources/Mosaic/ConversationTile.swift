@@ -238,6 +238,7 @@ struct MessageList: View, Equatable {
         let byGUID = Dictionary(conversation.messages.compactMap { message in message.guid.map { ($0, message) } }, uniquingKeysWith: { first, _ in first })
         // The New Messages line only while reading above them; at the tail everything is being seen.
         let firstUnread = isNearBottom ? nil : Self.firstUnread(in: rows, after: seenBoundary)
+        let attachmentFiles = conversation.messages.flatMap(\.attachments).compactMap { $0.path.map(URL.init(fileURLWithPath:)) }
         ScrollViewReader { proxy in
         ScrollView {
             // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
@@ -283,6 +284,7 @@ struct MessageList: View, Equatable {
             }
             .coordinateSpace(name: "thread")
             .padding(16 * zoom)
+            .environment(\.threadAttachments, attachmentFiles)
             .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry) { near in
                 if isNearBottom != near { isNearBottom = near }
             })

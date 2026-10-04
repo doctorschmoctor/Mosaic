@@ -1,4 +1,5 @@
 import SwiftUI
+import Quartz
 
 @main struct MosaicApp: App {
     @State private var store = WorkspaceStore()
@@ -59,4 +60,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    // The Quick Look panel looks along the responder chain for its controller; the app delegate
+    // answers for Mosaic's attachments (QuickLook).
+    override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
+    override func beginPreviewPanelControl(_ panel: QLPreviewPanel!) { MainActor.assumeIsolated { QuickLook.shared.take(panel) } }
+    override func endPreviewPanelControl(_ panel: QLPreviewPanel!) { MainActor.assumeIsolated { QuickLook.shared.release(panel) } }
 }

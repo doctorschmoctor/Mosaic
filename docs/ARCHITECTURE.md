@@ -28,6 +28,10 @@ The tall title bar is an empty AppKit toolbar (`WindowChrome`), not a SwiftUI to
 
 The list is a SwiftUI `List` for its swipe actions. Rows are highlighted only by the keyboard; the pointer highlights nothing, so a swipe never sits against a hover highlight, and the keyboard's highlight is hidden while a swipe is under way. `SidebarKeyboard` gives the list the keyboard (⌘L): an invisible AppKit view becomes first responder, so the highlight follows real keyboard focus and clears when anything else is clicked. `KeyboardRouter` takes ⌘F, ⌘L, Tab and the search field's arrow keys in a local event monitor, ahead of the menu bar.
 
+## Opening tiles
+
+A tile opens on its messages without waiting for a full load. The store keeps the histories it recently showed or fetched in memory (`historyCache`, sixteen conversations, least recently used dropped first; never written to disk), fetches the eight most recent conversations after the first load and any conversation whose row the pointer rests on, and fetches a single conversation's page (`MessagesReader.page(forChat:)`) when a tile opens on one it does not have. The full load that follows brings the history up to date.
+
 ## Messages database
 
 `MessagesDatabase` opens `chat.db` read-only with the WAL visible. A poll loads only when a cheap fingerprint of the database changed, and `FileChangeWatcher` on `chat.db` and its write-ahead log refreshes within a moment of Messages writing, with the three-second poll as a fallback. Participants, attachments and typedstream bodies are decoded in `MosaicCore`.

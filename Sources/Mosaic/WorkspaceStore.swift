@@ -64,6 +64,15 @@ import MosaicCore
     private(set) var focusTarget: String?
     private(set) var focusToken = 0
 
+    /// Recently shown histories, so a tile opens on its messages at once instead of waiting for
+    /// a load: kept in memory only (never written anywhere), at most `historyCacheLimit`
+    /// conversations, the least recently used dropped first. A cached history is shown as it was
+    /// and brought up to date by the load that follows.
+    @ObservationIgnored private var historyCache: [String: (page: ThreadPage, used: Int)] = [:]
+    @ObservationIgnored private var prefetching = Set<String>()
+    @ObservationIgnored private var prefetchedRecent = false
+    static let historyCacheLimit = 16
+
     // Bookkeeping no view reads.
     /// When each tile was last used — opened, focused, typed in, sent from — as a running count,
     /// so a fifth conversation can take the place of the tile used longest ago.
@@ -236,8 +245,72 @@ import MosaicCore
         guard opened else { return }
         // Not marked read here: the thread reports when its newest message is actually in view.
         noteUse(id)
-        if isLive { Task { await refresh() } }
+        guard isLive else { return }
+        showHistoryAtOnce(id)
+        Task { await refresh() }
     }
+
+    // MARK: History cache
+
+    /// A tile that just opened shows its messages now: from the cache when they were shown or
+    /// fetched recently, else from a fetch of that one conversation, which is far quicker than the
+    /// full load that follows.
+    private func showHistoryAtOnce(_ id: String) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }), conversations[index].messages.isEmpty else { return }
+        if let cached = historyCache[id] {
+            apply(cached.page, to: id)
+            touchCache(id)
+            return
+        }
+        let reader = self.reader
+        let requestGeneration = generation
+        Task {
+            guard let page = try? await reader.page(forChat: id, limit: historyLimits[id] ?? 100) else { return }
+            guard generation == requestGeneration else { return }
+            remember(page, for: id)
+            apply(page, to: id)
+        }
+    }
+    /// Puts a fetched or cached page into a conversation that has no history on screen yet.
+    private func apply(_ page: ThreadPage, to id: String) {
+        guard openIDs.contains(id), let index = conversations.firstIndex(where: { $0.id == id }),
+              conversations[index].messages.isEmpty, !page.messages.isEmpty else { return }
+        instantly {
+            conversations[index].messages = page.messages
+            conversations[index].reactions = page.reactions
+            conversations[index].referencedMessages = page.referencedMessages
+        }
+    }
+    private func remember(_ page: ThreadPage, for id: String) {
+        guard !page.messages.isEmpty else { return }
+        useCount += 1
+        historyCache[id] = (page, useCount)
+        if historyCache.count > Self.historyCacheLimit, let oldest = historyCache.min(by: { $0.value.used < $1.value.used })?.key {
+            historyCache[oldest] = nil
+        }
+    }
+    private func touchCache(_ id: String) {
+        guard var entry = historyCache[id] else { return }
+        useCount += 1
+        entry.used = useCount
+        historyCache[id] = entry
+    }
+    /// Fetches a conversation's history ahead of opening it (the pointer is over its row), so the
+    /// tile opens on its messages.
+    func prefetch(_ id: String) {
+        guard isLive, historyCache[id] == nil, !prefetching.contains(id), !openIDs.contains(id),
+              conversations.contains(where: { $0.id == id }) else { return }
+        prefetching.insert(id)
+        let reader = self.reader
+        let requestGeneration = generation
+        Task {
+            defer { prefetching.remove(id) }
+            guard let page = try? await reader.page(forChat: id, limit: 100), generation == requestGeneration else { return }
+            remember(page, for: id)
+        }
+    }
+    /// Whether a conversation's history is ready to show at once (tests).
+    func hasCachedHistory(_ id: String) -> Bool { historyCache[id] != nil }
     /// Which open tile a new conversation replaces when every tile is taken: the one used longest
     /// ago (the first on screen among equals). An unsent New Message is kept unless nothing else is open.
     func tileToReplace() -> String? {
@@ -429,6 +502,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
+        historyCache = [:]; prefetching = []; prefetchedRecent = false
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
         if live {
@@ -502,6 +576,17 @@ import MosaicCore
             if !newBoundaries.isEmpty { seenMessageIDs.merge(newBoundaries) { current, _ in current } }
             // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
+            // What the open tiles show now is what they will open on next time.
+            for conversation in loaded where ids.contains(conversation.id) && !conversation.messages.isEmpty {
+                remember(ThreadPage(messages: conversation.messages.filter { $0.sendState == nil }, reactions: conversation.reactions,
+                                    referencedMessages: conversation.referencedMessages), for: conversation.id)
+            }
+            // After the first load, the most recent conversations are fetched ahead, so the ones
+            // most likely to be opened open at once.
+            if !prefetchedRecent {
+                prefetchedRecent = true
+                for conversation in loaded.prefix(8) where !ids.contains(conversation.id) { prefetch(conversation.id) }
+            }
             unhideChanged(in: loaded)
             adoptConversations(for: loaded)
             updateContactStatus()

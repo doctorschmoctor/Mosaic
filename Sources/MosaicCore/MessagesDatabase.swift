@@ -80,6 +80,17 @@ public struct ChangeToken: Equatable, Sendable {
     public let connection: Int
 }
 
+/// One conversation's newest page on its own: what a tile shows the moment it opens, without
+/// waiting for the full load of every conversation's summary.
+public struct ThreadPage: Equatable, Sendable {
+    public let messages: [Message]
+    public let reactions: [ReactionEvent]
+    public let referencedMessages: [String: Message]
+    public init(messages: [Message], reactions: [ReactionEvent] = [], referencedMessages: [String: Message] = [:]) {
+        self.messages = messages; self.reactions = reactions; self.referencedMessages = referencedMessages
+    }
+}
+
 /// The result of a load: the conversations and the state they correspond to.
 public struct DatabaseSnapshot: Sendable {
     public let conversations: [Conversation]
@@ -121,6 +132,37 @@ public final class MessagesReader: @unchecked Sendable {
             }
         }
     }
+    /// One conversation's newest page, by its GUID; nil when the conversation is not in the
+    /// database. Leaves the full load's bookkeeping alone (the next full load still runs).
+    public func page(forChat guid: String, limit: Int = 100) async throws -> ThreadPage? {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.pageNow(forChat: guid, limit: limit)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func pageSync(forChat guid: String, limit: Int = 100) throws -> ThreadPage? {
+        try queue.sync { try self.pageNow(forChat: guid, limit: limit) }
+    }
+    private func pageNow(forChat guid: String, limit: Int) throws -> ThreadPage? {
+        do {
+            let db = try openIfNeeded()
+            try execute(db, "BEGIN DEFERRED")
+            defer { try? execute(db, "ROLLBACK") }
+            let schema = try schema(db)
+            let lookup = try prepare(db, "SELECT ROWID FROM chat WHERE guid = ?")
+            defer { sqlite3_finalize(lookup) }
+            bind(lookup, 1, guid)
+            guard sqlite3_step(lookup) == SQLITE_ROW else { return nil }
+            let thread = try history(db, chatID: sqlite3_column_int64(lookup, 0), schema: schema, limit: limit)
+            return ThreadPage(messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced)
+        } catch let error as DatabaseError {
+            if case .sqlite = error { closeConnection() }
+            throw error
+        }
+    }
+
     /// The same load, waited for (tests and one-off tools).
     public func loadSync(_ request: LoadRequest, unlessUnchangedFrom known: ChangeToken?) throws -> DatabaseSnapshot? {
         try queue.sync { try self.perform(request, unlessUnchangedFrom: known) }

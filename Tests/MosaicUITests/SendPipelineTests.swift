@@ -197,6 +197,29 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertNil(store.historyLimits[Self.alex])
     }
 
+    /// A tile opens on its messages at once: the most recent conversations are fetched ahead after
+    /// the first load, a closed tile's history stays cached in memory, and a cached history is
+    /// brought up to date by the load that follows.
+    @MainActor func testTilesOpenOnCachedHistoryAtOnce() async throws {
+        let transport = RecordingTransport()
+        let (store, path) = try await liveStore(transport: transport)
+        for _ in 0..<200 where !store.hasCachedHistory(Self.alex) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(store.hasCachedHistory(Self.alex), "recent conversations are fetched ahead")
+        XCTAssertTrue(store.conversations[0].messages.isEmpty, "a closed conversation holds no history itself")
+        store.open(Self.alex)
+        XCTAssertEqual(store.conversations[0].messages.map(\.text), ["Hello", "Hi!"], "the tile opens on its messages, before any load")
+        // New messages since the cache was filled arrive with the load that follows.
+        receive("Fresh", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].messages.last?.text, "Fresh")
+        // Closed and reopened: the cache has the latest history it showed.
+        store.close(Self.alex)
+        await store.refresh()
+        XCTAssertTrue(store.conversations[0].messages.isEmpty)
+        store.open(Self.alex)
+        XCTAssertEqual(store.conversations[0].messages.last?.text, "Fresh")
+    }
+
     @MainActor func testDemoModeNeverTouchesTheLiveTransport() async throws {
         let transport = RecordingTransport()
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true, transport: transport)

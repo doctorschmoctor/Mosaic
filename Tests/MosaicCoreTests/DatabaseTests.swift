@@ -265,6 +265,18 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(LoadRequest(openIDs: [], seenBoundaries: [alex: 1]), LoadRequest(openIDs: []), "boundaries alone do not make a different load")
     }
 
+    /// One conversation's page on its own, for a tile that just opened; unknown conversations have none.
+    func testASingleConversationPageLoadsOnItsOwn() throws {
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let page = try XCTUnwrap(try reader.pageSync(forChat: alex, limit: 1))
+        XCTAssertEqual(page.messages.map(\.text), ["Second"])
+        XCTAssertNil(try reader.pageSync(forChat: "iMessage;-;nobody@example.test"))
+        // The full load's change detection is untouched by it.
+        let full = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [alex]), unlessUnchangedFrom: nil))
+        _ = try reader.pageSync(forChat: alex)
+        XCTAssertNil(try reader.loadSync(LoadRequest(openIDs: [alex]), unlessUnchangedFrom: full.token))
+    }
+
     func testWALContentIsVisibleWithoutCopyingDatabase() throws {
         var db: OpaquePointer?
         XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
