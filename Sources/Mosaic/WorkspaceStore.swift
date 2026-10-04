@@ -100,6 +100,8 @@ import MosaicCore
     @ObservationIgnored var isRefreshing = false
     @ObservationIgnored private(set) var lastRefreshed: Date?
     @ObservationIgnored private var refreshRequestedWhileBusy = false
+    /// Callers waiting for the load that follows the running one.
+    @ObservationIgnored private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
     /// Transient read failures (Messages writing to the database) keep the last good data; the
     /// connection error only shows once reads keep failing or the first connection never succeeded.
     @ObservationIgnored private(set) var consecutiveLoadFailures = 0
@@ -666,14 +668,24 @@ import MosaicCore
     }
 
     /// Reloads conversations and open histories. A request that arrives while a load is running is
-    /// not dropped: one more load follows, so a tile opened mid-poll gets its history right away.
-    /// `background` marks a fallback poll while Mosaic is not the active app; its read runs at
-    /// utility priority.
+    /// not dropped: one more load follows, so a tile opened mid-poll gets its history right away,
+    /// and the request returns once that load is done (a caller that awaits it sees what was in the
+    /// database when it asked). `background` marks a fallback poll while Mosaic is not the active
+    /// app; its read runs at utility priority.
     func refresh(background: Bool = false) async {
         guard isLive else { return }
-        if isRefreshing { refreshRequestedWhileBusy = true; return }
+        if isRefreshing {
+            refreshRequestedWhileBusy = true
+            await withCheckedContinuation { refreshWaiters.append($0) }
+            return
+        }
         isRefreshing = true
-        defer { isRefreshing = false }
+        defer {
+            isRefreshing = false
+            let waiting = refreshWaiters
+            refreshWaiters = []
+            for continuation in waiting { continuation.resume() }
+        }
         var background = background
         repeat {
             refreshRequestedWhileBusy = false
