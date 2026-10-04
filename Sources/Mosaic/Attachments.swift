@@ -292,6 +292,9 @@ struct AttachmentMenuButton: NSViewRepresentable {
     /// (nil when one could not be read), whichever finishes first.
     let onBeginAdding: (Int) -> [String]
     let onAdded: (String, URL?) -> Void
+    /// The Photos card or the file chooser was dismissed with Esc, Cancel or Add: the keyboard
+    /// goes back to this tile's message field. (Clicking somewhere else leaves it where it went.)
+    var onFinish: () -> Void = {}
 
     func makeNSView(context: Context) -> PlusButtonView { let view = PlusButtonView(); configure(view); return view }
     func updateNSView(_ view: PlusButtonView, context: Context) { configure(view) }
@@ -299,6 +302,7 @@ struct AttachmentMenuButton: NSViewRepresentable {
         view.onFiles = onFiles
         view.onBeginAdding = onBeginAdding
         view.onAdded = onAdded
+        view.onFinish = onFinish
         view.setAccessibilityLabel("Add a photo or file to the message to \(conversationName)")
         view.toolTip = "Photos and files"
     }
@@ -308,6 +312,7 @@ struct AttachmentMenuButton: NSViewRepresentable {
         var onFiles: (([URL]) -> Void)?
         var onBeginAdding: ((Int) -> [String])?
         var onAdded: ((String, URL?) -> Void)?
+        var onFinish: (() -> Void)?
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
@@ -369,9 +374,13 @@ struct AttachmentMenuButton: NSViewRepresentable {
             popover.delegate = self
             popover.contentSize = PhotoLibraryPickerView.size
             let view = PhotoLibraryPickerView(
-                onCancel: { [weak popover] in popover?.close() },
+                onCancel: { [weak self, weak popover] in
+                    popover?.close()
+                    self?.onFinish?()
+                },
                 onAdd: { [weak self, weak popover] assets in
                     popover?.close()
+                    self?.onFinish?()
                     guard let self, !assets.isEmpty, let slots = self.onBeginAdding?(assets.count), slots.count == assets.count else { return }
                     Task { @MainActor in
                         await withTaskGroup(of: (String, URL?).self) { group in
@@ -383,8 +392,14 @@ struct AttachmentMenuButton: NSViewRepresentable {
             popover.contentViewController = NSHostingController(rootView: view)
             popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)
             photosPopover = popover
+            // The card takes the keyboard, so Esc reaches it (and closes it) straight away.
+            popover.contentViewController?.view.window?.makeKey()
         }
-        func popoverDidClose(_ notification: Notification) { photosPopover = nil }
+        func popoverDidClose(_ notification: Notification) {
+            photosPopover = nil
+            // Closed by Esc (the popover's own handling): back to the message field, as Cancel does.
+            if let event = NSApp.currentEvent, event.type == .keyDown, event.keyCode == 53 { onFinish?() }
+        }
 
         @objc private func chooseFile() {
             guard let window else { return }
@@ -393,8 +408,8 @@ struct AttachmentMenuButton: NSViewRepresentable {
             panel.canChooseDirectories = false
             panel.message = "Choose files to send"
             panel.beginSheetModal(for: window) { [weak self] response in
-                guard response == .OK, !panel.urls.isEmpty else { return }
-                self?.onFiles?(panel.urls)
+                if response == .OK, !panel.urls.isEmpty { self?.onFiles?(panel.urls) }
+                self?.onFinish?()
             }
         }
     }

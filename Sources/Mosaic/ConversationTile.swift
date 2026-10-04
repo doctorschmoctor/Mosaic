@@ -125,7 +125,8 @@ struct ConversationTile: View {
                 AttachmentMenuButton(conversationName: conversation.name,
                     onFiles: { urls in store.attach(urls, to: conversation.id) },
                     onBeginAdding: { count in store.beginImports(count, to: conversation.id) },
-                    onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) })
+                    onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) },
+                    onFinish: { store.requestComposerFocus(conversation.id) })
                     .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.barHeight - 31) / 2)
                 VStack(spacing: 0) {
                     if let files = store.outgoing[conversation.id], !files.isEmpty {

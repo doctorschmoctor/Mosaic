@@ -25,6 +25,7 @@ struct PhotoLibraryPickerView: View {
                 }
                 Spacer()
                 Button("Cancel") { model.close(); onCancel() }.buttonStyle(PickerButtonStyle(prominent: false))
+                    .keyboardShortcut(.cancelAction)
                 Button(model.selectedIDs.count > 1 ? "Add \(model.selectedIDs.count)" : "Add") { let chosen = model.selectedAssets; model.close(); onAdd(chosen) }
                     .buttonStyle(PickerButtonStyle(prominent: true))
                     .disabled(model.selectedIDs.isEmpty)
