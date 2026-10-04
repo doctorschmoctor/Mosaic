@@ -8,7 +8,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 ## Features
 
-- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft is kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch.
+- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft and attached files are kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts — including an unsent New Message with its recipients and files — are restored on relaunch; nothing is sent at launch.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
 - **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else, and received pictures can be copied or saved with a right-click.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them. Tiles open on their messages at once: recent conversations are fetched ahead, and recently shown histories stay cached in memory.
@@ -79,7 +79,7 @@ Mosaic covers existing conversations and text replies. It reads `~/Library/Messa
 
 - The sidebar lists the 500 most recent conversations plus any open ones. Search covers names, participants and previews.
 - Plain text and common rich bodies are shown; unknown formats offer **Open in Messages**. Formatting is not rendered. Reactions are shown on the whole message (not the exact part of a multi-part message); an edit shows the current text with an Edited mark, not the history.
-- Attachments come from the copies Messages keeps locally; one never downloaded to this Mac says so. Link previews use LinkPresentation and are kept in memory.
+- Attachments come from the copies Messages keeps locally; one never downloaded to this Mac says so. Link previews use LinkPresentation and are kept in memory for recent links; a preview that could not load is tried again later.
 - Sending reactions, threaded replies, edits and unsends, calls and brand-new groups is done in Messages — its scripting dictionary sends only text and files; **Reply in Messages** and **Open Messages** take you there.
 - Photos' own search (people, places, things) is not available to other apps, so the Photos grid is a plain library view.
 - Messages from one sender within fifteen minutes form a run with a single time stamp. **Delivered** / **Read** appears under the latest sent message once Messages reports it. Sends are never retried automatically.
@@ -88,7 +88,7 @@ Mosaic covers existing conversations and text replies. It reads `~/Library/Messa
 
 ## Privacy
 
-Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts, locally, in UserDefaults. Pictures you paste or pick wait in `~/Library/Application Support/Mosaic/Outgoing` until sent; at send time each file is copied briefly into `~/Library/Messages/.mosaic-outgoing`, the only place Messages' sandbox reads attachments from, and removed again a few minutes later. Fetching a link preview is the only network request Mosaic makes. There is no analytics, backend or upload code. The demo workspace uses fictional data.
+Message history, thumbnails, link previews and contact names stay in memory. Mosaic stores only workspace layout and drafts (text, New Message recipients, and the paths of files waiting in a composer), locally, in UserDefaults. Pictures you paste or pick wait in `~/Library/Application Support/Mosaic/Outgoing` until sent or discarded; at send time each file is copied briefly into `~/Library/Messages/.mosaic-outgoing`, the only place Messages' sandbox reads attachments from, and removed again a few minutes later. Fetching link previews is the only network request Mosaic makes itself; Photos may download an iCloud original when you add one that is not on this Mac. There is no analytics, backend or upload code. The demo workspace uses fictional data.
 
 ## Development
 

@@ -401,8 +401,9 @@ struct LinkPreview: @unchecked Sendable {
             Task { @MainActor in provider.cancel() }
         }
         try Task.checkCancellation()
-        let image = await Self.loadImage(metadata.imageProvider, maxPixels: 640)
-        let icon = image == nil ? await Self.loadImage(metadata.iconProvider, maxPixels: 128) : nil
+        func picture(_ image: CGImage?) -> NSImage? { image.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) } }
+        let image = picture(await Self.loadImage(metadata.imageProvider, maxPixels: 640))
+        let icon = image == nil ? picture(await Self.loadImage(metadata.iconProvider, maxPixels: 128)) : nil
         let title = metadata.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         return LinkPreview(title: title?.isEmpty == false ? title : nil, host: Self.host(metadata.url ?? url), image: image, icon: icon)
     }
@@ -413,7 +414,7 @@ struct LinkPreview: @unchecked Sendable {
     }
     /// The provider's image, decoded no larger than `maxPixels` on its longest side (a page's
     /// preview image can be several thousand pixels wide; the card is 128 points tall).
-    private nonisolated static func loadImage(_ provider: NSItemProvider?, maxPixels: Int) async -> NSImage? {
+    private nonisolated static func loadImage(_ provider: NSItemProvider?, maxPixels: Int) async -> CGImage? {
         guard let provider else { return nil }
         if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
             let data: Data? = await withCheckedContinuation { continuation in
@@ -423,17 +424,20 @@ struct LinkPreview: @unchecked Sendable {
         }
         guard provider.canLoadObject(ofClass: NSImage.self) else { return nil }
         return await withCheckedContinuation { continuation in
-            _ = provider.loadObject(ofClass: NSImage.self) { object, _ in continuation.resume(returning: object as? NSImage) }
+            _ = provider.loadObject(ofClass: NSImage.self) { object, _ in
+                // A provider without image data: its picture, decoded no larger than asked.
+                let image = (object as? NSImage)?.tiffRepresentation.flatMap { downsample($0, maxPixels: maxPixels) }
+                continuation.resume(returning: image)
+            }
         }
     }
-    nonisolated static func downsample(_ data: Data, maxPixels: Int) -> NSImage? {
+    nonisolated static func downsample(_ data: Data, maxPixels: Int) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
         let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
                                         kCGImageSourceCreateThumbnailWithTransform: true,
                                         kCGImageSourceShouldCacheImmediately: true,
                                         kCGImageSourceThumbnailMaxPixelSize: maxPixels]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-        return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }
 
