@@ -78,7 +78,8 @@ final class RecurringWorkTests: XCTestCase {
         }
         let first = Task { await requests.value(for: "k", start: start) }
         let second = Task { await requests.value(for: "k", start: start) }
-        while requests.consumers(of: "k") < 2 { await Task.yield() }
+        while requests.consumers(of: "k") < 2 || started.value == 0 { await Task.yield() }
+        for _ in 0..<10 { await Task.yield() }
         XCTAssertEqual(started.value, 1, "one piece of work for both")
         first.cancel()
         while requests.consumers(of: "k") > 1 { await Task.yield() }
