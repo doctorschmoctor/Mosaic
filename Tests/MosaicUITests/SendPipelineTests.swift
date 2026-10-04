@@ -205,6 +205,9 @@ final class SendPipelineTests: XCTestCase {
         let (store, path) = try await liveStore(transport: transport)
         for _ in 0..<200 where !store.hasCachedHistory(Self.alex) { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertTrue(store.hasCachedHistory(Self.alex), "recent conversations are fetched ahead")
+        // A fresh workspace opens its first conversation by itself; close it to start from a closed tile.
+        store.close(Self.alex)
+        await store.refresh()
         XCTAssertTrue(store.conversations[0].messages.isEmpty, "a closed conversation holds no history itself")
         store.open(Self.alex)
         XCTAssertEqual(store.conversations[0].messages.map(\.text), ["Hello", "Hi!"], "the tile opens on its messages, before any load")
