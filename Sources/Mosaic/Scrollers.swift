@@ -364,6 +364,9 @@ struct ThinScrollerInstaller: NSViewRepresentable {
     var onSwipeModeChange: ((Bool) -> Void)? = nil
     /// Hands over the AppKit scroll view once it is found.
     var onScrollView: ((NSScrollView) -> Void)? = nil
+    /// Where the scroller's track starts and ends, inside the scroll view's edges (to line it up
+    /// with content that is inset from them).
+    var scrollerInsets: NSEdgeInsets? = nil
 
     func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); configure(view); return view }
     func updateNSView(_ view: InstallerView, context: Context) { configure(view); view.install() }
@@ -371,6 +374,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
         view.watchesSwipes = hidesForHorizontalSwipes
         view.onSwipeModeChange = onSwipeModeChange
         view.onScrollView = onScrollView
+        view.scrollerInsets = scrollerInsets
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
@@ -380,6 +384,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
         var watchesSwipes = false
         var onSwipeModeChange: ((Bool) -> Void)?
         var onScrollView: ((NSScrollView) -> Void)?
+        var scrollerInsets: NSEdgeInsets?
         private weak var scrollView: NSScrollView?
 
         override var isOpaque: Bool { false }
@@ -395,6 +400,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
                 if let found = current as? NSScrollView {
                     ThinScroller.install(in: found)
                     scrollView = found
+                    if let scrollerInsets, !NSEdgeInsetsEqual(found.scrollerInsets, scrollerInsets) { found.scrollerInsets = scrollerInsets }
                     onScrollView?(found)
                     if watchesSwipes, let scroller = found.verticalScroller as? ThinScroller {
                         scroller.watchSwipes(in: found)

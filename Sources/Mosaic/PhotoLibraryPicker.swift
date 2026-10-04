@@ -57,7 +57,9 @@ struct PhotoLibraryPickerView: View {
                     }
                     .padding(8)
                     // The slim scroller the rest of Mosaic has: it does not grow under the pointer.
-                    .background(ThinScrollerInstaller())
+                    // Its track runs from the top of the first row to the bottom of the last, inside
+                    // the grid's margin, not from the card's edge.
+                    .background(ThinScrollerInstaller(scrollerInsets: NSEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)))
                 }
                 .scrollIndicators(.automatic)
             }
