@@ -39,6 +39,7 @@ struct WorkspaceView: View {
     @FocusState private var searchFocused: Bool
     @State private var keyboard = KeyboardRouter()
     @State private var sidebarKeyboard = SidebarKeyboard()
+    @State private var listPin = ListTopPin()
 
     var body: some View {
         @Bindable var store = store
@@ -112,7 +113,8 @@ struct WorkspaceView: View {
                             // one that does not thicken under the pointer or appear for a swipe, and
                             // tells the rows while a swipe is under way.
                             .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true,
-                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) }))
+                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
+                                onScrollView: { [listPin] in listPin.attach($0) }))
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                                 Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
                                     .tint(.red)
@@ -130,6 +132,16 @@ struct WorkspaceView: View {
                 .padding(.top, 12)
                 // The keyboard's row stays in view as the arrow keys move it.
                 .onChange(of: store.sidebarSelection) { _, id in if let id { scroller.scrollTo(id) } }
+                // A new message moved a conversation to the top: a list at the top stays at the top.
+                .onChange(of: store.filteredConversations.first?.id) { old, new in
+                    guard ListTopPin.firstChanged(from: old, to: new), let old, let new, store.sidebarSelection == nil else { return }
+                    // After the list has applied the new order.
+                    DispatchQueue.main.async {
+                        if listPin.wasAtTop(oldFirst: old, in: store.filteredConversations.map(\.id)) {
+                            instantly { scroller.scrollTo(new, anchor: .top) }
+                        }
+                    }
+                }
             }
         }
         .background(.regularMaterial)

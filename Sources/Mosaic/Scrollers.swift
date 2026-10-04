@@ -362,12 +362,15 @@ struct ThinScrollerInstaller: NSViewRepresentable {
     var hidesForHorizontalSwipes = false
     /// Called as a sideways swipe over the scroll view begins and ends (see `ThinScroller.isSwiping`).
     var onSwipeModeChange: ((Bool) -> Void)? = nil
+    /// Hands over the AppKit scroll view once it is found.
+    var onScrollView: ((NSScrollView) -> Void)? = nil
 
     func makeNSView(context: Context) -> InstallerView { let view = InstallerView(); configure(view); return view }
     func updateNSView(_ view: InstallerView, context: Context) { configure(view); view.install() }
     private func configure(_ view: InstallerView) {
         view.watchesSwipes = hidesForHorizontalSwipes
         view.onSwipeModeChange = onSwipeModeChange
+        view.onScrollView = onScrollView
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InstallerView, context: Context) -> CGSize? {
         CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
@@ -376,6 +379,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
     final class InstallerView: NSView {
         var watchesSwipes = false
         var onSwipeModeChange: ((Bool) -> Void)?
+        var onScrollView: ((NSScrollView) -> Void)?
         private weak var scrollView: NSScrollView?
 
         override var isOpaque: Bool { false }
@@ -391,6 +395,7 @@ struct ThinScrollerInstaller: NSViewRepresentable {
                 if let found = current as? NSScrollView {
                     ThinScroller.install(in: found)
                     scrollView = found
+                    onScrollView?(found)
                     if watchesSwipes, let scroller = found.verticalScroller as? ThinScroller {
                         scroller.watchSwipes(in: found)
                         if let onSwipeModeChange { scroller.onSwipeModeChange = onSwipeModeChange }
@@ -401,6 +406,27 @@ struct ThinScrollerInstaller: NSViewRepresentable {
             }
         }
     }
+}
+
+/// Keeps the conversation list on its top conversation. A message that moves a conversation to
+/// the top while the list is at the top keeps the list at the top: a List otherwise holds on to
+/// the row that was first, leaving the new arrival just above the visible area. A list scrolled
+/// down on purpose stays where it is.
+@MainActor final class ListTopPin {
+    private weak var scrollView: NSScrollView?
+    func attach(_ scrollView: NSScrollView) { if self.scrollView !== scrollView { self.scrollView = scrollView } }
+
+    /// After the list changed its first row from `oldFirst`: whether the list was at the top, which
+    /// is when the row that was first now starts at the top edge of the visible area (the list
+    /// kept it there) or the list is at the top already.
+    func wasAtTop(oldFirst: String, in order: [String]) -> Bool {
+        guard let scrollView, let table = scrollView.documentView as? NSTableView,
+              let index = order.firstIndex(of: oldFirst), index < table.numberOfRows else { return false }
+        let visible = table.visibleRect
+        let row = table.rect(ofRow: index)
+        return abs(row.minY - visible.minY) <= 2 || visible.minY <= table.rect(ofRow: 0).minY + 2
+    }
+    static func firstChanged(from old: String?, to new: String?) -> Bool { old != nil && new != nil && old != new }
 }
 
 /// Placed inside a conversation's SwiftUI ScrollView, finds the AppKit scroll view that hosts it,

@@ -512,10 +512,12 @@ import MosaicCore
     /// Return on the keyboard's row (or the first search result): opens it in a tile — taking the
     /// place of the tile used longest ago when every tile is taken — or focuses its tile when it
     /// is already open.
+    /// Return on the keyboard's row (or in the search field): opens the conversation in a tile,
+    /// or finds its tile, and puts the keyboard in that tile's composer, ready to type.
     func activateSidebarSelection() {
         guard let id = sidebarSelection ?? (search.isEmpty ? nil : filteredConversations.first?.id) else { return }
-        if openIDs.contains(id) { focus(id); return }
-        open(id)
+        if !openIDs.contains(id) { open(id) }
+        requestComposerFocus(id)
     }
     /// Delete on the keyboard's row: closes that conversation's tile, if it has one. The
     /// conversation itself stays in the list.

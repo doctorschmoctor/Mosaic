@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import MosaicCore
 @testable import Mosaic
 
@@ -28,6 +29,38 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.openIDs, [ids[1], ids[2], ids[3], ids[0]])
         XCTAssertNil(store.tileDrag)
         XCTAssertEqual(store.workspace.drafts[ids[0]], "Keep this draft")
+    }
+
+    /// The list stays at the top when a message moves a conversation there: it was at the top
+    /// when the row that was first starts at the visible area's top edge (the list held on to it)
+    /// or the list shows its first row; scrolled further down, it stays put.
+    @MainActor func testConversationListStaysAtTheTopForANewArrival() {
+        final class Rows: NSObject, NSTableViewDataSource {
+            func numberOfRows(in tableView: NSTableView) -> Int { 30 }
+        }
+        let rows = Rows()
+        let table = NSTableView(frame: NSRect(x: 0, y: 0, width: 300, height: 1200))
+        table.addTableColumn(NSTableColumn(identifier: .init("c")))
+        table.rowHeight = 38
+        table.intercellSpacing = NSSize(width: 0, height: 2)
+        table.dataSource = rows
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        scroll.documentView = table
+        table.reloadData()
+        table.tile()
+        let pin = ListTopPin()
+        pin.attach(scroll)
+        let order = (0..<30).map { "c\($0)" }
+        // The new arrival is c0; c1 was first. The list held on to c1 at the top edge.
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: table.rect(ofRow: 1).minY))
+        XCTAssertTrue(pin.wasAtTop(oldFirst: "c1", in: order))
+        scroll.contentView.scroll(to: .zero)
+        XCTAssertTrue(pin.wasAtTop(oldFirst: "c1", in: order), "already at the top")
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: table.rect(ofRow: 8).minY))
+        XCTAssertFalse(pin.wasAtTop(oldFirst: "c1", in: order), "scrolled down on purpose: it stays")
+        XCTAssertTrue(ListTopPin.firstChanged(from: "c1", to: "c0"))
+        XCTAssertFalse(ListTopPin.firstChanged(from: "c0", to: "c0"))
+        XCTAssertFalse(ListTopPin.firstChanged(from: nil, to: "c0"))
     }
 
     /// A held tile lifts and follows the pointer; crossing into another tile's place moves that
@@ -282,6 +315,7 @@ final class WorkspaceInteractionTests: XCTestCase {
         store.activateSidebarSelection()
         XCTAssertEqual(store.workspace.openIDs, [open[0], open[1], closed, open[3]])
         XCTAssertEqual(store.workspace.focusedID, closed)
+        XCTAssertEqual(store.focusTarget, closed, "the keyboard goes on into the new tile's composer")
         XCTAssertNil(store.alert)
         // Delete on an open row closes its tile; on a closed row it does nothing.
         store.sidebarSelection = open[1]
@@ -295,8 +329,11 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.openIDs, [open[0], closed, open[3], open[2]])
         XCTAssertEqual(store.workspace.focusedID, open[2])
         store.sidebarSelection = open[0]
+        let token = store.focusToken
         store.activateSidebarSelection()
         XCTAssertEqual(store.workspace.focusedID, open[0])
+        XCTAssertEqual(store.focusTarget, open[0], "an open row's tile takes the keyboard too")
+        XCTAssertGreaterThan(store.focusToken, token)
         XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
         // The one highlight is the keyboard's row; a swipe hides it until the swipe is closed.
         XCTAssertEqual(store.highlightedSidebarRow, open[0])
