@@ -81,6 +81,13 @@ MainActor.assumeIsolated {
             parts[3] += Double(c4 - c3) / 1e6; parts[4] += Double(c5 - c4) / 1e6
             cpuTimes.append(Double(cpu() - c0) / 1e6)
             wallTimes.append(Double(wall() - w0) / 1e6)
+            if i == steps / 3, let index = CommandLine.arguments.firstIndex(of: "--capture"), CommandLine.arguments.indices.contains(index + 1) {
+                let bounds = hosting.bounds
+                if let bitmap = hosting.bitmapImageRepForCachingDisplay(in: bounds) {
+                    hosting.cacheDisplay(in: bounds, to: bitmap)
+                    try? bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                }
+            }
         }
         print(String(format: "PARTS store=%.2f runloop=%.2f layout=%.2f display=%.2f flush=%.2f (ms per step)",
                      parts[0] / Double(steps), parts[1] / Double(steps), parts[2] / Double(steps), parts[3] / Double(steps), parts[4] / Double(steps)))

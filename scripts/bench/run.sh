@@ -3,7 +3,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
-mkdir -p .build/bench
+mkdir -p .build/bench build
 cp scripts/bench/main.swift .build/bench/main.swift
 sha="$1"; shift
 for variant in "$@"; do
@@ -16,6 +16,6 @@ for variant in "$@"; do
     echo "BUILD FAILED $tag"; grep error: .build/bench/err-$tag.txt | head -5; continue
   fi
   for run in 1 2 3; do
-    echo "== $tag run$run"; .build/bench/bench-$tag --heavy | grep -E "RESULT|COUNTS|IDLE|PARTS|DRAG"
+    echo "== $tag run$run"; .build/bench/bench-$tag --heavy --capture build/bench-$tag.png | grep -E "RESULT|COUNTS|IDLE|PARTS|DRAG"
   done
 done

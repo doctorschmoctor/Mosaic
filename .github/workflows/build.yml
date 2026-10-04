@@ -7,7 +7,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Drag benchmark, main
-        run: ./scripts/bench/run.sh 1367c41 ""
-      - name: Drag benchmark, batch 4
-        run: ./scripts/bench/run.sh 614e48d "" noeffect
+      - name: Drag benchmark
+        run: ./scripts/bench/run.sh 614e48d "" offset visual "visual+noeffect"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: drag-captures
+          path: build/bench-*.png

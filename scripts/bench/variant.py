@@ -35,6 +35,13 @@ for name in names:
         s = (root / tile).read_text()
         s = re.sub(r'\n\s*\.modifier\(NewMessageEffect\(animated: freshIDs\.contains\(row\.id\),\n\s*incoming: !row\.message\.isFromMe, reduceMotion: reduceMotion\)\)', '', s)
         (root / tile).write_text(s)
+    elif name in ('offset', 'visual'):
+        move = ('.offset(x: held.minX - slot.minX, y: held.minY - slot.minY)' if name == 'offset'
+                else '.visualEffect { [dx = held.minX - slot.minX, dy = held.minY - slot.minY] content, _ in content.offset(x: dx, y: dy) }')
+        edit('Sources/Mosaic/WorkspaceView.swift', '        let frame = dragging ? (store.tileDrag?.frame ?? slot) : slot\n',
+             '        let held = dragging ? (store.tileDrag?.frame ?? slot) : slot\n        let frame = CGRect(origin: slot.origin, size: held.size)\n')
+        edit('Sources/Mosaic/WorkspaceView.swift', '            .id(chat.id)\n            .zIndex(dragging ? 100 : 1)',
+             '            ' + move + '\n            .id(chat.id)\n            .zIndex(dragging ? 100 : 1)')
     else:
         raise SystemExit('unknown variant ' + name)
 print('variant', names or ['base'])
