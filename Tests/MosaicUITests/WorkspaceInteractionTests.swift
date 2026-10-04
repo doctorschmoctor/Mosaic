@@ -30,6 +30,73 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.drafts[ids[0]], "Keep this draft")
     }
 
+    /// A held tile lifts and follows the pointer; crossing into another tile's place moves that
+    /// tile, which springs from where it was; the release commits the order and the held tile
+    /// springs from where it was dropped into its place, then comes back down.
+    @MainActor func testHeldTileLiftsFollowsThePointerAndTilesSpringIntoPlace() async throws {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let ids = store.workspace.openIDs
+        let viewport = CGSize(width: 1000, height: 820)
+        store.tilePlanner = { TileLayout.plan(order: $0, viewport: viewport, layout: .grid) }
+        store.tileMotionEnabled = { true }
+        let plan = TileLayout.plan(order: ids, viewport: viewport, layout: .grid)
+        let a = try XCTUnwrap(plan.frames[ids[0]]), b = try XCTUnwrap(plan.frames[ids[1]])
+
+        store.dragTile(ids[0], translation: CGSize(width: 10, height: 5), plan: plan)
+        XCTAssertEqual(store.heldTile?.id, ids[0])
+        XCTAssertEqual(store.heldTile?.size, a.size)
+        XCTAssertEqual(store.liftedTile, ids[0])
+        XCTAssertEqual(store.dragMotion.origin, CGPoint(x: a.minX + 10, y: a.minY + 5))
+        XCTAssertTrue(store.tileSprings.isEmpty, "no reorder, nothing springs")
+        XCTAssertEqual(store.displayOrder, ids)
+
+        store.dragTile(ids[0], translation: CGSize(width: b.midX - a.midX + 7, height: 4), plan: plan)
+        XCTAssertEqual(store.displayOrder, [ids[1], ids[0], ids[2], ids[3]])
+        XCTAssertEqual(store.tileSprings[ids[1]], CGSize(width: b.minX - a.minX, height: b.minY - a.minY), "starts where it was")
+        XCTAssertNil(store.tileSprings[ids[0]], "the held tile follows the pointer, not a spring")
+        XCTAssertEqual(store.workspace.openIDs, ids, "nothing is committed before the release")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(store.tileSprings.isEmpty, "the offsets spring to zero")
+
+        let dropped = store.dragMotion.origin
+        store.finishTileDrag()
+        XCTAssertEqual(store.workspace.openIDs, [ids[1], ids[0], ids[2], ids[3]])
+        XCTAssertNil(store.heldTile)
+        XCTAssertNil(store.tileDrag)
+        let landing = try XCTUnwrap(store.tilePlanner?(store.workspace.openIDs).frames[ids[0]])
+        XCTAssertEqual(store.tileSprings[ids[0]], CGSize(width: dropped.x - landing.minX, height: dropped.y - landing.minY))
+        XCTAssertEqual(store.settlingTile, ids[0])
+        XCTAssertEqual(store.liftedTile, ids[0], "still lifted until it lands")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(store.tileSprings.isEmpty)
+        XCTAssertNil(store.liftedTile)
+    }
+
+    /// With Reduce Motion, tiles move in one step: no springs, and nothing stays lifted.
+    @MainActor func testTileDragWithoutMotionMovesInOneStep() throws {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let ids = store.workspace.openIDs
+        let viewport = CGSize(width: 1000, height: 820)
+        store.tilePlanner = { TileLayout.plan(order: $0, viewport: viewport, layout: .grid) }
+        store.tileMotionEnabled = { false }
+        let plan = TileLayout.plan(order: ids, viewport: viewport, layout: .grid)
+        let a = try XCTUnwrap(plan.frames[ids[0]]), b = try XCTUnwrap(plan.frames[ids[1]])
+        store.dragTile(ids[0], translation: CGSize(width: b.midX - a.midX, height: 0), plan: plan)
+        XCTAssertEqual(store.displayOrder, [ids[1], ids[0], ids[2], ids[3]])
+        XCTAssertTrue(store.tileSprings.isEmpty)
+        store.finishTileDrag()
+        XCTAssertTrue(store.tileSprings.isEmpty)
+        XCTAssertNil(store.liftedTile)
+        XCTAssertNil(store.settlingTile)
+        // A drag that ends because its tile closed leaves nothing lifted either.
+        store.tileMotionEnabled = { true }
+        store.dragTile(ids[2], translation: CGSize(width: 5, height: 5), plan: TileLayout.plan(order: store.workspace.openIDs, viewport: viewport, layout: .grid))
+        XCTAssertEqual(store.liftedTile, ids[2])
+        store.close(ids[2])
+        XCTAssertNil(store.heldTile)
+        XCTAssertNil(store.liftedTile)
+    }
+
     /// Opening and closing many conversations quickly, in every layout, must keep the workspace
     /// consistent: no duplicate tiles, never more than the maximum, focus always on an open tile.
     @MainActor func testRapidOpenCloseAndLayoutChurnKeepsTheWorkspaceConsistent() {

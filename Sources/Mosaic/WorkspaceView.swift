@@ -393,6 +393,11 @@ struct TileWorkspace: View {
             let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? FocusChipBar.height + 8 : 0))
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
+            // How any order would lay out right now, so a reorder knows where each tile came from.
+            let _ = (store.tilePlanner = { [gridFractions, rowWeights, columnWeights] order in
+                TileLayout.plan(order: order, viewport: viewport, layout: layout,
+                                gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
+            })
             VStack(spacing: 8) {
                 if layout == .focus {
                     FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.focus(id) }
@@ -427,7 +432,7 @@ struct TileWorkspace: View {
                 if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan) }
             }
             ForEach(plan.dividers) { divider in
-                DividerHandle(divider: divider, enabled: store.tileDrag == nil,
+                DividerHandle(divider: divider, enabled: store.heldTile == nil,
                     onChanged: { translation in resize(divider, translation: translation, plan: plan) },
                     onEnded: { resizeStart = nil })
                     .zIndex(2)
@@ -439,17 +444,22 @@ struct TileWorkspace: View {
     }
 
     @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan) -> some View {
-        let dragging = store.tileDrag?.id == chat.id
-        let frame = dragging ? (store.tileDrag?.frame ?? slot) : slot
+        let held = store.heldTile?.id == chat.id ? store.heldTile : nil
+        // A held tile keeps its size; its place in the layout is the slot a release would give
+        // it, and it is drawn where the pointer has it (`TileMotion`).
+        let frame = held.map { CGRect(origin: slot.origin, size: $0.size) } ?? slot
         let movable = store.layout != .focus && store.tiles.count > 1
-        ConversationTile(conversation: chat,
-            onDragChanged: movable ? { (translation: CGSize) in store.dragTile(chat.id, translation: translation, plan: plan) } : nil,
-            onDragEnded: { store.finishTileDrag(chat.id) })
-            .frame(width: frame.width, height: frame.height)
-            .shadow(color: .black.opacity(dragging ? 0.2 : 0), radius: dragging ? 22 : 0, y: dragging ? 10 : 0)
-            .id(chat.id)
-            .zIndex(dragging ? 100 : 1)
-            .tileFrame(frame)
+        let raised = held != nil || store.liftedTile == chat.id || store.settlingTile == chat.id
+        TileMotion(motion: store.dragMotion, slot: frame.origin, isHeld: held != nil,
+                   spring: store.tileSprings[chat.id] ?? .zero, isLifted: store.liftedTile == chat.id) {
+            ConversationTile(conversation: chat,
+                onDragChanged: movable ? { (translation: CGSize) in store.dragTile(chat.id, translation: translation, plan: plan) } : nil,
+                onDragEnded: { store.finishTileDrag(chat.id) })
+                .frame(width: frame.width, height: frame.height)
+        }
+        .id(chat.id)
+        .zIndex(raised ? 100 : 1)
+        .tileFrame(frame)
     }
 
     private func resize(_ divider: TileDivider, translation: CGSize, plan: TilePlan) {
@@ -466,6 +476,43 @@ struct TileWorkspace: View {
         case .column(let index):
             columnWeights = TileLayout.resizedPair(start.columnSizes, at: index, delta: translation.width, minimum: 300)
         }
+    }
+}
+
+/// Where a tile is drawn, apart from its place in the layout: following the pointer while held,
+/// springing from its old place after a reorder or a release, slightly raised while lifted. All
+/// of it is a transform of the finished tile — nothing inside is laid out again — and only this
+/// view reads the pointer's position, so moving a tile redraws nothing else.
+struct TileMotion<Content: View>: View {
+    let motion: TileDragMotion
+    let slot: CGPoint
+    let isHeld: Bool
+    let spring: CGSize
+    let isLifted: Bool
+    @ViewBuilder let content: Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static var liftScale: CGFloat { 1.015 }
+
+    var body: some View {
+        let offset = isHeld ? CGSize(width: motion.origin.x - slot.x, height: motion.origin.y - slot.y) : spring
+        let scale = isLifted && !reduceMotion ? Self.liftScale : 1
+        content
+            // The lift's shadow is drawn from the tile's shape, not from everything in the tile.
+            .background {
+                RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Palette.surface)
+                    .shadow(color: .black.opacity(isLifted ? 0.22 : 0), radius: 24, y: 12)
+            }
+            .tileTransform(offset: offset, scale: scale)
+    }
+}
+
+extension View {
+    /// Moves and scales a finished view as it is drawn — a visual effect, so nothing inside is
+    /// laid out or measured again however often it changes. AppKit views inside (the thread's
+    /// scroll view, the composer) move with it.
+    func tileTransform(offset: CGSize, scale: CGFloat) -> some View {
+        visualEffect { content, _ in content.scaleEffect(scale).offset(offset) }
     }
 }
 

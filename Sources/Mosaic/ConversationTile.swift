@@ -52,7 +52,11 @@ struct ConversationTile: View {
                               lineWidth: isDropTarget || isFocused ? 1.5 : 1)
                 .allowsHitTesting(false)
         }
-        .shadow(color: .black.opacity(0.025), radius: 5, y: 2)
+        // The resting shadow comes from the tile's shape alone, so it costs nothing to move.
+        .background {
+            RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Palette.surface)
+                .shadow(color: .black.opacity(0.025), radius: 5, y: 2)
+        }
         .onDrop(of: [UTType.text], isTargeted: $isDropTarget) { providers in
             guard let provider = providers.first else { return false }
             _ = provider.loadObject(ofClass: String.self) { value, _ in

@@ -50,7 +50,26 @@ import MosaicCore
     var isLoadingContacts = false
     var contactStatus: String?
     private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
-    var tileDrag: TileDragSession?
+    /// The tile being dragged and the order a release would give. Not observed: the pointer moves
+    /// it on every frame. What views read is published from it below, so the workspace re-renders
+    /// only when the order changes, and the pointer's movement changes one transform.
+    @ObservationIgnored var tileDrag: TileDragSession? { didSet { publishDrag() } }
+    /// The held tile, its size and the order a release would give: changes when a drag begins,
+    /// ends, or the held tile crosses into another tile's place.
+    private(set) var heldTile: HeldTile?
+    /// Where the held tile is now; read only by the held tile's position.
+    let dragMotion = TileDragMotion()
+    /// The tile shown lifted (slightly larger, with a deeper shadow): the held one, and then the
+    /// released one until it has settled into its place.
+    private(set) var liftedTile: String?
+    /// Tiles springing from where they were to their new place, after a reorder or a release:
+    /// offsets from the new place, animated to zero.
+    private(set) var tileSprings: [String: CGSize] = [:]
+    /// Lays out an order in the workspace's current size and proportions (set by the workspace
+    /// view), so a reorder knows where each tile was and where it goes.
+    @ObservationIgnored var tilePlanner: (([String]) -> TilePlan)?
+    /// Whether tile motion springs; off with Reduce Motion (tiles then move in one step).
+    @ObservationIgnored var tileMotionEnabled: () -> Bool = { !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
     /// The sidebar row the keyboard is on, while the conversation list has keyboard focus (⌘L, or
     /// an arrow key from the search field). Nil whenever the list does not have the keyboard. The
     /// pointer never highlights a row; only the keyboard does.
@@ -274,9 +293,9 @@ import MosaicCore
 
     /// Tile order shown on screen: the drag preview while a tile is held, always covering every open tile.
     var displayOrder: [String] {
-        guard let drag = tileDrag else { return openIDs }
+        guard let held = heldTile else { return openIDs }
         let open = Set(openIDs)
-        var order = drag.order.filter { open.contains($0) }
+        var order = held.order.filter { open.contains($0) }
         order += openIDs.filter { !order.contains($0) }
         return order
     }
@@ -521,20 +540,88 @@ import MosaicCore
     var canZoomOut: Bool { zoom > Workspace.zoomRange.lowerBound + 0.001 }
     /// "120%", for the menu.
     var zoomLabel: String { "\(Int((zoom * 100).rounded()))%" }
+    // MARK: Tile drag
+
+    /// The spring tiles move with: quick, settling without a wobble.
+    static let tileSpring = Animation.spring(response: 0.3, dampingFraction: 0.86)
+
+    /// The pointer moved with a tile held. The tile follows the pointer exactly; when it crosses
+    /// into another tile's place, the tiles between spring to their new places.
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).
-        if tileDrag?.id != id { tileDrag = TileDragSession(id: id, origin: frame, order: openIDs) }
+        if tileDrag?.id != id {
+            instantly { tileDrag = TileDragSession(id: id, origin: frame, order: openIDs) }
+            // Picked up: the tile lifts off the board.
+            if tileMotionEnabled() { withAnimation(Self.tileSpring) { liftedTile = id } } else { instantly { liftedTile = id } }
+        }
         guard var drag = tileDrag else { return }
+        let before = drag.order
         drag.update(translation: translation, plan: plan)
-        instantly { tileDrag = drag }
+        let springs = drag.order == before ? [:] : springOffsets(from: before, to: drag.order, except: id)
+        instantly {
+            tileDrag = drag
+            if !springs.isEmpty { tileSprings.merge(springs) { _, new in new } }
+        }
+        if !springs.isEmpty { settleSprings() }
     }
+    /// The held tile was let go: the order is committed and the tile springs from where it was
+    /// dropped into its place, coming back down as it lands.
     func finishTileDrag(_ id: String? = nil) {
         guard let drag = tileDrag, id == nil || drag.id == id else { return }
         let order = displayOrder
+        var springs: [String: CGSize] = [:]
+        if tileMotionEnabled(), let end = tilePlanner?(order).frames[drag.id] {
+            springs[drag.id] = CGSize(width: drag.frame.minX - end.minX, height: drag.frame.minY - end.minY)
+        }
         instantly {
             if openIDs != order { openIDs = order }
+            tileSprings.merge(springs) { _, new in new }
+            settlingTile = springs.isEmpty ? nil : drag.id
             tileDrag = nil
+        }
+        if springs.isEmpty { instantly { liftedTile = nil } } else { settleSprings(landing: drag.id) }
+    }
+    /// The tile just released, while it springs into place (it stays above the others).
+    private(set) var settlingTile: String?
+    @ObservationIgnored private var springGeneration = 0
+    /// Where each moved tile was, relative to its new place: the start of its spring.
+    private func springOffsets(from old: [String], to new: [String], except held: String) -> [String: CGSize] {
+        guard tileMotionEnabled(), let planner = tilePlanner else { return [:] }
+        let before = planner(old).frames, after = planner(new).frames
+        var springs: [String: CGSize] = [:]
+        for (id, start) in before where id != held {
+            guard let end = after[id], start.origin != end.origin else { continue }
+            springs[id] = CGSize(width: start.minX - end.minX, height: start.minY - end.minY)
+        }
+        return springs
+    }
+    /// On the next turn — after the new places are laid out with the offsets holding the tiles
+    /// where they were — the offsets spring to zero.
+    private func settleSprings(landing: String? = nil) {
+        springGeneration += 1
+        let generation = springGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            withAnimation(Self.tileSpring, completionCriteria: .logicallyComplete) {
+                self.tileSprings = [:]
+                if let landing, self.liftedTile == landing { self.liftedTile = nil }
+            } completion: { [weak self] in
+                guard let self, generation == self.springGeneration else { return }
+                self.settlingTile = nil
+            }
+        }
+    }
+    /// Publishes what views read of the drag: the held tile and order when they change, and the
+    /// held tile's place on every move.
+    private func publishDrag() {
+        let held = tileDrag.map { HeldTile(id: $0.id, size: $0.origin.size, order: $0.order) }
+        if held != heldTile { heldTile = held }
+        if let drag = tileDrag {
+            if dragMotion.origin != drag.frame.origin { dragMotion.origin = drag.frame.origin }
+        } else if liftedTile != nil, liftedTile != settlingTile {
+            // Ended some other way (the tile closed, the layout changed): nothing settles.
+            liftedTile = nil
         }
     }
     func draft(_ id: String) -> Binding<String> {
@@ -1278,6 +1365,19 @@ struct SavedDrafts: Codable, Equatable {
     static func referencedPaths(in defaults: UserDefaults) -> Set<String> {
         Set([true, false].compactMap { load(from: defaults, live: $0) }.flatMap { $0.files.values.joined() })
     }
+}
+
+/// What views know of a held tile: which one, its size while held, and the order a release gives.
+struct HeldTile: Equatable {
+    let id: String
+    let size: CGSize
+    let order: [String]
+}
+
+/// The held tile's place, apart from the store's other state so the pointer's movement re-renders
+/// only the view that positions the tile.
+@Observable @MainActor final class TileDragMotion {
+    var origin: CGPoint = .zero
 }
 
 /// A message being addressed in a new-message tile.
