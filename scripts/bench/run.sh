@@ -16,6 +16,6 @@ for variant in "$@"; do
     echo "BUILD FAILED $tag"; grep error: .build/bench/err-$tag.txt | head -5; continue
   fi
   for run in 1 2 3; do
-    echo "== $tag run$run"; .build/bench/bench-$tag --heavy --capture build/bench-$tag.png | grep -E "RESULT|COUNTS|IDLE|PARTS|DRAG"
+    echo "== $tag run$run"; .build/bench/bench-$tag --heavy --capture build/bench-$sha-$tag.png | grep -E "RESULT|COUNTS|IDLE|PARTS|DRAG"
   done
 done
