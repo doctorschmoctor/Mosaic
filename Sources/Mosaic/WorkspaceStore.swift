@@ -35,11 +35,12 @@ import MosaicCore
     var alert: WorkspaceAlert?
     var sendingIDs = Set<String>()
     var sendErrors: [String: String] = [:]
-    /// Files waiting in each tile's composer to go out with the next message.
+    /// Files in each tile's composer, in the order they were added, to go out with the next
+    /// message — including the ones still on their way in (a photo being fetched from the
+    /// library, a pasted picture being written) and the ones that could not be added.
     var outgoing: [String: [OutgoingAttachment]] = [:]
-    /// How many files are still on their way into each composer (photos being fetched from the
-    /// picker, a pasted picture being written); shown as placeholders meanwhile.
-    var outgoingLoading: [String: Int] = [:]
+    /// A line under a composer about its send: waiting for photos, or why a send stopped.
+    var sendNotes: [String: String] = [:]
     var showSetup = false
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
@@ -73,13 +74,24 @@ import MosaicCore
     static let failuresBeforeError = 3
     private let defaults: UserDefaults
     private let database: MessagesDatabase
+    /// How messages leave Mosaic: Messages' AppleScript dictionary when live, nowhere in the demo,
+    /// and whatever a test injects.
+    @ObservationIgnored private let liveTransport: MessageTransport
+    @ObservationIgnored private let demoTransport = DemoTransport()
+    var transport: MessageTransport { isLive ? liveTransport : demoTransport }
+    /// Submissions go to Messages one at a time, in the order Return accepted them.
+    @ObservationIgnored private var submissionChain: Task<Void, Never> = Task {}
+    /// Sends waiting for a composer's photos to finish arriving.
+    @ObservationIgnored private var importWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var persistTask: Task<Void, Never>?
     @ObservationIgnored private var watcher: FileChangeWatcher?
     @ObservationIgnored private var watchRefreshTask: Task<Void, Never>?
     /// What the last successful load covered; a poll skips the load when the database's fingerprint
     /// still matches and the request (open tiles, history depth) is the same.
-    @ObservationIgnored private var lastLoad: (fingerprint: DatabaseFingerprint, ids: Set<String>, historyLimit: Int)?
+    @ObservationIgnored private var lastLoad: ChangeToken?
+    /// The one reader of Messages' database: one connection, kept open, with change detection on it.
+    @ObservationIgnored private let reader: MessagesReader
     @ObservationIgnored private var contactNames = ContactNames()
     @ObservationIgnored private var originalTitles: [String: String] = [:]
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -90,8 +102,11 @@ import MosaicCore
     @ObservationIgnored private var connectedBefore = false
     private let forcedDemo: Bool
 
-    init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false) {
+    init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false,
+         transport: MessageTransport? = nil) {
         self.defaults = defaults; self.database = database
+        liveTransport = transport ?? AppleScriptTransport()
+        reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
         OutgoingFiles.purgeStale()
         // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
@@ -100,7 +115,9 @@ import MosaicCore
         isLive = !forcedDemo && (defaults.object(forKey: "Mosaic.live") as? Bool ?? true)
         if isLive {
             restore()
-            Task { await self.loadContacts(requestPermission: false); await self.refresh() }
+            // Messages and Contacts load side by side; names apply to the conversations as they arrive.
+            Task { await self.refresh() }
+            Task { await self.loadContacts(requestPermission: false) }
         } else {
             conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
@@ -226,7 +243,15 @@ import MosaicCore
         if tileDrag?.id == victim { tileDrag = nil }
         if focusTarget == victim { focusTarget = nil }
         if composeDrafts[victim] != nil { composeDrafts[victim] = nil; drafts[victim] = nil }
-        outgoing[victim] = nil; outgoingLoading[victim] = nil
+        dropImports(for: victim)
+    }
+    /// A closed or replaced tile's composer files are let go: a photo still arriving for it lands
+    /// nowhere (its file is removed when it does), and a send waiting for those photos stops waiting.
+    private func dropImports(for id: String) {
+        for file in outgoing[id] ?? [] where file.isOwnedByMosaic { try? FileManager.default.removeItem(at: file.url!) }
+        outgoing[id] = nil
+        sendNotes[id] = nil
+        resumeImportWaiters(for: id)
     }
     private func noteUse(_ id: String) {
         useCount += 1
@@ -237,6 +262,7 @@ import MosaicCore
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
             if composeDrafts[id] != nil { composeDrafts[id] = nil; drafts[id] = nil }
+            dropImports(for: id)
         }
         if focusTarget == id { focusTarget = nil }
     }
@@ -367,7 +393,8 @@ import MosaicCore
         loadingState = true
         if live {
             conversations = []; restore()
-            Task { await loadContacts(requestPermission: contactAuthorization == .notDetermined); await refresh() }
+            Task { await refresh() }
+            Task { await loadContacts(requestPermission: contactAuthorization == .notDetermined) }
         } else {
             watcher = nil
             conversations = DemoData.conversations(imagePaths: DemoAssets.imagePaths())
@@ -391,22 +418,18 @@ import MosaicCore
 
     private func performRefresh() async {
         let requestGeneration = generation
-        let ids = Set(openIDs)
-        let historyLimit = max(100, historyLimits.values.max() ?? 100)
-        let database = self.database
-        // The same request as last time may skip the load if nothing in the database moved.
-        let known = lastLoad.flatMap { $0.ids == ids && $0.historyLimit == historyLimit ? $0.fingerprint : nil }
+        // Each open tile gets exactly the history depth it asked for; the reader skips the load
+        // when nothing was committed since the last one and the request is the same.
+        let request = LoadRequest(openIDs: Set(openIDs), historyLimits: historyLimits, defaultHistoryLimit: 100)
         do {
-            let snapshot = try await Task.detached(priority: .userInitiated) {
-                try database.snapshot(openIDs: ids, historyLimit: historyLimit, unlessUnchangedFrom: known)
-            }.value
+            let snapshot = try await reader.load(request, unlessUnchangedFrom: lastLoad)
             guard generation == requestGeneration, isLive else { return }
             consecutiveLoadFailures = 0
             if connectionError != nil { connectionError = nil }
             connectedBefore = true; lastRefreshed = Date()
             startWatchingDatabase()
             guard let snapshot else { return } // unchanged since the last load
-            lastLoad = (snapshot.fingerprint, ids, historyLimit)
+            lastLoad = snapshot.token
             var loaded = snapshot.conversations
             let previousByID = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             for index in loaded.indices {
@@ -469,126 +492,254 @@ import MosaicCore
         Task { await refresh() }
     }
 
+    /// Return in a composer. The text and the files are taken from the composer at once — what is
+    /// typed afterwards is a new message — and a bubble for each stands in the thread immediately,
+    /// marked as being sent; then the items are handed to Messages one after another, in order.
+    /// An item Messages refuses is marked so, kept on screen for the reader to retry, change or
+    /// remove, and never resent by itself. A send waits for photos still arriving, and stops with
+    /// a note when one could not be added rather than going out without it.
     func send(_ id: String) async {
         if composeDrafts[id] != nil { await sendCompose(id); return }
-        await waitForArrivingAttachments(id)
-        let originalDraft = drafts[id] ?? ""
+        guard conversations.contains(where: { $0.id == id }) else { return }
+        guard await readyToSend(id) else { return }
+        guard let batch = acceptSend(from: id, to: .chat(id), into: id) else { return }
+        await submit(batch)
+    }
+
+    /// Waits for the composer's photos to finish arriving, then says whether a send may go: not
+    /// while Messages is unreachable, and not with a file that could not be added.
+    private func readyToSend(_ id: String) async -> Bool {
+        guard canSend else { sendErrors[id] = "Connect Messages before sending."; return false }
+        if outgoing[id]?.contains(where: { $0.state == .importing }) == true {
+            instantly { sendNotes[id] = "Waiting for photos to finish adding…" }
+            await awaitImports(id)
+            instantly { sendNotes[id] = nil }
+        }
+        if let failed = outgoing[id]?.first(where: { $0.state.isFailed }) {
+            sendErrors[id] = "\(failed.name) couldn't be added. Remove it or add it again, then send."
+            return false
+        }
+        return openIDs.contains(id) || composeDrafts[id] != nil
+    }
+
+    /// What one Return sends: the files, then the text, each with the bubble that stands for it.
+    struct Outbound {
+        enum Item { case text(String), file(URL) }
+        let target: SendTarget
+        /// Where the bubbles live (the conversation, or a New Message tile until it has one).
+        let threadID: String
+        let items: [(item: Item, message: Message)]
+    }
+
+    /// Takes the composer's text and files, clears the composer, and puts a sending bubble for
+    /// each item in the thread. Nil when there is nothing to send.
+    private func acceptSend(from tileID: String, to target: SendTarget, into threadID: String) -> Outbound? {
+        let originalDraft = drafts[tileID] ?? ""
         let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let files = outgoing[id] ?? []
-        guard !text.isEmpty || !files.isEmpty, !sendingIDs.contains(id), canSend,
-              conversations.contains(where: { $0.id == id }) else { return }
-        sendingIDs.insert(id); sendErrors[id] = nil
-        defer { sendingIDs.remove(id) }
-        var delivered: [Message] = []
-        let failure = deliver(text: text, files: files, from: id, to: .chat(id), delivered: &delivered)
-        if let failure { sendErrors[id] = failure }
+        let files = (outgoing[tileID] ?? []).filter { $0.state == .ready }
+        guard !text.isEmpty || !files.isEmpty else { return nil }
+        var items: [(item: Outbound.Item, message: Message)] = []
+        let now = Date()
+        for file in files {
+            guard let url = file.url else { continue }
+            var message = file.pendingMessage(date: now)
+            message.sendState = .sending
+            items.append((.file(url), message))
+        }
+        if !text.isEmpty {
+            var message = Message(id: "pending-\(UUID().uuidString)", text: text, date: now, isFromMe: true)
+            message.sendState = .sending
+            items.append((.text(text), message))
+        }
+        let batch = Outbound(target: target, threadID: threadID, items: items)
         instantly {
-            if failure == nil, drafts[id] == originalDraft { drafts[id] = "" }
-            if let currentIndex = conversations.firstIndex(where: { $0.id == id }), !delivered.isEmpty {
-                conversations[currentIndex].messages.append(contentsOf: delivered)
-                conversations[currentIndex].preview = Self.preview(text: failure == nil ? text : "", files: files, delivered: delivered)
-                conversations[currentIndex].lastActivity = Date()
+            if drafts[tileID] == originalDraft { drafts[tileID] = tileID == threadID ? "" : nil }
+            outgoing[tileID] = nil
+            sendErrors[tileID] = nil
+            place(batch.items.map(\.message), in: threadID, preview: Self.preview(text: text, files: files))
+        }
+        pending[threadID, default: []].append(contentsOf: batch.items.map(\.message))
+        noteUse(threadID)
+        markSeen(threadID)
+        return batch
+    }
+    /// Shows messages at the end of a thread (a conversation's history, or a New Message tile's sent list).
+    private func place(_ messages: [Message], in threadID: String, preview: String) {
+        if let index = conversations.firstIndex(where: { $0.id == threadID }) {
+            conversations[index].messages.append(contentsOf: messages)
+            conversations[index].preview = preview
+            conversations[index].lastActivity = Date()
+        } else if var draft = composeDrafts[threadID] {
+            draft.sent.append(contentsOf: messages)
+            draft.awaitingConversationSince = Date()
+            composeDrafts[threadID] = draft
+        }
+    }
+
+    /// Hands a batch to Messages item by item, after whatever was accepted before it. The first
+    /// frame shows the bubbles before the transport (which blocks the main thread while Messages
+    /// takes the message) runs.
+    private func submit(_ batch: Outbound) async {
+        try? await Task.sleep(for: .milliseconds(16))
+        var anySubmitted = false
+        for entry in batch.items {
+            do {
+                try await serialized { [transport] in
+                    switch entry.item {
+                    case .text(let text): try await transport.send(text: text, to: batch.target)
+                    case .file(let url): try await transport.send(file: url, to: batch.target)
+                    }
+                }
+                setSendState(.submitted, of: entry.message.presentationID, in: batch.threadID)
+                anySubmitted = true
+            } catch {
+                setSendState(.failed(error.localizedDescription), of: entry.message.presentationID, in: batch.threadID)
+                sendErrors[batch.threadID] = error.localizedDescription
             }
         }
-        guard !delivered.isEmpty else { return }
-        noteUse(id)
-        markSeen(id)
+        guard anySubmitted else { return }
         if isLive { lastLoad = nil; await refresh() }
-        else if let index = conversations.firstIndex(where: { $0.id == id }) {
+        else if let index = conversations.firstIndex(where: { $0.id == batch.threadID }) {
             // Demo sending stays local. No invented replies or real recipients.
             conversations[index].unreadCount = 0
         }
     }
-
-    /// Where a message goes: an existing conversation, or a person who has no chat yet.
-    enum SendTarget { case chat(String), participant(handle: String, service: String) }
-
-    /// Hands the files, then the text, to Messages (or, in the demo, to nobody), appending a
-    /// pending bubble for each as it goes out and dropping each sent file from the composer. Stops
-    /// at the first failure and returns its description; what did go out stays delivered. The
-    /// files are copied into Messages' folder first, the one place its sandbox reads from.
-    private func deliver(text: String, files: [OutgoingAttachment], from tileID: String, to target: SendTarget, delivered: inout [Message]) -> String? {
-        for file in files {
-            if isLive {
-                do {
-                    let staged = try OutgoingFiles.stage(file.url)
-                    // NSAppleScript is executed on the main actor, as required by Foundation.
-                    switch target {
-                    case .chat(let id): try MessagesBridge.send(filePath: staged.path, conversationID: id)
-                    case .participant(let handle, let service): try MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
-                    }
-                    OutgoingFiles.scheduleRemoval(of: staged)
-                } catch { return error.localizedDescription }
-            }
-            let message = file.pendingMessage()
-            delivered.append(message)
-            instantly { outgoing[tileID]?.removeAll { $0.id == file.id }; if outgoing[tileID]?.isEmpty == true { outgoing[tileID] = nil } }
-            if isLive { pending[Self.pendingKey(for: target, tileID: tileID), default: []].append(message) }
+    /// Runs transport work after all transport work accepted before it.
+    private func serialized(_ work: @escaping @MainActor () async throws -> Void) async throws {
+        let previous = submissionChain
+        let task = Task { @MainActor in
+            await previous.value
+            try await work()
         }
-        guard !text.isEmpty else { return nil }
-        if isLive {
-            do {
-                switch target {
-                case .chat(let id): try MessagesBridge.send(text: text, conversationID: id)
-                case .participant(let handle, let service): try MessagesBridge.send(text: text, toNewRecipient: handle, service: service)
-                }
-            } catch { return error.localizedDescription }
-        }
-        let message = Message(id: "pending-\(UUID().uuidString)", text: text, date: Date(), isFromMe: true)
-        delivered.append(message)
-        if isLive { pending[Self.pendingKey(for: target, tileID: tileID), default: []].append(message) }
-        return nil
+        submissionChain = Task { _ = try? await task.value }
+        try await task.value
     }
-    private static func pendingKey(for target: SendTarget, tileID: String) -> String {
-        if case .chat(let id) = target { return id }
-        return tileID
+    /// Updates a local message's state wherever it is shown. A refused message leaves the pending
+    /// list: it must not claim a later row.
+    private func setSendState(_ state: SendState, of presentationID: String, in threadID: String) {
+        instantly {
+            if let index = conversations.firstIndex(where: { $0.id == threadID }),
+               let position = conversations[index].messages.firstIndex(where: { $0.presentationID == presentationID }) {
+                conversations[index].messages[position].sendState = state
+            } else if var draft = composeDrafts[threadID], let position = draft.sent.firstIndex(where: { $0.presentationID == presentationID }) {
+                draft.sent[position].sendState = state
+                composeDrafts[threadID] = draft
+            }
+        }
+        if state.isFailed { pending[threadID]?.removeAll { $0.presentationID == presentationID } }
+        else if case .submitted = state, let position = pending[threadID]?.firstIndex(where: { $0.presentationID == presentationID }) {
+            pending[threadID]?[position].sendState = .submitted
+        }
+    }
+    /// The local message with this identity, wherever it is shown.
+    private func localMessage(_ presentationID: String, in threadID: String) -> Message? {
+        conversations.first { $0.id == threadID }?.messages.first { $0.presentationID == presentationID }
+            ?? composeDrafts[threadID]?.sent.first { $0.presentationID == presentationID }
+    }
+    /// Sends a refused message again, as it was.
+    func retrySend(_ presentationID: String, in threadID: String) async {
+        guard let message = localMessage(presentationID, in: threadID), message.sendState?.isFailed == true, canSend else { return }
+        let target: SendTarget
+        if conversations.contains(where: { $0.id == threadID }) { target = .chat(threadID) }
+        else if let draft = composeDrafts[threadID], draft.recipients.count == 1, let recipient = draft.recipients.first {
+            target = .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage")
+        } else { return }
+        let item: Outbound.Item
+        if let path = message.attachments.first?.path { item = .file(URL(fileURLWithPath: path)) } else { item = .text(message.text) }
+        setSendState(.sending, of: presentationID, in: threadID)
+        var fresh = message
+        fresh.sendState = .sending
+        pending[threadID, default: []].append(fresh)
+        sendErrors[threadID] = nil
+        await submit(Outbound(target: target, threadID: threadID, items: [(item, fresh)]))
+    }
+    /// Takes a refused message out of the thread; its text goes back into the composer and its
+    /// file back into the composer's strip, so it can be changed and sent again.
+    func reclaimFailedSend(_ presentationID: String, in threadID: String) {
+        guard let message = localMessage(presentationID, in: threadID), message.sendState?.isFailed == true else { return }
+        discardFailedSend(presentationID, in: threadID)
+        instantly {
+            if let path = message.attachments.first?.path { outgoing[threadID, default: []].append(OutgoingAttachment(url: URL(fileURLWithPath: path))) }
+            else if !message.text.isEmpty { drafts[threadID] = [drafts[threadID] ?? "", message.text].filter { !$0.isEmpty }.joined(separator: "\n") }
+        }
+    }
+    /// Removes a refused message from the thread.
+    func discardFailedSend(_ presentationID: String, in threadID: String) {
+        instantly {
+            if let index = conversations.firstIndex(where: { $0.id == threadID }) {
+                conversations[index].messages.removeAll { $0.presentationID == presentationID && $0.sendState?.isFailed == true }
+            } else if var draft = composeDrafts[threadID] {
+                draft.sent.removeAll { $0.presentationID == presentationID && $0.sendState?.isFailed == true }
+                composeDrafts[threadID] = draft
+            }
+            if sendErrors[threadID] != nil, localFailures(in: threadID) == 0 { sendErrors[threadID] = nil }
+        }
+    }
+    private func localFailures(in threadID: String) -> Int {
+        (conversations.first { $0.id == threadID }?.messages ?? composeDrafts[threadID]?.sent ?? []).filter { $0.sendState?.isFailed == true }.count
     }
     /// The sidebar preview after a send: the text, else what the last file was.
-    static func preview(text: String, files: [OutgoingAttachment], delivered: [Message]) -> String {
+    static func preview(text: String, files: [OutgoingAttachment]) -> String {
         if !text.isEmpty { return text }
-        return files.last { file in delivered.contains { $0.attachments.first?.id == file.id } }?.previewText ?? "Attachment"
+        return files.last?.previewText ?? "Attachment"
     }
 
     // MARK: Attachments
 
-    /// Adds files to a tile's composer, to go out with its next message.
+    /// Adds files that exist now (chosen in a panel, dropped, pasted from Finder) to a tile's composer.
     func attach(_ urls: [URL], to id: String) {
         guard !urls.isEmpty, openIDs.contains(id) else { return }
-        instantly { outgoing[id, default: []] += urls.map(OutgoingAttachment.init) }
+        instantly { outgoing[id, default: []] += urls.map { OutgoingAttachment(url: $0) } }
     }
     /// Adds a pasted or dropped picture to a tile's composer. The file is written off the main
     /// thread, behind a placeholder.
     func attachPicture(_ data: Data, type: UTType, to id: String) {
-        guard openIDs.contains(id) else { return }
-        beginAddingAttachments(1, to: id)
+        guard let slot = beginImports(1, to: id).first else { return }
         Task.detached(priority: .userInitiated) {
             let url = try? OutgoingFiles.store(data, type: type)
-            await MainActor.run {
-                self.finishAddingAttachment(url, to: id)
-                if url == nil { self.sendErrors[id] = "Couldn't keep the pasted picture." }
-            }
+            await MainActor.run { self.completeImport(slot, url: url, in: id, failure: "The pasted picture couldn't be kept.") }
         }
     }
-    /// This many files are on their way into a tile's composer; each then arrives through
-    /// `finishAddingAttachment` (nil for one that could not be read).
-    func beginAddingAttachments(_ count: Int, to id: String) {
-        guard count > 0, openIDs.contains(id) else { return }
-        instantly { outgoingLoading[id, default: 0] += count }
+    /// Reserves places in a tile's composer for this many files on their way in, in the order
+    /// chosen; each then arrives through `completeImport`. Returns the places' identities.
+    func beginImports(_ count: Int, to id: String) -> [String] {
+        guard count > 0, openIDs.contains(id) else { return [] }
+        let slots = (0..<count).map { _ in OutgoingAttachment.importing() }
+        instantly { outgoing[id, default: []] += slots }
+        return slots.map(\.id)
     }
-    func finishAddingAttachment(_ url: URL?, to id: String) {
+    /// A file arrived for a reserved place (or failed to). A place that is gone — the tile was
+    /// closed or replaced — takes nothing, and a file written for it is removed.
+    func completeImport(_ slot: String, url: URL?, in id: String, failure: String = "This photo couldn't be added.") {
+        guard let index = outgoing[id]?.firstIndex(where: { $0.id == slot }) else {
+            if let url, OutgoingFiles.isOwned(url) { try? FileManager.default.removeItem(at: url) }
+            return
+        }
         instantly {
-            if let remaining = outgoingLoading[id] { outgoingLoading[id] = remaining > 1 ? remaining - 1 : nil }
-            if let url, openIDs.contains(id) { outgoing[id, default: []].append(OutgoingAttachment(url: url)) }
+            if let url { outgoing[id]?[index].url = url; outgoing[id]?[index].state = .ready }
+            else { outgoing[id]?[index].state = .failed(failure) }
         }
+        if outgoing[id]?.contains(where: { $0.state == .importing }) != true { resumeImportWaiters(for: id) }
+    }
+    /// Suspends until none of the tile's files is still arriving (or the tile goes away).
+    private func awaitImports(_ id: String) async {
+        guard outgoing[id]?.contains(where: { $0.state == .importing }) == true else { return }
+        await withCheckedContinuation { importWaiters[id, default: []].append($0) }
+    }
+    private func resumeImportWaiters(for id: String) {
+        guard let waiting = importWaiters.removeValue(forKey: id) else { return }
+        for continuation in waiting { continuation.resume() }
     }
     func removeAttachment(_ attachmentID: String, from id: String) {
         guard let file = outgoing[id]?.first(where: { $0.id == attachmentID }) else { return }
         instantly {
             outgoing[id]?.removeAll { $0.id == attachmentID }
             if outgoing[id]?.isEmpty == true { outgoing[id] = nil }
+            if outgoing[id]?.contains(where: { $0.state.isFailed }) != true, sendErrors[id]?.contains("couldn't be added") == true { sendErrors[id] = nil }
         }
         // A picture Mosaic wrote for this message is not needed any more; a chosen file is the user's.
-        if file.url.path.hasPrefix(OutgoingFiles.pendingDirectory.path) { try? FileManager.default.removeItem(at: file.url) }
+        if file.isOwnedByMosaic, let url = file.url { try? FileManager.default.removeItem(at: url) }
+        if outgoing[id]?.contains(where: { $0.state == .importing }) != true { resumeImportWaiters(for: id) }
     }
 
     // MARK: New messages
@@ -669,66 +820,27 @@ import MosaicCore
     /// Sends a new message: to the conversation that has these people, or, for one new person, by
     /// asking Messages to start the conversation. Messages cannot start a new group from another
     /// app, so a new group is handed to Messages itself.
-    /// Photos still arriving from the picker when Return is pressed get a moment to land, so the
-    /// message goes out with them rather than without.
-    private func waitForArrivingAttachments(_ id: String) async {
-        var waited = 0
-        while (outgoingLoading[id] ?? 0) > 0, waited < 300 {
-            try? await Task.sleep(for: .milliseconds(50))
-            waited += 1
-        }
-    }
-
     private func sendCompose(_ draftID: String) async {
         guard let draft = composeDrafts[draftID] else { return }
-        await waitForArrivingAttachments(draftID)
-        let originalDraft = drafts[draftID] ?? ""
-        let text = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let files = outgoing[draftID] ?? []
-        guard !text.isEmpty || !files.isEmpty, !sendingIDs.contains(draftID) else { return }
         guard !draft.recipients.isEmpty else { sendErrors[draftID] = "Add at least one recipient."; return }
-        guard canSend else { sendErrors[draftID] = "Connect Messages before sending."; return }
-        let target = draft.boundConversationID.flatMap { id in conversations.first { $0.id == id } } ?? conversation(with: draft.recipients)
-        sendingIDs.insert(draftID); sendErrors[draftID] = nil
-        defer { sendingIDs.remove(draftID) }
-        var delivered: [Message] = []
-        if let target {
-            let failure = deliver(text: text, files: files, from: draftID, to: .chat(target.id), delivered: &delivered)
-            if let failure { sendErrors[draftID] = failure }
-            guard !delivered.isEmpty else { return }
-            instantly {
-                if failure == nil, drafts[draftID] == originalDraft { drafts[draftID] = nil }
-                if let index = conversations.firstIndex(where: { $0.id == target.id }) {
-                    conversations[index].messages.append(contentsOf: delivered)
-                    conversations[index].preview = Self.preview(text: failure == nil ? text : "", files: files, delivered: delivered)
-                    conversations[index].lastActivity = Date()
-                }
-                // A failure keeps what is left in the draft tile; otherwise the tile becomes the conversation.
-                if failure == nil { replaceTile(draftID, with: target.id) }
-            }
-            markSeen(target.id)
-            if isLive { lastLoad = nil; await refresh() }
+        guard await readyToSend(draftID), let current = composeDrafts[draftID] else { return }
+        // The conversation these people already have, else a new one Messages creates for one person.
+        if let target = current.boundConversationID.flatMap({ id in conversations.first { $0.id == id } }) ?? conversation(with: current.recipients) {
+            guard let batch = acceptSend(from: draftID, to: .chat(target.id), into: target.id) else { return }
+            // The tile becomes the conversation now; the sending bubbles are already in it.
+            instantly { replaceTile(draftID, with: target.id) }
+            await submit(batch)
             return
         }
-        guard draft.recipients.count == 1, let recipient = draft.recipients.first else {
+        guard current.recipients.count == 1, let recipient = current.recipients.first else {
             sendErrors[draftID] = "Messages can't start a new group from another app. Start it in Messages — it will appear here once it exists."
-            openMessages(addresses: draft.recipients.map(\.address))
+            openMessages(addresses: current.recipients.map(\.address))
             return
         }
-        let failure = deliver(text: text, files: files, from: draftID,
-                              to: .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage"), delivered: &delivered)
-        if let failure { sendErrors[draftID] = failure }
-        guard !delivered.isEmpty else { return }
         // The conversation appears in the database once Messages has created it; the tile adopts
         // it then (adoptConversations). Until then what was sent is shown in the draft tile.
-        var waiting = draft
-        waiting.sent.append(contentsOf: delivered)
-        waiting.awaitingConversationSince = Date()
-        instantly {
-            if failure == nil, drafts[draftID] == originalDraft { drafts[draftID] = "" }
-            composeDrafts[draftID] = waiting
-        }
-        if isLive { lastLoad = nil; await refresh() }
+        guard let batch = acceptSend(from: draftID, to: .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage"), into: draftID) else { return }
+        await submit(batch)
     }
     /// Swaps a new-message tile for the conversation it turned out to be.
     private func replaceTile(_ draftID: String, with conversationID: String) {

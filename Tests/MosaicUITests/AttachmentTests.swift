@@ -116,31 +116,56 @@ final class AttachmentTests: XCTestCase {
         XCTAssertNil(store.outgoing[id])
     }
 
-    /// Photos from the picker arrive behind placeholders; a Return pressed while one is still on
-    /// its way waits for it, so the message goes out with the photo rather than without.
-    @MainActor func testArrivingPhotosShowPlaceholdersAndSendWaitsForThem() async throws {
+    /// Photos from the picker take reserved places in the order chosen, whichever finishes first;
+    /// a Return pressed while one is still on its way waits for it, and a photo that could not be
+    /// added stops the send with a note rather than being left out quietly.
+    @MainActor func testImportsKeepTheirOrderAndASendWaitsForThem() async throws {
         let directory = try temporaryDirectory()
-        let photo = directory.appending(path: "photo.png")
-        try pngData().write(to: photo)
+        let first = directory.appending(path: "first.png"), third = directory.appending(path: "third.png")
+        try pngData().write(to: first); try pngData().write(to: third)
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         let id = store.workspace.openIDs[0]
         let before = store.conversations[0].messages.count
-        store.beginAddingAttachments(2, to: id)
-        XCTAssertEqual(store.outgoingLoading[id], 2)
-        store.finishAddingAttachment(nil, to: id)
-        XCTAssertEqual(store.outgoingLoading[id], 1, "one that could not be read just goes away")
-        XCTAssertNil(store.outgoing[id])
-        Task { try? await Task.sleep(for: .milliseconds(150)); store.finishAddingAttachment(photo, to: id) }
-        store.workspace.drafts[id] = "Here it is"
+        let slots = store.beginImports(3, to: id)
+        XCTAssertEqual(slots.count, 3)
+        XCTAssertEqual(store.outgoing[id]?.map(\.state), [.importing, .importing, .importing])
+        // The third finishes first, then the second fails, then the first lands: the order holds.
+        store.completeImport(slots[2], url: third, in: id)
+        store.completeImport(slots[1], url: nil, in: id)
+        XCTAssertEqual(store.outgoing[id]?.map(\.name), ["Photo", "Photo", "third.png"])
+        store.workspace.drafts[id] = "Here they are"
+        let sendTask = Task { await store.send(id) }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.sendNotes[id], "Waiting for photos to finish adding…")
+        XCTAssertEqual(store.conversations[0].messages.count, before, "nothing goes out while a photo is still arriving")
+        store.completeImport(slots[0], url: first, in: id)
+        await sendTask.value
+        XCTAssertNil(store.sendNotes[id])
+        XCTAssertEqual(store.conversations[0].messages.count, before, "a photo that could not be added stops the send")
+        XCTAssertEqual(store.sendErrors[id], "Photo couldn't be added. Remove it or add it again, then send.")
+        XCTAssertEqual(store.workspace.drafts[id], "Here they are", "the text is kept")
+        // Removing the failed one lets the send go, with the files in the order chosen, then the text.
+        store.removeAttachment(slots[1], from: id)
+        XCTAssertNil(store.sendErrors[id])
         await store.send(id)
-        XCTAssertNil(store.outgoingLoading[id])
         let messages = store.conversations[0].messages
-        XCTAssertEqual(messages.count, before + 2)
-        XCTAssertEqual(messages[before].attachments.first?.path, photo.path, "the late photo went out first")
-        XCTAssertEqual(messages[before + 1].text, "Here it is")
+        XCTAssertEqual(messages.count, before + 3)
+        XCTAssertEqual(messages[before].attachments.first?.path, first.path)
+        XCTAssertEqual(messages[before + 1].attachments.first?.path, third.path)
+        XCTAssertEqual(messages[before + 2].text, "Here they are")
+        XCTAssertEqual(messages.suffix(3).map(\.sendState), [.submitted, .submitted, .submitted])
         XCTAssertNil(store.outgoing[id])
-        store.beginAddingAttachments(1, to: "not-open")
-        XCTAssertNil(store.outgoingLoading["not-open"])
+        XCTAssertEqual(store.workspace.drafts[id], "")
+        // A place in a tile that was closed takes nothing; a file written for it is removed.
+        let late = store.beginImports(1, to: id)[0]
+        let owned = OutgoingFiles.pendingDirectory.appending(path: "MosaicTest-late-\(UUID().uuidString).png")
+        try FileManager.default.createDirectory(at: OutgoingFiles.pendingDirectory, withIntermediateDirectories: true)
+        try pngData().write(to: owned)
+        store.close(id)
+        store.completeImport(late, url: owned, in: id)
+        XCTAssertNil(store.outgoing[id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: owned.path), "an import for a closed tile is cleaned up")
+        XCTAssertTrue(store.beginImports(1, to: "not-open").isEmpty)
     }
 
     /// The Photos grid's selection keeps the order chosen, and a video's length reads as in Photos.

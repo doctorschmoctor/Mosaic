@@ -108,19 +108,20 @@ struct ConversationTile: View {
         VStack(spacing: 7) {
             if let error = store.sendErrors[conversation.id] {
                 Text(error).font(.system(size: 11)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
+            } else if let note = store.sendNotes[conversation.id] {
+                Text(note).font(.system(size: 11)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
             HStack(alignment: .bottom, spacing: 8) {
                 // Photos and files, as in Messages.
                 AttachmentMenuButton(conversationName: conversation.name,
                     onFiles: { urls in store.attach(urls, to: conversation.id) },
-                    onBeginAdding: { count in store.beginAddingAttachments(count, to: conversation.id) },
-                    onAdded: { url in store.finishAddingAttachment(url, to: conversation.id) })
+                    onBeginAdding: { count in store.beginImports(count, to: conversation.id) },
+                    onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) })
                     .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.minimumHeight - 31) / 2)
                 VStack(spacing: 0) {
-                    let files = store.outgoing[conversation.id] ?? [], loading = store.outgoingLoading[conversation.id] ?? 0
-                    if !files.isEmpty || loading > 0 {
+                    if let files = store.outgoing[conversation.id], !files.isEmpty {
                         // Pictures and files going out with the next message, above the text.
-                        AttachmentStrip(files: files, loading: loading) { store.removeAttachment($0, from: conversation.id) }
+                        AttachmentStrip(files: files) { store.removeAttachment($0, from: conversation.id) }
                     }
                     ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
                         accessibilityLabel: "Message to \(conversation.name)",
@@ -203,7 +204,7 @@ struct MessageList: View, Equatable {
                             Text(day).font(.system(size: 10, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4)
                         }
-                        MessageBubble(message: row.message, group: conversation.isGroup,
+                        MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
                                       senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
                                       live: isLive, service: conversation.service,
                                       showsStatus: row.showsStatus, showsTime: row.showsTime)
@@ -312,7 +313,10 @@ enum MessageText {
 }
 
 struct MessageBubble: View {
+    @Environment(WorkspaceStore.self) private var store
     let message: Message
+    /// The conversation (or New Message tile) the message is shown in, for retrying a refused send.
+    var threadID = ""
     let group: Bool
     let senderName: String?
     let live: Bool
@@ -350,23 +354,48 @@ struct MessageBubble: View {
                         ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
                             Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
                         }
+                        failedSendActions
                     }
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
-            if showsTime || (fromMe && showsStatus && (message.isRead || message.isDelivered)) {
+            if showsTime || message.sendState != nil || (fromMe && showsStatus && (message.isRead || message.isDelivered)) {
                 HStack(spacing: 4) {
                     Text(MessageText.time(message.date))
                     if fromMe {
-                        // A sent message shows only its time until Messages reports delivery.
-                        if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
-                        else if showsStatus && message.isRead { Text("· Read") }
-                        else if showsStatus && message.isDelivered { Text("· Delivered") }
+                        switch message.sendState {
+                        // Being handed to Messages, handed over, or refused: the database has not
+                        // reported the message, so this is Mosaic's own state, never "Delivered".
+                        case .sending: Text("· Sending…")
+                        case .submitted: Text("· Sent")
+                        case .failed:
+                            Text("· Not Delivered").foregroundStyle(.red)
+                            Button("Try Again") { Task { await store.retrySend(message.presentationID, in: threadID) } }
+                                .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                        case nil:
+                            // A sent message shows only its time until Messages reports delivery.
+                            if message.error != 0 { Text("· Failed").foregroundStyle(.red) }
+                            else if showsStatus && message.isRead { Text("· Read") }
+                            else if showsStatus && message.isDelivered { Text("· Delivered") }
+                        }
                     }
                 }.font(.system(size: 9)).foregroundStyle(.tertiary).padding(.horizontal, 3)
+                .contextMenu { failedSendActions }
             }
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
         .padding(fromMe ? .leading : .trailing, 36)
+    }
+
+    /// What can be done with a message Messages refused: send it as it was, take it back into the
+    /// composer to change it, or remove it. Nothing is ever resent on its own.
+    @ViewBuilder private var failedSendActions: some View {
+        if case .failed(let reason)? = message.sendState {
+            Divider()
+            Text(reason)
+            Button("Try Again") { Task { await store.retrySend(message.presentationID, in: threadID) } }
+            Button(message.attachments.isEmpty ? "Edit Message" : "Put Back in Composer") { store.reclaimFailedSend(message.presentationID, in: threadID) }
+            Button("Delete", role: .destructive) { store.discardFailedSend(message.presentationID, in: threadID) }
+        }
     }
 
     /// Attributed (clickable links) only when the message has a link; plain text lays out faster.

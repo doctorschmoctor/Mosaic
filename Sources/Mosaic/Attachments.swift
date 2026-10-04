@@ -10,22 +10,44 @@ import MosaicCore
 
 // MARK: - Model
 
-/// A file waiting in a composer to go out with the next message: a pasted or dropped picture, a
-/// photo from the library, a GIF, or a chosen file.
+/// A file waiting in a composer to go out with the next message — a pasted or dropped picture, a
+/// photo from the library, or a chosen file — or the place reserved for one still on its way in.
 struct OutgoingAttachment: Identifiable, Equatable {
+    enum State: Equatable {
+        /// Reserved; the file is being fetched or written.
+        case importing
+        case ready
+        case failed(String)
+        var isFailed: Bool { if case .failed = self { return true } else { return false } }
+    }
     let id: String
-    /// The file to send. Pasted pictures and picked photos live in Mosaic's outgoing folder; a
-    /// chosen file stays where it is.
-    let url: URL
+    /// The file to send, once it is here. Pasted pictures and picked photos live in Mosaic's
+    /// outgoing folder; a chosen file stays where it is.
+    var url: URL?
+    var state: State
+
     init(url: URL) {
         id = "outgoing-\(UUID().uuidString)"
         self.url = url
+        state = .ready
     }
-    var name: String { url.lastPathComponent }
+    static func importing() -> OutgoingAttachment { OutgoingAttachment(importing: ()) }
+    private init(importing: Void) {
+        id = "outgoing-\(UUID().uuidString)"
+        url = nil
+        state = .importing
+    }
+    var name: String { url?.lastPathComponent ?? "Photo" }
+    /// Whether the file is one Mosaic wrote (and may remove), not one the user chose.
+    var isOwnedByMosaic: Bool { url.map(OutgoingFiles.isOwned) ?? false }
+    /// The file as a message attachment, with its size (read from disk) for matching the row
+    /// Messages later writes for it.
     var attachment: Attachment {
-        Attachment(id: id, path: url.path, name: name, uti: UTType(filenameExtension: url.pathExtension)?.identifier)
+        let path = url?.path
+        let size = path.flatMap { (try? FileManager.default.attributesOfItem(atPath: $0)[.size] as? NSNumber)?.intValue }
+        return Attachment(id: id, path: path, name: name, uti: url.flatMap { UTType(filenameExtension: $0.pathExtension)?.identifier }, byteCount: size)
     }
-    var kind: Attachment.Kind { attachment.kind }
+    var kind: Attachment.Kind { Attachment(id: id, path: url?.path, name: name, uti: url.flatMap { UTType(filenameExtension: $0.pathExtension)?.identifier }).kind }
     /// The bubble shown while Messages takes the file; the real message replaces it.
     func pendingMessage(date: Date = Date()) -> Message {
         Message(id: "pending-\(UUID().uuidString)", text: "", date: date, isFromMe: true, attachments: [attachment])
@@ -33,7 +55,7 @@ struct OutgoingAttachment: Identifiable, Equatable {
     /// How the sidebar previews a message that is only this file.
     var previewText: String {
         switch kind {
-        case .image: return url.pathExtension.lowercased() == "gif" ? "GIF" : "Photo"
+        case .image: return url?.pathExtension.lowercased() == "gif" ? "GIF" : "Photo"
         case .video: return "Video"
         case .audio: return "Audio"
         case .file: return name
@@ -51,6 +73,8 @@ enum OutgoingFiles {
     static let home = FileManager.default.homeDirectoryForCurrentUser
     static var pendingDirectory: URL { home.appending(path: "Library/Application Support/Mosaic/Outgoing") }
     static var stagingDirectory: URL { home.appending(path: "Library/Messages/.mosaic-outgoing") }
+    /// Whether a file is in Mosaic's own outgoing folder (one it wrote, and may remove).
+    static func isOwned(_ url: URL) -> Bool { url.path.hasPrefix(pendingDirectory.path) }
 
     /// Writes picture data (pasted or dropped) as its own file. TIFF, the clipboard's native
     /// picture format, is converted to PNG; everything else keeps its format (a GIF stays animated).
@@ -76,7 +100,8 @@ enum OutgoingFiles {
     /// A small thumbnail for the composer strip, quickly: a camera file's embedded preview when it
     /// has one, else a reduced decode; videos go through Quick Look at strip size.
     static func quickThumbnail(for file: OutgoingAttachment, maxPixelSize: Int = 240) async -> NSImage? {
-        let url = file.url, kind = file.kind
+        guard let url = file.url else { return nil }
+        let kind = file.kind
         return await Task.detached(priority: .userInitiated) { () -> NSImage? in
             if kind == .image, let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
                 let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
@@ -144,18 +169,18 @@ enum OutgoingFiles {
 
 // MARK: - Composer strip
 
-/// The files waiting in a composer, as thumbnails above the text, each with a remove badge, plus a
-/// placeholder for every file still on its way in (from the Photos picker, or a picture being written).
+/// The files waiting in a composer, as thumbnails above the text in the order they were added,
+/// each with a remove badge: a placeholder while one is still on its way in, a warning for one
+/// that could not be added.
 struct AttachmentStrip: View {
     let files: [OutgoingAttachment]
-    var loading = 0
     let onRemove: (String) -> Void
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 10) {
                 ForEach(files) { file in
-                    OutgoingThumbnail(file: file)
+                    slot(file)
                         .overlay(alignment: .topTrailing) {
                             Button { onRemove(file.id) } label: {
                                 Image(systemName: "xmark.circle.fill").font(.system(size: 15))
@@ -165,17 +190,28 @@ struct AttachmentStrip: View {
                             .accessibilityLabel("Remove \(file.name)")
                         }
                 }
-                ForEach(0..<max(0, loading), id: \.self) { _ in
-                    RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
-                        .frame(width: 60, height: 60)
-                        .overlay { ProgressView().controlSize(.small) }
-                        .accessibilityLabel("Adding a photo")
-                }
             }
             .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
         }
         .scrollClipDisabled()
         .frame(height: 72)
+    }
+    @ViewBuilder private func slot(_ file: OutgoingAttachment) -> some View {
+        switch file.state {
+        case .ready:
+            OutgoingThumbnail(file: file)
+        case .importing:
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
+                .frame(width: 60, height: 60)
+                .overlay { ProgressView().controlSize(.small) }
+                .accessibilityLabel("Adding a photo")
+        case .failed(let reason):
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
+                .frame(width: 60, height: 60)
+                .overlay { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                .help(reason)
+                .accessibilityLabel("Could not add this file: \(reason)")
+        }
     }
 }
 
@@ -190,7 +226,7 @@ struct OutgoingThumbnail: View {
                 Image(nsImage: image).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
             } else if file.kind == .file || file.kind == .audio {
                 VStack(spacing: 3) {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: file.url.path)).resizable().frame(width: 26, height: 26)
+                    Image(nsImage: file.url.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSWorkspace.shared.icon(for: .data)).resizable().frame(width: 26, height: 26)
                     Text(file.name).font(.system(size: 8)).lineLimit(1).foregroundStyle(.secondary).padding(.horizontal, 3)
                 }
             } else {
@@ -201,8 +237,8 @@ struct OutgoingThumbnail: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .help(file.name)
         .accessibilityLabel(file.previewText)
-        .task(id: file.id) {
-            guard image == nil, file.kind == .image || file.kind == .video else { return }
+        .task(id: file.url) {
+            guard image == nil, file.url != nil, file.kind == .image || file.kind == .video else { return }
             image = await OutgoingFiles.quickThumbnail(for: file)
         }
     }
@@ -217,10 +253,11 @@ struct AttachmentMenuButton: NSViewRepresentable {
     let conversationName: String
     /// Files ready to attach now (chosen in the file panel).
     let onFiles: ([URL]) -> Void
-    /// This many photos are on their way from the Photos picker; each then arrives through
-    /// `onAdded` (nil when one could not be read), so the strip can show them coming.
-    let onBeginAdding: (Int) -> Void
-    let onAdded: (URL?) -> Void
+    /// This many photos are on their way from the Photos picker, in the order chosen; the places
+    /// reserved for them come back, and each photo then arrives at its place through `onAdded`
+    /// (nil when one could not be read), whichever finishes first.
+    let onBeginAdding: (Int) -> [String]
+    let onAdded: (String, URL?) -> Void
 
     func makeNSView(context: Context) -> PlusButtonView { let view = PlusButtonView(); configure(view); return view }
     func updateNSView(_ view: PlusButtonView, context: Context) { configure(view) }
@@ -235,8 +272,8 @@ struct AttachmentMenuButton: NSViewRepresentable {
 
     final class PlusButtonView: NSView, NSPopoverDelegate {
         var onFiles: (([URL]) -> Void)?
-        var onBeginAdding: ((Int) -> Void)?
-        var onAdded: ((URL?) -> Void)?
+        var onBeginAdding: ((Int) -> [String])?
+        var onAdded: ((String, URL?) -> Void)?
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
         private var trackingArea: NSTrackingArea?
@@ -301,12 +338,11 @@ struct AttachmentMenuButton: NSViewRepresentable {
                 onCancel: { [weak popover] in popover?.close() },
                 onAdd: { [weak self, weak popover] assets in
                     popover?.close()
-                    guard let self, !assets.isEmpty else { return }
-                    self.onBeginAdding?(assets.count)
+                    guard let self, !assets.isEmpty, let slots = self.onBeginAdding?(assets.count), slots.count == assets.count else { return }
                     Task { @MainActor in
-                        await withTaskGroup(of: URL?.self) { group in
-                            for asset in assets { group.addTask { await PhotoLibraryExport.file(for: asset) } }
-                            for await url in group { self.onAdded?(url) }
+                        await withTaskGroup(of: (String, URL?).self) { group in
+                            for (slot, asset) in zip(slots, assets) { group.addTask { (slot, await PhotoLibraryExport.file(for: asset)) } }
+                            for await (slot, url) in group { self.onAdded?(slot, url) }
                         }
                     }
                 })

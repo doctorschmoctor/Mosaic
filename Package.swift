@@ -10,7 +10,7 @@ let package = Package(
         .target(name: "MosaicCore", dependencies: ["CSQLite"]),
         .executableTarget(name: "Mosaic", dependencies: ["MosaicCore"]),
         .testTarget(name: "MosaicCoreTests", dependencies: ["MosaicCore", "CSQLite"]),
-        .testTarget(name: "MosaicUITests", dependencies: ["Mosaic", "MosaicCore"])
+        .testTarget(name: "MosaicUITests", dependencies: ["Mosaic", "MosaicCore", "CSQLite"])
     ],
     swiftLanguageModes: [.v5]
 )
