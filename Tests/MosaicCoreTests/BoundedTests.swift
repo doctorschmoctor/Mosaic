@@ -54,7 +54,9 @@ final class BoundedTests: XCTestCase {
         let holder = Task { try await limiter.run { await gate.wait() } }
         while await limiter.runningCount == 0 { await Task.yield() }
         let waiter = Task { () -> String in
-            do { _ = try await limiter.run { "ran" }; return "ran" } catch is CancellationError { return "cancelled" }
+            do { _ = try await limiter.run { "ran" }; return "ran" }
+            catch is CancellationError { return "cancelled" }
+            catch { return "other" }
         }
         while await limiter.waitingCount == 0 { await Task.yield() }
         waiter.cancel()
