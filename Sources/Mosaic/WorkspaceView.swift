@@ -556,7 +556,7 @@ extension KeyboardRouter {
     enum ZoomAction { case zoomIn, zoomOut, reset }
     /// The zoom keys, by the character the press stands for: = and + zoom in (⌘= is the unshifted
     /// plus key), - and _ zoom out, 0 resets. Keypad + and - arrive as the same characters.
-    static func zoomAction(for key: String) -> ZoomAction? {
+    nonisolated static func zoomAction(for key: String) -> ZoomAction? {
         switch key {
         case "=", "+": return .zoomIn
         case "-", "_": return .zoomOut
