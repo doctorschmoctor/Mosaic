@@ -20,7 +20,15 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 ## Install
 
-Requires macOS 14 or later; Xcode 16 / Swift 6 to build. No dependencies.
+Requires macOS 14 or later on Apple silicon.
+
+1. Download the disk image from the [latest release](https://github.com/doctorschmoctor/Mosaic/releases/latest) and open it.
+2. Drag **Mosaic** onto the **Applications** folder beside it.
+3. Open Mosaic from Applications. macOS will say it can't verify the app the first time, because the build is signed locally rather than notarized with Apple. Allow it once: on macOS 15, close the warning, open **System Settings › Privacy & Security**, scroll down and press **Open Anyway**; on macOS 14, right-click Mosaic in Applications and choose **Open**.
+
+### Build it yourself
+
+Xcode 16 / Swift 6; no dependencies.
 
 ```sh
 git clone git@github.com:doctorschmoctor/Mosaic.git
@@ -99,6 +107,8 @@ Message history, thumbnails, link previews and contact names stay in memory. Mos
 ```
 
 CI runs the tests, builds the app and renders the preview on every push. Launch with `--demo` for the fictional workspace. After adding source files, run `python3 scripts/generate-xcode-project.py`.
+
+To publish a release: set the version in `Resources/Info.plist` (`CFBundleShortVersionString`, and raise `CFBundleVersion`), commit, then tag that commit `v<version>` and push the tag. CI builds and tests as usual, packages the app as a disk image (`scripts/make-dmg.sh`, which mounts the image and verifies the signature inside), and publishes a GitHub Release with the `.dmg` and `.zip` and generated notes. The build is ad-hoc signed; to ship without the Gatekeeper warning, sign with a Developer ID (`MOSAIC_SIGNING_IDENTITY` in `build-app.sh`) and notarize.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the window, tiles, scrolling and database reading are built, and why.
 - [docs/VALIDATION.md](docs/VALIDATION.md) — what the tests cover and what still needs a real account.

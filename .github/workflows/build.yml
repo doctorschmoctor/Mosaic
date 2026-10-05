@@ -1,5 +1,9 @@
 name: macOS build and tests
-on: [push, pull_request]
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
 jobs:
   verify:
     runs-on: macos-15
@@ -21,3 +25,47 @@ jobs:
         with:
           name: Mosaic-preview
           path: build/preview/*.png
+
+  # A version tag (v0.3.0) publishes a GitHub Release with the disk image and the archive, from
+  # the same tested build. The tag must match the version in Resources/Info.plist.
+  release:
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mosaic-macOS
+          path: build
+      - name: Check the tag against the app's version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
+          [ "${GITHUB_REF_NAME}" = "v${VERSION}" ] || { echo "Tag ${GITHUB_REF_NAME} does not match version ${VERSION} in Resources/Info.plist" >&2; exit 1; }
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+      - name: Make the disk image
+        run: ./scripts/make-dmg.sh "build/Mosaic-${VERSION}.dmg" && cp build/Mosaic.zip "build/Mosaic-${VERSION}.zip"
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "## Install"
+            echo
+            echo "1. Download **Mosaic-${VERSION}.dmg** below and open it."
+            echo "2. Drag **Mosaic** onto the **Applications** folder beside it."
+            echo "3. Open Mosaic from Applications."
+            echo
+            echo "macOS will say it can't verify the app the first time, because this build is not notarized with Apple (it is signed locally). Allow it once:"
+            echo
+            echo "- **macOS 15 (Sequoia):** close the warning, open **System Settings › Privacy & Security**, scroll down and press **Open Anyway** next to Mosaic, then open it again."
+            echo "- **macOS 14 (Sonoma):** right-click (or Control-click) Mosaic in Applications, choose **Open**, then **Open** in the dialog."
+            echo
+            echo "Then follow **Connect Messages** in the app (Full Disk Access, and the Automation prompt on your first send). Requires macOS 14 or later on Apple silicon."
+            echo
+            echo "## What's new"
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" "build/Mosaic-${VERSION}.dmg" "build/Mosaic-${VERSION}.zip" \
+            --title "Mosaic ${VERSION}" --notes-file notes.md --generate-notes --verify-tag
