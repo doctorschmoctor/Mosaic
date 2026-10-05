@@ -168,6 +168,30 @@ final class AttachmentTests: XCTestCase {
         XCTAssertTrue(store.beginImports(1, to: "not-open").isEmpty)
     }
 
+    /// Chosen photos are written out a few at a time, starting in the order chosen, and every one
+    /// lands at its own place — the ones that could not be written too.
+    @MainActor func testPhotoExportsRunAFewAtATimeAndEveryOneLands() async {
+        let gauge = ExportGauge()
+        let items = (0..<10).map { "photo\($0)" }
+        let slots = (0..<10).map { "slot\($0)" }
+        var landed: [(slot: String, url: URL?)] = []
+        await PhotoLibraryExport.export(items, slots: slots, write: { item in
+            await gauge.enter(item)
+            try? await Task.sleep(for: .milliseconds(15))
+            await gauge.leave()
+            return item == "photo4" ? nil : URL(fileURLWithPath: "/tmp/\(item).heic")
+        }) { slot, url in landed.append((slot, url)) }
+        XCTAssertEqual(Set(landed.map(\.slot)), Set(slots))
+        XCTAssertEqual(landed.count, 10)
+        XCTAssertNil(landed.first { $0.slot == "slot4" }?.url ?? nil)
+        XCTAssertEqual(landed.first { $0.slot == "slot7" }?.url?.lastPathComponent, "photo7.heic")
+        let peak = await gauge.peak
+        XCTAssertEqual(PhotoLibraryExport.concurrentExports, 3)
+        XCTAssertLessThanOrEqual(peak, PhotoLibraryExport.concurrentExports)
+        let started = await gauge.order
+        XCTAssertEqual(Array(started.prefix(3)).sorted(), ["photo0", "photo1", "photo2"], "the first ones chosen start first")
+    }
+
     /// The Photos grid's selection keeps the order chosen, and a video's length reads as in Photos.
     @MainActor func testPhotoLibrarySelectionOrderAndDurations() {
         let model = PhotoLibraryModel()
@@ -312,4 +336,12 @@ final class AttachmentTests: XCTestCase {
         try Data().write(to: folder.appending(path: "notes"))
         XCTAssertEqual(SavedFiles.freeName(for: "notes", in: folder).lastPathComponent, "notes 2")
     }
+}
+
+private actor ExportGauge {
+    private var current = 0
+    private(set) var peak = 0
+    private(set) var order: [String] = []
+    func enter(_ item: String) { order.append(item); current += 1; peak = max(peak, current) }
+    func leave() { current -= 1 }
 }

@@ -305,6 +305,35 @@ private final class LibraryObserver: NSObject, PHPhotoLibraryChangeObserver {
 /// Writes a chosen picture or video, as the file Photos holds (edited version when there is one),
 /// into Mosaic's outgoing folder.
 enum PhotoLibraryExport {
+    /// How many items are written out at once. Photos may download each one from iCloud and
+    /// writes it progressively, so a large selection all at once would contend for the disk and
+    /// the network (and every item would arrive late).
+    static let concurrentExports = 3
+
+    /// Writes out chosen items, at most `limit` at a time, starting in the order chosen; each
+    /// lands at its reserved place (`slots`, in the same order) as it finishes, nil when it could
+    /// not be written.
+    @MainActor static func export<Item>(_ items: [Item], slots: [String], limit: Int = concurrentExports,
+                                        write: @escaping @Sendable (Item) async -> URL?,
+                                        landed: (String, URL?) -> Void) async {
+        var waiting = Array(zip(slots, items)).makeIterator()
+        await withTaskGroup(of: (String, URL?).self) { group in
+            var started = 0
+            while started < max(1, limit), let next = waiting.next() {
+                let slot = next.0, item = next.1
+                group.addTask { (slot, await write(item)) }
+                started += 1
+            }
+            while let finished = await group.next() {
+                landed(finished.0, finished.1)
+                if let next = waiting.next() {
+                    let slot = next.0, item = next.1
+                    group.addTask { (slot, await write(item)) }
+                }
+            }
+        }
+    }
+
     static func file(for asset: PHAsset, in directory: URL = OutgoingFiles.pendingDirectory) async -> URL? {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred: [PHAssetResourceType] = asset.mediaType == .video ? [.fullSizeVideo, .video] : [.fullSizePhoto, .photo]
@@ -316,6 +345,8 @@ enum PhotoLibraryExport {
         options.isNetworkAccessAllowed = true
         return await withCheckedContinuation { continuation in
             PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
+                // Photos writes the file as the data comes; a failed write leaves part of one behind.
+                if error != nil { try? FileManager.default.removeItem(at: url) }
                 continuation.resume(returning: error == nil ? url : nil)
             }
         }

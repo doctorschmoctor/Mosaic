@@ -369,7 +369,7 @@ struct AttachmentMenuButton: NSViewRepresentable {
         }
 
         /// Mosaic's Photos grid, in a popover card from this button. Chosen pictures show up in the
-        /// composer behind placeholders at once and are written out all at the same time.
+        /// composer behind placeholders at once and are written out a few at a time.
         @objc private func pickPhotos() {
             photosPopover?.close()
             let popover = NSPopover()
@@ -385,10 +385,10 @@ struct AttachmentMenuButton: NSViewRepresentable {
                     popover?.close()
                     self?.onFinish?()
                     guard let self, !assets.isEmpty, let slots = self.onBeginAdding?(assets.count), slots.count == assets.count else { return }
+                    // A few at a time, in the order chosen; each lands at its place as it finishes.
                     Task { @MainActor in
-                        await withTaskGroup(of: (String, URL?).self) { group in
-                            for (slot, asset) in zip(slots, assets) { group.addTask { (slot, await PhotoLibraryExport.file(for: asset)) } }
-                            for await (slot, url) in group { self.onAdded?(slot, url) }
+                        await PhotoLibraryExport.export(assets, slots: slots, write: { asset in await PhotoLibraryExport.file(for: asset) }) { slot, url in
+                            self.onAdded?(slot, url)
                         }
                     }
                 })
