@@ -949,8 +949,8 @@ import MosaicCore
     }
 
     /// Hands a batch to Messages item by item, after whatever was accepted before it. The first
-    /// frame shows the bubbles before the transport (which blocks the main thread while Messages
-    /// takes the message) runs.
+    /// frame shows the bubbles before the transport runs (it waits for Messages in a helper
+    /// process, but its in-process fallback would hold the main thread).
     private func submit(_ batch: Outbound) async {
         try? await Task.sleep(for: .milliseconds(16))
         var anySubmitted = false

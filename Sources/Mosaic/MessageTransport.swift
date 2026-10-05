@@ -39,25 +39,26 @@ struct TransportError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// The live transport: Messages' AppleScript dictionary through `MessagesBridge`. NSAppleScript
-/// runs on the main thread, as Foundation requires, so a send blocks the main thread for as long
-/// as Messages takes to accept it. Files are staged in Messages' own folder first (see
-/// `OutgoingFiles.stage`), the one place its sandbox reads attachments from.
+/// The live transport: Messages' AppleScript dictionary through `MessagesBridge`, which runs each
+/// send in a helper process, so the window stays responsive however long Messages takes to accept
+/// it. Sends still go one at a time, in order (the store chains them). Files are staged in
+/// Messages' own folder first (see `OutgoingFiles.stage`), the one place its sandbox reads
+/// attachments from.
 @MainActor final class AppleScriptTransport: MessageTransport {
     let capabilities = TransportCapabilities.messagesAppleScript
     func send(text: String, to target: SendTarget) async throws {
         switch target {
-        case .chat(let id): try MessagesBridge.send(text: text, conversationID: id)
-        case .participant(let handle, let service): try MessagesBridge.send(text: text, toNewRecipient: handle, service: service)
+        case .chat(let id): try await MessagesBridge.send(text: text, conversationID: id)
+        case .participant(let handle, let service): try await MessagesBridge.send(text: text, toNewRecipient: handle, service: service)
         }
     }
     func send(file: URL, to target: SendTarget) async throws {
-        // The copy is made off the main thread; the hand-off to Messages stays on it.
+        // The copy is made off the main thread, and the hand-off to Messages runs in the helper.
         let staged = try await OutgoingFiles.stageInBackground(file)
         do {
             switch target {
-            case .chat(let id): try MessagesBridge.send(filePath: staged.path, conversationID: id)
-            case .participant(let handle, let service): try MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
+            case .chat(let id): try await MessagesBridge.send(filePath: staged.path, conversationID: id)
+            case .participant(let handle, let service): try await MessagesBridge.send(filePath: staged.path, toNewRecipient: handle, service: service)
             }
         } catch {
             // Refused: Messages took nothing, so the staged copy goes now (never the original).
