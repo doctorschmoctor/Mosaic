@@ -17,6 +17,8 @@ import SwiftUI
     }
 }
 
+@MainActor final class Tally { var count = 0 }
+
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     app.setActivationPolicy(.regular)
@@ -67,10 +69,10 @@ MainActor.assumeIsolated {
         }
         return seen
     }
-    nonisolated(unsafe) var failures = 0
+    let failures = Tally()
     @MainActor func report(_ name: String, expected: String, _ trace: [String]) {
         let ok = trace.last == "composer(\(expected.prefix(14)))"
-        if !ok { failures += 1 }
+        if !ok { failures.count += 1 }
         print("\(ok ? "PASS" : "FAIL") \(name): \(trace.joined(separator: " → "))  [expected composer(\(expected.prefix(14)))]")
         fflush(stdout)
     }
@@ -115,8 +117,8 @@ MainActor.assumeIsolated {
             key(36, "\r"); report("Return in search", expected: first, await watch())
             store.search = ""
         }
-        print("FAILURES \(failures)")
-        exit(failures == 0 ? 0 : 1)
+        print("FAILURES \(failures.count)")
+        exit(failures.count == 0 ? 0 : 1)
     }
     app.run()
 }
