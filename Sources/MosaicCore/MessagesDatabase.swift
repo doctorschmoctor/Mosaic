@@ -57,19 +57,32 @@ public struct LoadRequest: Equatable, Sendable {
     /// The newest row the reader has seen in each conversation. Incoming messages after it are
     /// counted as unread; a conversation without a boundary counts nothing.
     public var seenBoundaries: [String: Int64]
+    /// Messages a tile shows above its newest page (it scrolled back for them, see
+    /// `MessagesReader.earlierPage`), by conversation. The load does not read them again; it
+    /// looks up the reactions on them too, so their badges stay current.
+    public var earlierRows: [String: EarlierRows]
     public init(openIDs: Set<String>, limit: Int = 500, historyLimits: [String: Int] = [:], defaultHistoryLimit: Int = 100,
-                seenBoundaries: [String: Int64] = [:]) {
+                seenBoundaries: [String: Int64] = [:], earlierRows: [String: EarlierRows] = [:]) {
         self.openIDs = openIDs; self.limit = limit; self.historyLimits = historyLimits; self.defaultHistoryLimit = defaultHistoryLimit
-        self.seenBoundaries = seenBoundaries
+        self.seenBoundaries = seenBoundaries; self.earlierRows = earlierRows
     }
     public func historyLimit(for id: String) -> Int { historyLimits[id] ?? defaultHistoryLimit }
     /// Two requests load the same content when they cover the same conversations to the same
     /// depth. Seen boundaries are left out: reading a message moves a boundary, and that alone
     /// should not cost a load (the reader's own count is cleared locally until the next change).
+    /// So are earlier rows: they came with their own reactions, and change only what a load
+    /// that runs anyway (the database changed) looks up.
     public static func == (lhs: LoadRequest, rhs: LoadRequest) -> Bool {
         lhs.openIDs == rhs.openIDs && lhs.limit == rhs.limit && lhs.historyLimits == rhs.historyLimits
             && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit
     }
+}
+
+/// Messages a tile already shows above its newest page: their GUIDs and the oldest one's time.
+public struct EarlierRows: Equatable, Sendable {
+    public var guids: Set<String>
+    public var oldest: Date
+    public init(guids: Set<String>, oldest: Date) { self.guids = guids; self.oldest = oldest }
 }
 
 /// Marks the state of the database a load saw: SQLite's `data_version` on the reader's own
@@ -164,7 +177,30 @@ public final class MessagesReader: @unchecked Sendable {
     public func pageSync(forChat guid: String, limit: Int = 100) throws -> ThreadPage? {
         try queue.sync { try self.pageNow(forChat: guid, limit: limit) }
     }
-    private func pageNow(forChat guid: String, limit: Int) throws -> ThreadPage? {
+    /// The `limit` messages just before a loaded one (oldest first) — a tile scrolling back. The
+    /// cursor is the loaded message's row: rows older by date, and among equal dates by row, are
+    /// read, and nothing newer is read or decoded again. When that row is gone (deleted in
+    /// Messages), its `date` places the page. Fewer than `limit` messages means the conversation's
+    /// first message is among them. Nil when the conversation is not in the database.
+    public func earlierPage(forChat guid: String, before rowID: Int64, date: Date, limit: Int = 100) async throws -> ThreadPage? {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.pageNow(forChat: guid, limit: limit, before: HistoryCursor(rowID: rowID, date: date))) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func earlierPageSync(forChat guid: String, before rowID: Int64, date: Date, limit: Int = 100) throws -> ThreadPage? {
+        try queue.sync { try self.pageNow(forChat: guid, limit: limit, before: HistoryCursor(rowID: rowID, date: date)) }
+    }
+    /// Where an earlier page ends: the loaded message it comes before.
+    struct HistoryCursor {
+        let rowID: Int64
+        let date: Date
+        /// The time as Messages stores it (nanoseconds), for when the row itself is gone.
+        var rawDate: Int64 { Int64((date.timeIntervalSinceReferenceDate * 1_000_000_000).rounded()) }
+    }
+    private func pageNow(forChat guid: String, limit: Int, before cursor: HistoryCursor? = nil) throws -> ThreadPage? {
         do {
             let db = try openIfNeeded()
             try execute(db, "BEGIN DEFERRED")
@@ -174,7 +210,7 @@ public final class MessagesReader: @unchecked Sendable {
             defer { recycle(lookup) }
             bind(lookup, 1, guid)
             guard sqlite3_step(lookup) == SQLITE_ROW else { return nil }
-            let thread = try history(db, chatID: sqlite3_column_int64(lookup, 0), schema: schema, limit: limit)
+            let thread = try history(db, chatID: sqlite3_column_int64(lookup, 0), schema: schema, limit: limit, before: cursor)
             return ThreadPage(messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced)
         } catch let error as DatabaseError {
             if case .sqlite = error { closeConnection() }
@@ -322,7 +358,9 @@ public final class MessagesReader: @unchecked Sendable {
             let fallback = members.isEmpty ? (summary.identifier ?? "Conversation") : members.joined(separator: ", ")
             let name = summary.displayName.isEmpty ? fallback : summary.displayName
             let guid = summary.guid
-            let thread = request.openIDs.contains(guid) ? try history(db, chatID: summary.rowID, schema: schema, limit: request.historyLimit(for: guid)) : LoadedThread()
+            let thread = request.openIDs.contains(guid)
+                ? try history(db, chatID: summary.rowID, schema: schema, limit: request.historyLimit(for: guid), earlier: request.earlierRows[guid])
+                : LoadedThread()
             let unread = try request.seenBoundaries[guid].map { boundary in
                 summary.lastID > boundary ? try unreadCount(db, chatID: summary.rowID, schema: schema, after: boundary) : 0
             } ?? 0
@@ -334,7 +372,7 @@ public final class MessagesReader: @unchecked Sendable {
         }
         for chat in pinned {
             let members = membersByChat[chat.rowID] ?? []
-            let thread = try history(db, chatID: chat.rowID, schema: schema, limit: request.historyLimit(for: chat.guid))
+            let thread = try history(db, chatID: chat.rowID, schema: schema, limit: request.historyLimit(for: chat.guid), earlier: request.earlierRows[chat.guid])
             conversations.append(Conversation(id: chat.guid, databaseID: chat.rowID,
                 name: chat.displayName.isEmpty ? (members.isEmpty ? (chat.identifier ?? chat.guid) : members.joined(separator: ", ")) : chat.displayName,
                 participants: members, service: chat.service ?? "iMessage", preview: thread.messages.last?.text ?? "",
@@ -399,13 +437,20 @@ public final class MessagesReader: @unchecked Sendable {
         return Int(sqlite3_column_int(statement, 0))
     }
 
-    /// The newest `limit` messages of a chat (oldest first) and the reactions on them. Reaction
-    /// rows are not messages: they are left out of the page and loaded by their targets, so a
-    /// burst of Tapbacks never pushes real messages out of view.
-    private func history(_ db: OpaquePointer, chatID: Int64, schema: Schema, limit: Int) throws -> LoadedThread {
+    /// The newest `limit` messages of a chat (oldest first) and the reactions on them — or, with
+    /// a cursor, the `limit` messages just before it. Reaction rows are not messages: they are
+    /// left out of the page and loaded by their targets, so a burst of Tapbacks never pushes real
+    /// messages out of view. `earlier` names messages a tile shows above this page, whose
+    /// reactions are looked up with the page's.
+    private func history(_ db: OpaquePointer, chatID: Int64, schema: Schema, limit: Int,
+                         before cursor: HistoryCursor? = nil, earlier: EarlierRows? = nil) throws -> LoadedThread {
         func col(_ name: String, _ prefix: String = "m", _ fallback: String = "0") -> String { schema.col(name, prefix: prefix, fallback: fallback) }
         let hasAssociation = schema.message.contains("associated_message_type")
         let notReaction = hasAssociation ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
+        // Before a cursor: older by date, and by row among equal dates (SQLite's row values), so
+        // pages meet without repeating or skipping a message. The cursor row's own date is read
+        // from the database; the one given is used only when the row is gone.
+        let older = cursor == nil ? "" : "AND (m.date, m.ROWID) < (COALESCE((SELECT date FROM message WHERE ROWID = ?3), ?4), ?3)"
         let statement = try cached(db, """
             SELECT m.ROWID, m.text, \(col("attributedBody", "m", "NULL")), m.date, m.is_from_me, h.id,
                    \(col("is_delivered")), \(col("is_read")), \(col("error")), \(col("cache_has_attachments")),
@@ -414,11 +459,15 @@ public final class MessagesReader: @unchecked Sendable {
                    \(col("date_edited", "m", "NULL")), \(col("date_retracted", "m", "NULL"))
             FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
             LEFT JOIN handle h ON h.ROWID = m.handle_id
-            WHERE j.chat_id = ? \(notReaction) ORDER BY m.date DESC, m.ROWID DESC LIMIT ?
+            WHERE j.chat_id = ?1 \(notReaction) \(older) ORDER BY m.date DESC, m.ROWID DESC LIMIT ?2
             """)
         defer { recycle(statement) }
         sqlite3_bind_int64(statement, 1, chatID)
         sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 1000))))
+        if let cursor {
+            sqlite3_bind_int64(statement, 3, cursor.rowID)
+            sqlite3_bind_int64(statement, 4, cursor.rawDate)
+        }
         struct Row {
             let id: Int64; let text: String; let date: Date; let isFromMe: Bool; let sender: String?
             let attachmentCount: Int; let association: Int32; let itemType: Int32
@@ -463,8 +512,11 @@ public final class MessagesReader: @unchecked Sendable {
                 kind: activity ? .activity : .message, guid: row.guid, replyToGUID: row.replyToGUID, replyToPart: row.replyToPart,
                 dateEdited: row.edited, dateRetracted: row.retracted))
         }
+        // The page's reactions, and those on the earlier messages shown above it.
+        let pageOldest = rows.last.map(\.date)
+        let since = [pageOldest, earlier?.oldest].compactMap { $0 }.min()
         let reactions = hasAssociation && schema.message.contains("associated_message_guid")
-            ? try reactions(db, chatID: chatID, schema: schema, targets: Set(rows.compactMap(\.guid)), since: rows.last.map(\.date))
+            ? try reactions(db, chatID: chatID, schema: schema, targets: Set(rows.compactMap(\.guid)).union(earlier?.guids ?? []), since: since)
             : []
         let pageGUIDs = Set(rows.compactMap(\.guid))
         let missing = Set(rows.compactMap(\.replyToGUID)).subtracting(pageGUIDs)

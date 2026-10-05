@@ -197,17 +197,64 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertTrue(store.tilesWithNews.isEmpty)
     }
 
-    /// Earlier messages load one step at a time: asking again while a step is loading does nothing.
-    @MainActor func testEarlierMessagesLoadOneStepAtATime() async throws {
-        let (store, _) = try await liveStore(transport: RecordingTransport())
+    /// Older messages from Alex, above the fixture's two: pairs of them share a moment.
+    private func insertEarlier(_ count: Int, at path: String) {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var sql = "BEGIN;"
+        for n in 0..<count {
+            let date = 690_000_000_000_000_000 + Int64(n / 2) * 1_000_000_000
+            sql += "INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('E\(n)', 'old\(n)', \(date), 0, 1); INSERT INTO chat_message_join VALUES (1, last_insert_rowid());"
+        }
+        XCTAssertEqual(sqlite3_exec(db, sql + "COMMIT;", nil, nil, nil), SQLITE_OK)
+    }
+
+    /// Scrolling back reads only the 100 messages before the oldest one shown — by a cursor, one
+    /// step at a time, asking again while a step loads does nothing — and puts them above the
+    /// others without repeats or gaps, equal times included. Later loads read only the newest
+    /// page: the earlier messages stay above it and new ones arrive below.
+    @MainActor func testEarlierMessagesLoadByCursorOneStepAtATime() async throws {
+        let (store, path) = try await liveStore(transport: RecordingTransport())
+        store.open(Self.alex)
+        insertEarlier(248, at: path)
+        await store.refresh()
+        func texts() -> [String] { store.conversations.first { $0.id == Self.alex }?.messages.map(\.text) ?? [] }
+        XCTAssertEqual(texts(), (150..<248).map { "old\($0)" } + ["Hello", "Hi!"], "a load reads the newest 100")
         store.loadMore(Self.alex)
         store.loadMore(Self.alex)
         XCTAssertEqual(store.historyLimits[Self.alex], 200)
         XCTAssertTrue(store.loadingMore.contains(Self.alex))
         for _ in 0..<200 where store.loadingMore.contains(Self.alex) { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertFalse(store.loadingMore.contains(Self.alex))
+        XCTAssertEqual(texts(), (50..<248).map { "old\($0)" } + ["Hello", "Hi!"], "the 100 before the oldest shown, once each")
+        // A new message: the load reads the newest page; the earlier ones stay above it, within the depth asked for.
+        receive("Fresh", at: path)
+        await store.refresh()
+        XCTAssertEqual(texts(), (51..<248).map { "old\($0)" } + ["Hello", "Hi!", "Fresh"])
+        // The next step reaches the first message.
         store.loadMore(Self.alex)
         XCTAssertEqual(store.historyLimits[Self.alex], 300)
+        for _ in 0..<200 where store.loadingMore.contains(Self.alex) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(texts(), (0..<248).map { "old\($0)" } + ["Hello", "Hi!", "Fresh"])
+        let ids = store.conversations.first { $0.id == Self.alex }?.messages.map(\.id) ?? []
+        XCTAssertEqual(Set(ids).count, ids.count)
+        // Closing the tile lets the earlier messages go; it opens on its newest page again.
+        store.close(Self.alex)
+        XCTAssertNil(store.historyLimits[Self.alex])
+    }
+
+    /// Earlier messages are kept only where they meet the newest page; when more than a page
+    /// arrives at once they would leave a gap, and the tile starts over from the newest page.
+    @MainActor func testEarlierMessagesNeverLeaveAGap() {
+        func message(_ row: Int) -> Message {
+            Message(id: String(row), text: "m\(row)", date: Date(timeIntervalSinceReferenceDate: TimeInterval(row)), isFromMe: false)
+        }
+        let shown = Conversation(id: "c", name: "C", participants: [], messages: (1...6).map(message))
+        let slid = Conversation(id: "c", name: "C", participants: [], messages: (4...8).map(message))
+        XCTAssertEqual(WorkspaceStore.keepingEarlier(of: shown, in: slid, depth: 7)?.messages.map(\.id), ["2", "3", "4", "5", "6", "7", "8"])
+        let jumped = Conversation(id: "c", name: "C", participants: [], messages: (10...12).map(message))
+        XCTAssertNil(WorkspaceStore.keepingEarlier(of: shown, in: jumped, depth: 7))
     }
 
     /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it

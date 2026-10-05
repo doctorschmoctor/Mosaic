@@ -323,6 +323,37 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(LoadRequest(openIDs: [], seenBoundaries: [alex: 1]), LoadRequest(openIDs: []), "boundaries alone do not make a different load")
     }
 
+    /// Earlier pages follow a (date, row) cursor: paged back two at a time, a history whose
+    /// messages share moments comes back whole, in order, each message once. A cursor whose row
+    /// was deleted places the page by its time.
+    func testEarlierPagesFollowAStableCursorWithoutRepeatsOrGaps() throws {
+        let base: Int64 = 710_000_000_000_000_000
+        let dates = [0, 1, 1, 1, 2, 3, 3].map { base + Int64($0) * 1_000_000_000 }
+        var sql = ""
+        for (n, date) in dates.enumerated() {
+            sql += "INSERT INTO message VALUES ('m\(n)',NULL,\(date),0,1,0,0,0,0,0,0,0); INSERT INTO chat_message_join VALUES (1, last_insert_rowid());"
+        }
+        execute(sql)
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let all = try XCTUnwrap(try reader.pageSync(forChat: alex, limit: 100)).messages.map(\.text)
+        XCTAssertEqual(all, ["First", "Second", "m0", "m1", "m2", "m3", "m4", "m5", "m6"])
+        var shown = try XCTUnwrap(try reader.pageSync(forChat: alex, limit: 2)).messages
+        XCTAssertEqual(shown.map(\.text), ["m5", "m6"])
+        for _ in 0..<10 {
+            let oldest = shown[0]
+            let page = try XCTUnwrap(try reader.earlierPageSync(forChat: alex, before: try XCTUnwrap(Int64(oldest.id)), date: oldest.date, limit: 2))
+            shown = page.messages + shown
+            if page.messages.count < 2 { break }
+        }
+        XCTAssertEqual(shown.map(\.text), all)
+        XCTAssertEqual(Set(shown.map(\.id)).count, shown.count)
+        let m3 = try XCTUnwrap(shown.first { $0.text == "m3" })
+        execute("DELETE FROM chat_message_join WHERE message_id = \(m3.id); DELETE FROM message WHERE ROWID = \(m3.id);")
+        let placed = try XCTUnwrap(try reader.earlierPageSync(forChat: alex, before: try XCTUnwrap(Int64(m3.id)), date: m3.date, limit: 10))
+        XCTAssertEqual(placed.messages.map(\.text), ["First", "Second", "m0", "m1", "m2"])
+        XCTAssertNil(try reader.earlierPageSync(forChat: "iMessage;-;nobody@example.test", before: 1, date: m3.date))
+    }
+
     /// One conversation's page on its own, for a tile that just opened; unknown conversations have none.
     func testASingleConversationPageLoadsOnItsOwn() throws {
         let reader = MessagesReader(database: MessagesDatabase(path: path))

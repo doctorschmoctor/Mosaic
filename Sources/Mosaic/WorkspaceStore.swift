@@ -62,6 +62,9 @@ import MosaicCore
     /// A line under a composer about its send: waiting for photos, or why a send stopped.
     var sendNotes: [String: String] = [:]
     var showSetup = false
+    /// How many messages each open tile asked to show (100, then 100 more each time it scrolls
+    /// back, up to 1,000). Loads read only each tile's newest 100; the earlier ones a tile paged
+    /// in are kept above them (see `keepingEarlier`).
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
     var contactStatus: String?
@@ -352,7 +355,7 @@ import MosaicCore
         let reader = self.reader
         let requestGeneration = generation
         Task {
-            guard let page = try? await reader.page(forChat: id, limit: historyLimits[id] ?? 100) else { return }
+            guard let page = try? await reader.page(forChat: id, limit: Self.pageSize) else { return }
             guard generation == requestGeneration else { return }
             remember(page, for: id)
             apply(page, to: id)
@@ -728,10 +731,11 @@ import MosaicCore
 
     private func performRefresh(background: Bool = false) async {
         let requestGeneration = generation
-        // Each open tile gets exactly the history depth it asked for; the reader skips the load
-        // when nothing was committed since the last one and the request is the same.
-        let request = LoadRequest(openIDs: Set(openIDs), historyLimits: historyLimits, defaultHistoryLimit: 100,
-                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) })
+        // Each open tile's newest 100 messages; earlier ones a tile paged in are not read again,
+        // only the reactions on them. The reader skips the load when nothing was committed since
+        // the last one and the request is the same.
+        let request = LoadRequest(openIDs: Set(openIDs), historyLimits: [:], defaultHistoryLimit: Self.pageSize,
+                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, earlierRows: earlierRowsShown())
         do {
             let snapshot = try await reader.load(request, unlessUnchangedFrom: lastLoad, background: background)
             guard generation == requestGeneration, isLive else { return }
@@ -757,6 +761,17 @@ import MosaicCore
                     loaded[index].messages = previous.messages
                     loaded[index].reactions = previous.reactions
                     loaded[index].referencedMessages = previous.referencedMessages
+                }
+                // A tile that scrolled back keeps the earlier messages it shows above the newest
+                // page, which is all a load reads.
+                if ids.contains(id), let depth = historyLimits[id], depth > Self.pageSize, let previous {
+                    if let kept = Self.keepingEarlier(of: previous, in: loaded[index], depth: depth) {
+                        loaded[index] = kept
+                    } else if !loadingMore.contains(id) {
+                        // More than a page arrived at once: what the tile showed no longer meets
+                        // the newest page. It starts over from there rather than show a gap.
+                        historyLimits[id] = nil
+                    }
                 }
                 // Remove a submitted bubble when an outgoing row with the same text and a recent date appears.
                 let reconciled = MessageReconciler.merge(loaded: loaded[index].messages, previous: previous?.messages ?? [], pending: pending[id] ?? [])
@@ -844,17 +859,88 @@ import MosaicCore
         }
     }
 
-    /// Loads the next 100 earlier messages of a conversation (up to 1,000), once at a time: the
-    /// thread asks as the reader scrolls near the top of what is loaded.
+    /// How many messages a load reads per tile, and how many each step back adds.
+    static let pageSize = 100
+    /// The most a tile shows.
+    static let maximumHistory = 1000
+
+    /// Loads the 100 messages before the oldest one a tile shows (up to 1,000 in all), one step
+    /// at a time: the thread asks as the reader scrolls near the top of what is loaded. Only those
+    /// rows are read — by a (date, row) cursor at the oldest shown message — and they are put
+    /// above the others by message ID; nothing else is loaded again, in this tile or any other.
     func loadMore(_ id: String) {
-        let limit = historyLimits[id] ?? 100
-        guard isLive, !loadingMore.contains(id), limit < 1000 else { return }
+        let depth = historyLimits[id] ?? Self.pageSize
+        guard isLive, !loadingMore.contains(id), depth < Self.maximumHistory,
+              let oldest = conversations.first(where: { $0.id == id })?.messages.first(where: { $0.sendState == nil }),
+              let rowID = Int64(oldest.id) else { return }
+        let step = min(Self.pageSize, Self.maximumHistory - depth)
         loadingMore.insert(id)
-        historyLimits[id] = min(1000, limit + 100)
+        historyLimits[id] = depth + step
+        let reader = self.reader
+        let requestGeneration = generation
         Task {
-            await refresh()
+            let page = try? await reader.earlierPage(forChat: id, before: rowID, date: oldest.date, limit: step)
             loadingMore.remove(id)
+            // The tile closed (or was replaced) meanwhile: its depth started over, and the page goes.
+            guard generation == requestGeneration, openIDs.contains(id), historyLimits[id] == depth + step else { return }
+            // Not readable now: the step can be asked for again.
+            guard let page else { historyLimits[id] = depth; return }
+            // The page joins the message it was read before; if that is no longer the oldest the
+            // tile shows (a burst of new messages replaced them), it would leave a gap: it goes.
+            let shown = conversations.first { $0.id == id }?.messages.filter { $0.sendState == nil } ?? []
+            guard shown.first?.id == oldest.id else {
+                historyLimits[id] = shown.count > Self.pageSize ? shown.count : nil
+                return
+            }
+            addEarlier(page, to: id)
         }
+    }
+    /// Puts a page of earlier messages above what a tile shows, with their reactions and the
+    /// originals their replies quote. A message the tile already has is not added twice.
+    private func addEarlier(_ page: ThreadPage, to id: String) {
+        guard let index = conversations.firstIndex(where: { $0.id == id }), !page.messages.isEmpty else { return }
+        var conversation = conversations[index]
+        let known = Set(conversation.messages.map(\.id))
+        conversation.messages = page.messages.filter { !known.contains($0.id) } + conversation.messages
+        let knownReactions = Set(conversation.reactions.map(\.id))
+        conversation.reactions = page.reactions.filter { !knownReactions.contains($0.id) } + conversation.reactions
+        conversation.referencedMessages.merge(page.referencedMessages) { current, _ in current }
+        instantly { conversations[index] = conversation }
+    }
+    /// What a load needs to know of the earlier messages open tiles show above their newest page:
+    /// which they are, so their reactions are looked up too.
+    private func earlierRowsShown() -> [String: EarlierRows] {
+        var rows: [String: EarlierRows] = [:]
+        for id in openIDs where (historyLimits[id] ?? Self.pageSize) > Self.pageSize {
+            guard let shown = conversations.first(where: { $0.id == id })?.messages.filter({ $0.sendState == nil }),
+                  let oldest = shown.first else { continue }
+            rows[id] = EarlierRows(guids: Set(shown.compactMap(\.guid)), oldest: oldest.date)
+        }
+        return rows
+    }
+    /// A loaded conversation with the earlier messages its tile showed above the newest page
+    /// (`loaded` holds only that page): the database rows of `previous` older than the page's
+    /// first message, by date and then row, up to `depth` messages in all. Their reactions came
+    /// with the load; the originals their replies quote are kept from before. Nil when the page
+    /// shares no message with what was shown (more than a page arrived at once), since the
+    /// earlier messages would then not meet the page.
+    static func keepingEarlier(of previous: Conversation, in loaded: Conversation, depth: Int) -> Conversation? {
+        let page = loaded.messages
+        guard let first = page.first else { return loaded }
+        let inPage = Set(page.map(\.id))
+        guard previous.messages.contains(where: { $0.sendState == nil && inPage.contains($0.id) }) else { return nil }
+        let firstRow = Int64(first.id) ?? 0
+        let earlier = previous.messages.filter { message in
+            message.sendState == nil && !inPage.contains(message.id)
+                && (message.date < first.date || (message.date == first.date && (Int64(message.id) ?? 0) < firstRow))
+        }.suffix(max(0, depth - page.count))
+        guard !earlier.isEmpty else { return loaded }
+        var merged = loaded
+        merged.messages = Array(earlier) + page
+        let quoted = Set(earlier.compactMap(\.replyToGUID))
+        merged.referencedMessages = previous.referencedMessages.filter { quoted.contains($0.key) }
+            .merging(loaded.referencedMessages) { _, current in current }
+        return merged
     }
     /// The photo to show for a one-to-one conversation (or a New Message to one person).
     func contactPhoto(for conversation: Conversation) -> NSImage? {
