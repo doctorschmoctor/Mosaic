@@ -1,23 +1,9 @@
-name: macOS build and tests
-on: [push, pull_request]
+name: focus check
+on: [push]
 jobs:
-  verify:
+  focus:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Check Swift toolchain
-        run: swift --version
-      - name: Test workspace and database reader
-        run: ./scripts/test.sh
-      - name: Build signed local app
-        run: ./scripts/build-app.sh
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Mosaic-macOS
-          path: build/Mosaic.zip
-      - name: Render demo preview
-        run: mkdir -p build/preview && ./scripts/render-preview.sh build/preview/workspace.png && .build/MosaicPreview build/preview/workspace-zoom-160.png --demo --zoom 1.6 && .build/MosaicPreview build/preview/workspace-zoom-80.png --demo --zoom 0.8
-      - uses: actions/upload-artifact@v4
-        with:
-          name: Mosaic-preview
-          path: build/preview/*.png
+      - name: Focus check
+        run: ./scripts/focuscheck/run.sh
