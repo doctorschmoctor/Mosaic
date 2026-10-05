@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Contacts
 import ImageIO
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
@@ -365,15 +366,22 @@ struct ConversationRow: View {
 }
 
 /// A conversation's picture: the contact's photo for one person, the group's photo for a group,
-/// else initials (or the group symbol) on a gradient.
+/// else initials (or the group symbol) on a gradient. A contact's photo is fetched when the
+/// avatar is shown, unless it already was.
 struct Avatar: View {
     @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
     let size: CGFloat
     @State private var groupPhoto: NSImage?
+    /// The contact photo this avatar fetched, with the contact it belongs to.
+    @State private var fetched: (contactID: String, image: NSImage)?
 
     var body: some View {
-        let photo = conversation.isGroup ? groupPhoto : store.contactPhoto(for: conversation)
+        let contactID = conversation.isGroup ? nil : store.contactPhotoID(for: conversation)
+        let contactPhoto = contactID.flatMap { id in
+            ContactPhotos.shared.cachedImage(for: id) ?? (fetched?.contactID == id ? fetched?.image : nil)
+        }
+        let photo = conversation.isGroup ? groupPhoto : contactPhoto
         ZStack {
             if let photo {
                 Image(nsImage: photo).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
@@ -390,6 +398,81 @@ struct Avatar: View {
             guard let path = conversation.photoPath else { groupPhoto = nil; return }
             groupPhoto = await AvatarImages.shared.image(at: path)
         }
+        .task(id: ContactPhotoRequest(contactID: contactID, generation: store.contactPhotoGeneration)) {
+            guard let contactID else { fetched = nil; return }
+            if let image = await ContactPhotos.shared.image(for: contactID) { fetched = (contactID, image) }
+        }
+    }
+    private struct ContactPhotoRequest: Hashable { let contactID: String?; let generation: Int }
+}
+
+/// Contact photos for avatars, fetched when an avatar for that contact is shown — never the
+/// whole address book at once. Each is the contact's thumbnail from Contacts, read off the main
+/// thread and decoded small (avatars are at most 36 points); a few are read at a time, avatars
+/// asking for the same contact share one read, the most recent `capacity` are kept in memory,
+/// and a contact without a thumbnail is not asked again until contacts change.
+@MainActor final class ContactPhotos {
+    static let shared = ContactPhotos()
+    typealias Fetch = @Sendable (String) async -> CGImage?
+    private var images: LRUCache<String, NSImage>
+    private var withoutPhoto = LRUCache<String, Bool>(capacity: 500)
+    private let requests = SharedRequests<String, CGImage?>()
+    private let limiter: AsyncLimiter
+    private let fetcher: Fetch
+    /// Reads that ran to the end (tests).
+    private(set) var fetchCount = 0
+    var cachedCount: Int { images.count }
+
+    init(capacity: Int = 200, concurrency: Int = 3, fetch: Fetch? = nil) {
+        images = LRUCache(capacity: capacity)
+        limiter = AsyncLimiter(limit: concurrency)
+        fetcher = fetch ?? { id in await ContactPhotos.thumbnail(forContact: id) }
+    }
+
+    /// The photo when it is already here; nothing is fetched.
+    func cachedImage(for contactID: String) -> NSImage? { images.peek(contactID) }
+
+    func image(for contactID: String) async -> NSImage? {
+        if let hit = images.value(for: contactID) { return hit }
+        if withoutPhoto.contains(contactID) { return nil }
+        let limiter = self.limiter, fetcher = self.fetcher
+        let picture = await requests.value(for: contactID) {
+            Task {
+                do {
+                    let image = try await limiter.run { await fetcher(contactID) }
+                    self.fetchCount += 1
+                    return image
+                } catch {
+                    return nil // given up while waiting: every avatar that wanted it went away
+                }
+            }
+        }
+        guard let picture else {
+            if !Task.isCancelled { withoutPhoto.insert(true, for: contactID) }
+            return nil
+        }
+        if let hit = images.peek(contactID) { return hit }
+        let image = NSImage(cgImage: picture, size: NSSize(width: picture.width, height: picture.height))
+        images.insert(image, for: contactID)
+        return image
+    }
+    /// Contacts changed: photos are fetched again as avatars ask for them.
+    func reset() {
+        images.removeAll()
+        withoutPhoto.removeAll()
+    }
+
+    /// One contact's thumbnail, decoded no larger than avatars need.
+    nonisolated static func thumbnail(forContact contactID: String) async -> CGImage? {
+        await Task.detached(priority: .utility) { () -> CGImage? in
+            let keys = [CNContactThumbnailImageDataKey as CNKeyDescriptor]
+            guard let contact = try? CNContactStore().unifiedContact(withIdentifier: contactID, keysToFetch: keys),
+                  let data = contact.thumbnailImageData,
+                  let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                                            kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: 120]
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        }.value
     }
 }
 

@@ -27,9 +27,12 @@ import MosaicCore
     /// beside its name until it is focused (Tab, a click, Return in the list). Mosaic's own, like
     /// the unread counts: nothing is marked read in Messages, and the list shows no dot for it.
     private(set) var tilesWithNews: Set<String> = []
-    /// Contact photos (Contacts' thumbnails) by comparable address (`Recipient.key`), for the
-    /// avatars of one-to-one conversations. Kept in memory only.
-    private(set) var contactPhotos: [String: NSImage] = [:]
+    /// Which contact each comparable address (`Recipient.key`) belongs to, for contacts that
+    /// have a photo. An avatar fetches the photo itself when it is shown (`ContactPhotos`); the
+    /// address book's pictures are never all loaded.
+    private(set) var contactPhotoIDs: [String: String] = [:]
+    /// Moves on when contacts are loaded again, so avatars on screen fetch their photo again.
+    private(set) var contactPhotoGeneration = 0
     /// Conversations whose earlier messages are being loaded (scrolling near the top of a thread).
     private(set) var loadingMore: Set<String> = []
     var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
@@ -942,10 +945,10 @@ import MosaicCore
             .merging(loaded.referencedMessages) { _, current in current }
         return merged
     }
-    /// The photo to show for a one-to-one conversation (or a New Message to one person).
-    func contactPhoto(for conversation: Conversation) -> NSImage? {
-        guard !conversation.isGroup, let handle = conversation.participants.first, !contactPhotos.isEmpty else { return nil }
-        return contactPhotos[Recipient.key(for: handle)]
+    /// The contact whose photo a one-to-one conversation (or a New Message to one person) shows.
+    func contactPhotoID(for conversation: Conversation) -> String? {
+        guard !conversation.isGroup, let handle = conversation.participants.first, !contactPhotoIDs.isEmpty else { return nil }
+        return contactPhotoIDs[Recipient.key(for: handle)]
     }
 
     /// Return in a composer. The text and the files are taken from the composer at once — what is
@@ -1363,35 +1366,32 @@ import MosaicCore
         isLoadingContacts = true
         defer { isLoadingContacts = false }
         do {
-            let (entries, photos) = try await Task.detached(priority: .userInitiated) { () -> ([ContactNames.Entry], [String: Data]) in
+            // Names and addresses only, and whether each contact has a photo: the photos themselves
+            // are fetched one contact at a time, for the avatars that are shown.
+            let (entries, photoIDs) = try await Task.detached(priority: .userInitiated) { () -> ([ContactNames.Entry], [String: String]) in
                 let request = CNContactFetchRequest(keysToFetch: [CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
                     CNContactIdentifierKey as CNKeyDescriptor, CNContactNicknameKey as CNKeyDescriptor,
                     CNContactOrganizationNameKey as CNKeyDescriptor, CNContactPhoneNumbersKey as CNKeyDescriptor,
-                    CNContactEmailAddressesKey as CNKeyDescriptor, CNContactImageDataAvailableKey as CNKeyDescriptor,
-                    CNContactThumbnailImageDataKey as CNKeyDescriptor])
+                    CNContactEmailAddressesKey as CNKeyDescriptor, CNContactImageDataAvailableKey as CNKeyDescriptor])
                 var entries: [ContactNames.Entry] = []
-                var photos: [String: Data] = [:]
+                var photoIDs: [String: String] = [:]
                 try CNContactStore().enumerateContacts(with: request) { contact, _ in
                     let addresses = contact.phoneNumbers.map { $0.value.stringValue } + contact.emailAddresses.map { $0.value as String }
-                    // The contact's photo goes with each of its numbers and addresses.
-                    if contact.imageDataAvailable, let thumbnail = contact.thumbnailImageData {
-                        for address in addresses { photos[Recipient.key(for: address)] = thumbnail }
+                    // Each of the contact's numbers and addresses leads to its photo.
+                    if contact.imageDataAvailable {
+                        for address in addresses { photoIDs[Recipient.key(for: address)] = contact.identifier }
                     }
                     let formatted = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
                     let name = [formatted, contact.nickname, contact.organizationName].first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
                     guard !name.isEmpty else { return }
                     entries.append(ContactNames.Entry(id: contact.identifier, name: name, addresses: addresses))
                 }
-                return (entries, photos)
+                return (entries, photoIDs)
             }.value
-            // One image per distinct photo, shared by every address of the same contact.
-            var images: [Data: NSImage] = [:]
-            contactPhotos = photos.compactMapValues { data in
-                if let image = images[data] { return image }
-                let image = NSImage(data: data)
-                images[data] = image
-                return image
-            }
+            // A photo may have changed with the contacts: the ones on screen are fetched again.
+            ContactPhotos.shared.reset()
+            contactPhotoIDs = photoIDs
+            contactPhotoGeneration += 1
             contactEntries = entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             applyContactNames(ContactNames(entries: entries))
         } catch { contactStatus = "Contact sync failed: \(error.localizedDescription)" }

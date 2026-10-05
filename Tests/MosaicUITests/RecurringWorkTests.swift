@@ -130,6 +130,44 @@ final class RecurringWorkTests: XCTestCase {
         XCTAssertEqual(loader.fetchCount, 14, "after a while it is tried again")
     }
 
+    /// Contact photos are read only when an avatar asks: avatars of one contact share one read,
+    /// a few are read at a time, only the most recent are kept, a contact without a photo is not
+    /// asked again, and new contacts start over.
+    @MainActor func testContactPhotosAreReadOnDemandAndBounded() async {
+        let gauge = FetchGauge()
+        let photos = ContactPhotos(capacity: 2, concurrency: 2) { id in
+            await gauge.enter()
+            try? await Task.sleep(for: .milliseconds(20))
+            await gauge.leave()
+            return id == "nobody" ? nil : tinyPicture()
+        }
+        XCTAssertEqual(photos.fetchCount, 0, "nothing is read until an avatar asks")
+        let shared = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for _ in 0..<3 { group.addTask { await photos.image(for: "alex") != nil } }
+            var all: [Bool] = []
+            for await found in group { all.append(found) }
+            return all
+        }
+        XCTAssertEqual(shared, [true, true, true])
+        XCTAssertEqual(photos.fetchCount, 1, "three avatars of one contact, one read")
+        XCTAssertNotNil(photos.cachedImage(for: "alex"))
+        await withTaskGroup(of: Void.self) { group in
+            for id in ["b", "c", "d", "e", "f"] { group.addTask { _ = await photos.image(for: id) } }
+        }
+        let peak = await gauge.peak
+        XCTAssertLessThanOrEqual(peak, 2)
+        XCTAssertEqual(photos.fetchCount, 6)
+        XCTAssertEqual(photos.cachedCount, 2, "only the most recent are kept")
+        XCTAssertNil(photos.cachedImage(for: "alex"))
+        _ = await photos.image(for: "nobody")
+        _ = await photos.image(for: "nobody")
+        XCTAssertEqual(photos.fetchCount, 7, "a contact without a photo is asked once")
+        photos.reset()
+        XCTAssertEqual(photos.cachedCount, 0)
+        _ = await photos.image(for: "nobody")
+        XCTAssertEqual(photos.fetchCount, 8, "after contacts change it is asked again")
+    }
+
     /// A thread's rows are prepared once per change of its messages or reactions: scrolling,
     /// highlights and resizes render with the same rows.
     @MainActor func testThreadRowsArePreparedOncePerChange() {
@@ -157,4 +195,13 @@ private actor FetchGauge {
     private(set) var peak = 0
     func enter() { current += 1; peak = max(peak, current) }
     func leave() { current -= 1 }
+}
+
+/// A 2×2 picture standing in for a contact's thumbnail.
+private func tinyPicture() -> CGImage? {
+    let context = CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    context?.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.9, alpha: 1))
+    context?.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+    return context?.makeImage()
 }
