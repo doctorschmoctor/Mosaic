@@ -26,6 +26,13 @@ Requires macOS 14 or later on Apple silicon.
 2. Drag **Mosaic** onto the **Applications** folder beside it.
 3. Open Mosaic from Applications. macOS will say it can't verify the app the first time, because the build is signed locally rather than notarized with Apple. Allow it once: on macOS 15, close the warning, open **System Settings › Privacy & Security**, scroll down and press **Open Anyway**; on macOS 14, right-click Mosaic in Applications and choose **Open**.
 
+Or with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask doctorschmoctor/mosaic/mosaic
+brew upgrade --cask mosaic      # later versions
+```
+
 ### Build it yourself
 
 Xcode 16 / Swift 6; no dependencies.
@@ -108,7 +115,7 @@ Message history, thumbnails, link previews and contact names stay in memory. Mos
 
 CI runs the tests, builds the app and renders the preview on every push. Launch with `--demo` for the fictional workspace. After adding source files, run `python3 scripts/generate-xcode-project.py`.
 
-To publish a release: set the version in `Resources/Info.plist` (`CFBundleShortVersionString`, and raise `CFBundleVersion`), commit and push, then either press **Run workflow** on the *macOS build and tests* workflow in GitHub Actions (it tags the commit `v<version>`) or tag the commit `v<version>` yourself and push the tag. CI builds and tests as usual, packages the app as a disk image (`scripts/make-dmg.sh`, which mounts the image and verifies the signature inside), and publishes a GitHub Release with the `.dmg` and `.zip`; the notes come from `docs/releases/<version>.md` when that file exists, else from the commit subjects since the previous release. Running the workflow again on a released commit replaces that release's notes and files; from a later commit, choose **republish** to replace the release with that commit (its tag moves). The build is ad-hoc signed; to ship without the Gatekeeper warning, sign with a Developer ID (`MOSAIC_SIGNING_IDENTITY` in `build-app.sh`) and notarize.
+To publish a release: set the version in `Resources/Info.plist` (`CFBundleShortVersionString`, and raise `CFBundleVersion`), commit and push, then either press **Run workflow** on the *macOS build and tests* workflow in GitHub Actions (it tags the commit `v<version>`) or tag the commit `v<version>` yourself and push the tag. CI builds and tests as usual, packages the app as a disk image (`scripts/make-dmg.sh`, which mounts the image and verifies the signature inside), and publishes a GitHub Release with the `.dmg` and `.zip`; the notes come from `docs/releases/<version>.md` when that file exists, else from the commit subjects since the previous release. Running the workflow again on a released commit replaces that release's notes and files; from a later commit, choose **republish** to replace the release with that commit (its tag moves). The same run updates the Homebrew cask in [doctorschmoctor/homebrew-mosaic](https://github.com/doctorschmoctor/homebrew-mosaic) (`scripts/write-cask.sh`: version and the disk image's checksum), using the `HOMEBREW_TAP_TOKEN` secret — a fine-grained token with Contents read and write on that repository; without the secret the release is published and the tap is left as it was. The build is ad-hoc signed; to ship without the Gatekeeper warning, sign with a Developer ID (`MOSAIC_SIGNING_IDENTITY` in `build-app.sh`) and notarize.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the window, tiles, scrolling and database reading are built, and why.
 - [docs/VALIDATION.md](docs/VALIDATION.md) — what the tests cover and what still needs a real account.

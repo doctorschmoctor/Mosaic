@@ -101,6 +101,8 @@ jobs:
             echo
             echo "Then follow **Connect Messages** in the app (Full Disk Access, and the Automation prompt on your first send). Requires macOS 14 or later on Apple silicon."
             echo
+            echo "Or with Homebrew: \`brew install --cask ${GITHUB_REPOSITORY_OWNER}/mosaic/mosaic\` (upgrade with \`brew upgrade --cask mosaic\`)."
+            echo
             echo "## What's new in ${VERSION}"
             echo
             if [ -f "docs/releases/${VERSION}.md" ]; then
@@ -128,3 +130,31 @@ jobs:
             gh release create "${TAG}" "build/Mosaic-${VERSION}.dmg" "build/Mosaic-${VERSION}.zip" \
               --title "Mosaic ${VERSION}" --notes-file notes.md --verify-tag
           fi
+      # The same release in Homebrew: the cask in <owner>/homebrew-mosaic points at this release's
+      # disk image, by version and checksum. Needs the HOMEBREW_TAP_TOKEN secret (a token that can
+      # write to that repository); without it the step says so and the release stands as is.
+      - name: Update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set, so the Homebrew tap was not updated"
+            exit 0
+          fi
+          SHA256=$(shasum -a 256 "build/Mosaic-${VERSION}.dmg" | cut -d' ' -f1)
+          TAP="${GITHUB_REPOSITORY_OWNER}/homebrew-mosaic"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" tap
+          mkdir -p tap/Casks
+          scripts/write-cask.sh "${VERSION}" "${SHA256}" > tap/Casks/mosaic.rb
+          ruby -c tap/Casks/mosaic.rb
+          if [ ! -f tap/README.md ]; then
+            printf '# Mosaic for Homebrew\n\n```sh\nbrew install --cask %s/mosaic/mosaic\n```\n\nUpdated automatically by each [Mosaic release](https://github.com/%s/releases).\n' \
+              "${GITHUB_REPOSITORY_OWNER}" "${GITHUB_REPOSITORY}" > tap/README.md
+          fi
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "The tap already has Mosaic ${VERSION}"; exit 0; fi
+          git commit -m "mosaic ${VERSION}"
+          git push origin HEAD:main
