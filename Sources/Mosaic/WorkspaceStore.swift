@@ -56,7 +56,6 @@ import MosaicCore
     var connectionError: String?
     /// A modal message for something that cannot be done right now.
     var alert: WorkspaceAlert?
-    var sendingIDs = Set<String>()
     var sendErrors: [String: String] = [:]
     /// Files in each tile's composer, in the order they were added, to go out with the next
     /// message — including the ones still on their way in (a photo being fetched from the
@@ -152,6 +151,8 @@ import MosaicCore
     var transport: MessageTransport { isLive ? liveTransport : demoTransport }
     /// Submissions go to Messages one at a time, in the order Return accepted them.
     @ObservationIgnored private var submissionChain: Task<Void, Never> = Task {}
+    /// Messages accepted by Return and not yet handed to Messages (or refused).
+    @ObservationIgnored private(set) var submissionsInFlight = 0
     /// Sends waiting for a composer's photos to finish arriving.
     @ObservationIgnored private var importWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var pollTask: Task<Void, Never>?
@@ -398,10 +399,15 @@ import MosaicCore
             conversations[index].referencedMessages = page.referencedMessages
         }
     }
+    /// Keeps a conversation's newest page for its next opening (a tile opens on its newest 100;
+    /// earlier messages it scrolled back for are not kept here).
     private func remember(_ page: ThreadPage, for id: String) {
         guard !page.messages.isEmpty else { return }
         useCount += 1
-        historyCache[id] = (page, useCount)
+        let newest = page.messages.count > Self.pageSize
+            ? ThreadPage(messages: Array(page.messages.suffix(Self.pageSize)), reactions: page.reactions, referencedMessages: page.referencedMessages)
+            : page
+        historyCache[id] = (newest, useCount)
         if historyCache.count > Self.historyCacheLimit, let oldest = historyCache.min(by: { $0.value.used < $1.value.used })?.key {
             historyCache[oldest] = nil
         }
@@ -757,7 +763,8 @@ import MosaicCore
     /// The newest row seen in a conversation, when it is a database row.
     func seenBoundary(_ id: String) -> Int64? { seenMessageIDs[id].flatMap { Int64($0) } }
     func setMode(live: Bool) {
-        guard live != isLive, sendingIDs.isEmpty else { return }
+        // Not while messages are being handed over: the rest of a batch must not go elsewhere.
+        guard live != isLive, submissionsInFlight == 0 else { return }
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
@@ -840,7 +847,8 @@ import MosaicCore
                 // A tile that scrolled back keeps the earlier messages it shows above the newest
                 // page, which is all a load reads.
                 if ids.contains(id), let depth = historyLimits[id], depth > Self.pageSize, let previous {
-                    if let kept = Self.keepingEarlier(of: previous, in: loaded[index], depth: depth) {
+                    if let kept = Self.keepingEarlier(of: previous, in: loaded[index], depth: depth,
+                                                      lookedUp: request.earlierRows[id]?.guids ?? []) {
                         loaded[index] = kept
                     } else if !loadingMore.contains(id) {
                         // More than a page arrived at once: what the tile showed no longer meets
@@ -946,10 +954,11 @@ import MosaicCore
     /// rows are read — by a (date, row) cursor at the oldest shown message — and they are put
     /// above the others by message ID; nothing else is loaded again, in this tile or any other.
     func loadMore(_ id: String) {
-        let depth = historyLimits[id] ?? Self.pageSize
+        let shown = conversations.first(where: { $0.id == id })?.messages.filter { $0.sendState == nil } ?? []
+        // The depth follows what the tile shows, whatever it asked for before.
+        let depth = max(historyLimits[id] ?? Self.pageSize, shown.count)
         guard isLive, !loadingMore.contains(id), depth < Self.maximumHistory,
-              let oldest = conversations.first(where: { $0.id == id })?.messages.first(where: { $0.sendState == nil }),
-              let rowID = Int64(oldest.id) else { return }
+              let oldest = shown.first, let rowID = Int64(oldest.id) else { return }
         let step = min(Self.pageSize, Self.maximumHistory - depth)
         loadingMore.insert(id)
         historyLimits[id] = depth + step
@@ -964,9 +973,9 @@ import MosaicCore
             guard let page else { historyLimits[id] = depth; return }
             // The page joins the message it was read before; if that is no longer the oldest the
             // tile shows (a burst of new messages replaced them), it would leave a gap: it goes.
-            let shown = conversations.first { $0.id == id }?.messages.filter { $0.sendState == nil } ?? []
-            guard shown.first?.id == oldest.id else {
-                historyLimits[id] = shown.count > Self.pageSize ? shown.count : nil
+            let nowShown = conversations.first { $0.id == id }?.messages.filter { $0.sendState == nil } ?? []
+            guard nowShown.first?.id == oldest.id else {
+                historyLimits[id] = nowShown.count > Self.pageSize ? nowShown.count : nil
                 return
             }
             addEarlier(page, to: id)
@@ -997,11 +1006,12 @@ import MosaicCore
     }
     /// A loaded conversation with the earlier messages its tile showed above the newest page
     /// (`loaded` holds only that page): the database rows of `previous` older than the page's
-    /// first message, by date and then row, up to `depth` messages in all. Their reactions came
-    /// with the load; the originals their replies quote are kept from before. Nil when the page
-    /// shares no message with what was shown (more than a page arrived at once), since the
+    /// first message, by date and then row, up to `depth` messages in all. The reactions on
+    /// those the load looked up (`lookedUp`) came with it; the others — a page that arrived
+    /// while the load ran — keep theirs, as do the originals their replies quote. Nil when the
+    /// page shares no message with what was shown (more than a page arrived at once), since the
     /// earlier messages would then not meet the page.
-    static func keepingEarlier(of previous: Conversation, in loaded: Conversation, depth: Int) -> Conversation? {
+    static func keepingEarlier(of previous: Conversation, in loaded: Conversation, depth: Int, lookedUp: Set<String> = []) -> Conversation? {
         let page = loaded.messages
         guard let first = page.first else { return loaded }
         let inPage = Set(page.map(\.id))
@@ -1014,6 +1024,10 @@ import MosaicCore
         guard !earlier.isEmpty else { return loaded }
         var merged = loaded
         merged.messages = Array(earlier) + page
+        let notLookedUp = Set(earlier.compactMap(\.guid)).subtracting(lookedUp)
+        if !notLookedUp.isEmpty {
+            merged.reactions = previous.reactions.filter { notLookedUp.contains($0.targetGUID) } + loaded.reactions
+        }
         let quoted = Set(earlier.compactMap(\.replyToGUID))
         merged.referencedMessages = previous.referencedMessages.filter { quoted.contains($0.key) }
             .merging(loaded.referencedMessages) { _, current in current }
@@ -1115,11 +1129,15 @@ import MosaicCore
     /// frame shows the bubbles before the transport runs (it waits for Messages in a helper
     /// process, but its in-process fallback would hold the main thread).
     private func submit(_ batch: Outbound) async {
+        // The whole batch goes through the transport it was accepted with.
+        let transport = self.transport
+        submissionsInFlight += batch.items.count
+        SendActivity.shared.begin(batch.items.count)
         try? await Task.sleep(for: .milliseconds(16))
         var anySubmitted = false
         for entry in batch.items {
             do {
-                try await serialized { [transport] in
+                try await serialized {
                     switch entry.item {
                     case .text(let text): try await transport.send(text: text, to: batch.target)
                     case .file(let url): try await transport.send(file: url, to: batch.target)
@@ -1128,9 +1146,18 @@ import MosaicCore
                 setSendState(.submitted, of: entry.message.presentationID, in: batch.threadID)
                 anySubmitted = true
             } catch {
-                setSendState(.failed(error.localizedDescription), of: entry.message.presentationID, in: batch.threadID)
-                sendErrors[batch.threadID] = error.localizedDescription
+                // The window stays live while Messages is asked, so a refresh may already have
+                // found the message's row: Messages recorded it, whatever the hand-off said last.
+                // It is not marked refused (that would offer to send it again).
+                if isConfirmed(entry.message.presentationID, in: batch.threadID) {
+                    anySubmitted = true
+                } else {
+                    setSendState(.failed(error.localizedDescription), of: entry.message.presentationID, in: batch.threadID)
+                    sendErrors[batch.threadID] = error.localizedDescription
+                }
             }
+            submissionsInFlight -= 1
+            SendActivity.shared.end(1)
         }
         guard anySubmitted else { return }
         if isLive { lastLoad = nil; await refresh() }
@@ -1149,14 +1176,19 @@ import MosaicCore
         submissionChain = Task { _ = try? await task.value }
         try await task.value
     }
-    /// Updates a local message's state wherever it is shown. A refused message leaves the pending
-    /// list: it must not claim a later row.
+    /// Whether the database already reported this message: its row carries the bubble's identity.
+    private func isConfirmed(_ presentationID: String, in threadID: String) -> Bool {
+        conversations.first { $0.id == threadID }?.messages.contains { $0.presentationID == presentationID && $0.sendState == nil } ?? false
+    }
+    /// Updates a local message's state wherever it is shown — never a row the database reported,
+    /// which already took the bubble's place. A refused message leaves the pending list: it must
+    /// not claim a later row.
     private func setSendState(_ state: SendState, of presentationID: String, in threadID: String) {
         instantly {
             if let index = conversations.firstIndex(where: { $0.id == threadID }),
-               let position = conversations[index].messages.firstIndex(where: { $0.presentationID == presentationID }) {
+               let position = conversations[index].messages.firstIndex(where: { $0.presentationID == presentationID && $0.sendState != nil }) {
                 conversations[index].messages[position].sendState = state
-            } else if var draft = composeDrafts[threadID], let position = draft.sent.firstIndex(where: { $0.presentationID == presentationID }) {
+            } else if var draft = composeDrafts[threadID], let position = draft.sent.firstIndex(where: { $0.presentationID == presentationID && $0.sendState != nil }) {
                 draft.sent[position].sendState = state
                 composeDrafts[threadID] = draft
             }
@@ -1569,6 +1601,27 @@ import MosaicCore
             }
             if !files.isEmpty { outgoing[id] = files }
         }
+    }
+}
+
+/// Messages accepted by Return and not yet handed to Messages, across the app. Sending no longer
+/// holds the window, so a quit can come while some wait their turn; quitting asks first, and can
+/// wait for them (`AppDelegate.applicationShouldTerminate`).
+@MainActor final class SendActivity {
+    static let shared = SendActivity()
+    private(set) var waiting = 0
+    private var whenDone: [() -> Void] = []
+    func begin(_ count: Int) { waiting += count }
+    func end(_ count: Int) {
+        waiting = max(0, waiting - count)
+        guard waiting == 0 else { return }
+        let actions = whenDone
+        whenDone = []
+        for action in actions { action() }
+    }
+    /// Runs `action` once nothing is waiting (at once if nothing is).
+    func whenAllSent(_ action: @escaping () -> Void) {
+        if waiting == 0 { action() } else { whenDone.append(action) }
     }
 }
 

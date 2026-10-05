@@ -102,8 +102,15 @@ import os
     /// prepared or started, after which sends run in Mosaic (on the main thread).
     private(set) static var usesHelperProcess = true
 
+    /// Whether a send's arguments can travel as a process's arguments: not a NUL (which they
+    /// cannot carry) nor a text near the system's size limit. Such a send goes in process,
+    /// without giving up the helper for the ones after it.
+    nonisolated static func fitsHelper(_ arguments: [String]) -> Bool {
+        arguments.allSatisfy { $0.utf8.count <= 200_000 && !$0.contains("\0") }
+    }
+
     private static func call(_ handler: String, _ arguments: [String]) async throws {
-        if usesHelperProcess {
+        if usesHelperProcess, fitsHelper(arguments) {
             do {
                 let file = try await compiledScriptFile()
                 try await runHelper(file: file, handler: handler, arguments: arguments)

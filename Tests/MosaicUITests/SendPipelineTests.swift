@@ -150,6 +150,34 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertFalse(store.conversations[0].messages.contains { $0.presentationID == third.presentationID })
     }
 
+    /// The window stays live while Messages is asked, so the message's row can arrive before the
+    /// hand-off returns. If the hand-off then reports an error, the row is still the message: it
+    /// is not marked refused (which would offer to send it again), and nothing is left waiting.
+    @MainActor func testARowThatArrivesBeforeTheHandOffReturnsIsNeverMarkedRefused() async throws {
+        let transport = RecordingTransport()
+        transport.holds = true
+        transport.failures[0] = "Messages took too long to reply."
+        let (store, path) = try await liveStore(transport: transport)
+        store.open(Self.alex)
+        let waitingBefore = SendActivity.shared.waiting
+        store.workspace.drafts[Self.alex] = "Running late"
+        let sending = Task { await store.send(Self.alex) }
+        for _ in 0..<400 where transport.submissions.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(store.submissionsInFlight, 1)
+        XCTAssertEqual(SendActivity.shared.waiting, waitingBefore + 1, "a quit now would ask first")
+        record("Running late", date: Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000), at: path)
+        await store.refresh()
+        XCTAssertNil(store.conversations[0].messages.last?.sendState, "the row took the bubble's place")
+        transport.release()
+        await sending.value
+        let thread = store.conversations[0].messages
+        XCTAssertEqual(thread.filter { $0.text == "Running late" }.count, 1)
+        XCTAssertNil(thread.last?.sendState)
+        XCTAssertNil(store.sendErrors[Self.alex])
+        XCTAssertEqual(store.submissionsInFlight, 0)
+        XCTAssertEqual(SendActivity.shared.waiting, waitingBefore)
+    }
+
     @MainActor func testTheDatabaseRowTakesTheBubblesPlace() async throws {
         let transport = RecordingTransport()
         let (store, path) = try await liveStore(transport: transport)
@@ -248,11 +276,21 @@ final class SendPipelineTests: XCTestCase {
     /// arrives at once they would leave a gap, and the tile starts over from the newest page.
     @MainActor func testEarlierMessagesNeverLeaveAGap() {
         func message(_ row: Int) -> Message {
-            Message(id: String(row), text: "m\(row)", date: Date(timeIntervalSinceReferenceDate: TimeInterval(row)), isFromMe: false)
+            Message(id: String(row), text: "m\(row)", date: Date(timeIntervalSinceReferenceDate: TimeInterval(row)), isFromMe: false, guid: "g\(row)")
         }
-        let shown = Conversation(id: "c", name: "C", participants: [], messages: (1...6).map(message))
+        func reaction(_ id: String, on row: Int) -> ReactionEvent {
+            ReactionEvent(id: id, date: Date(timeIntervalSinceReferenceDate: 100), isFromMe: false, actor: "alex@example.test",
+                          targetGUID: "g\(row)", targetPart: nil, kind: .love, isRemoval: false)
+        }
+        var shown = Conversation(id: "c", name: "C", participants: [], messages: (1...6).map(message))
+        shown.reactions = [reaction("r2", on: 2), reaction("r5", on: 5)]
         let slid = Conversation(id: "c", name: "C", participants: [], messages: (4...8).map(message))
-        XCTAssertEqual(WorkspaceStore.keepingEarlier(of: shown, in: slid, depth: 7)?.messages.map(\.id), ["2", "3", "4", "5", "6", "7", "8"])
+        let kept = try? XCTUnwrap(WorkspaceStore.keepingEarlier(of: shown, in: slid, depth: 7))
+        XCTAssertEqual(kept?.messages.map(\.id), ["2", "3", "4", "5", "6", "7", "8"])
+        // A load that did not look up the earlier messages' reactions leaves them as they were;
+        // one that did brings the current ones (here: none, so a removed badge goes).
+        XCTAssertEqual(kept?.reactions.map(\.id), ["r2"])
+        XCTAssertEqual(WorkspaceStore.keepingEarlier(of: shown, in: slid, depth: 7, lookedUp: ["g2", "g3"])?.reactions.map(\.id), [])
         let jumped = Conversation(id: "c", name: "C", participants: [], messages: (10...12).map(message))
         XCTAssertNil(WorkspaceStore.keepingEarlier(of: shown, in: jumped, depth: 7))
     }

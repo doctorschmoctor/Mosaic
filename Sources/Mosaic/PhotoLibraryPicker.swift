@@ -340,14 +340,20 @@ enum PhotoLibraryExport {
         guard let resource = preferred.lazy.compactMap({ type in resources.first { $0.type == type } }).first ?? resources.first else { return nil }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let name = resource.originalFilename.isEmpty ? (asset.mediaType == .video ? "Video.mov" : "Photo.heic") : resource.originalFilename
-        let url = directory.appending(path: "\(OutgoingFiles.stamp()) \(name)")
+        // Photos writes the file as the data comes, so it goes to a name of its own first and
+        // takes its real name only once complete: a failed write removes only its own partial
+        // file, never another photo's (two edited photos are both "FullSizeRender.heic").
+        let partial = directory.appending(path: ".\(UUID().uuidString).partial")
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
         return await withCheckedContinuation { continuation in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: url, options: options) { error in
-                // Photos writes the file as the data comes; a failed write leaves part of one behind.
-                if error != nil { try? FileManager.default.removeItem(at: url) }
-                continuation.resume(returning: error == nil ? url : nil)
+            PHAssetResourceManager.default().writeData(for: resource, toFile: partial, options: options) { error in
+                guard error == nil, let kept = OutgoingFiles.moveIntoPlace(partial, named: "\(OutgoingFiles.stamp()) \(name)", in: directory) else {
+                    try? FileManager.default.removeItem(at: partial)
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: kept)
             }
         }
     }

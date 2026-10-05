@@ -105,6 +105,22 @@ enum OutgoingFiles {
         catch { try FileManager.default.copyItem(at: source, to: url) }
         return url
     }
+    /// Moves a finished file to `name` in `directory` — or `name 2`, `name 3`… when another file
+    /// already has that name — never over another file. Nil when it could not be moved.
+    static func moveIntoPlace(_ source: URL, named name: String, in directory: URL) -> URL? {
+        let base = (name as NSString).deletingPathExtension, ext = (name as NSString).pathExtension
+        for index in 1...100 {
+            let candidate = directory.appending(path: index == 1 ? name : ext.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(ext)")
+            do {
+                try FileManager.default.moveItem(at: source, to: candidate)
+                return candidate
+            } catch {
+                if FileManager.default.fileExists(atPath: candidate.path) { continue }
+                return nil
+            }
+        }
+        return nil
+    }
     /// A small thumbnail for the composer strip, quickly: a camera file's embedded preview when it
     /// has one, else a reduced decode; videos go through Quick Look at strip size.
     static func quickThumbnail(for file: OutgoingAttachment, maxPixelSize: Int = 240) async -> NSImage? {

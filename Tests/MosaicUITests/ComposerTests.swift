@@ -107,6 +107,13 @@ final class ComposerTests: XCTestCase {
         XCTAssertEqual(run.status, 0)
         XCTAssertGreaterThan(ticks.count, 10, "the main actor ran while the tool was waited for")
     }
+    /// A text the helper's arguments cannot carry (a NUL, or one near the system's size limit)
+    /// is sent in process instead; ordinary sends fit.
+    func testOnlyTextsArgumentsCanCarryGoToTheHelper() {
+        XCTAssertTrue(MessagesBridge.fitsHelper(["sendMessage", "On my way 🙂\nsee you", "iMessage;-;alex@example.test"]))
+        XCTAssertFalse(MessagesBridge.fitsHelper(["sendMessage", "a\u{0}b", "chat"]))
+        XCTAssertFalse(MessagesBridge.fitsHelper(["sendMessage", String(repeating: "x", count: 300_000), "chat"]))
+    }
     func testHelperErrorTextIsParsed() {
         let parsed = MessagesBridge.parseError("/tmp/Send Messages.scpt: execution error: Messages got an error: Can’t get chat id \"abc\". (-1728)\n")
         XCTAssertEqual(parsed.message, "Messages got an error: Can’t get chat id \"abc\".")

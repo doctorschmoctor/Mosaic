@@ -192,6 +192,20 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(Array(started.prefix(3)).sorted(), ["photo0", "photo1", "photo2"], "the first ones chosen start first")
     }
 
+    /// A finished photo takes its name, or the next free one; it never replaces another file.
+    func testFinishedFilesNeverReplaceAnother() throws {
+        let folder = try temporaryDirectory()
+        let first = folder.appending(path: ".a.partial"), second = folder.appending(path: ".b.partial")
+        try Data("first".utf8).write(to: first); try Data("second".utf8).write(to: second)
+        let kept = try XCTUnwrap(OutgoingFiles.moveIntoPlace(first, named: "Stamp FullSizeRender.heic", in: folder))
+        let other = try XCTUnwrap(OutgoingFiles.moveIntoPlace(second, named: "Stamp FullSizeRender.heic", in: folder))
+        XCTAssertEqual(kept.lastPathComponent, "Stamp FullSizeRender.heic")
+        XCTAssertEqual(other.lastPathComponent, "Stamp FullSizeRender 2.heic")
+        XCTAssertEqual(try String(contentsOf: kept, encoding: .utf8), "first")
+        XCTAssertEqual(try String(contentsOf: other, encoding: .utf8), "second")
+        XCTAssertNil(OutgoingFiles.moveIntoPlace(folder.appending(path: ".gone.partial"), named: "x.heic", in: folder))
+    }
+
     /// The Photos grid's selection keeps the order chosen, and a video's length reads as in Photos.
     @MainActor func testPhotoLibrarySelectionOrderAndDurations() {
         let model = PhotoLibraryModel()

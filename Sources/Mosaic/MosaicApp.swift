@@ -60,6 +60,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Messages still waiting to be handed to Messages would be lost by quitting now (their text
+    /// and files already left the composer): ask, and offer to quit once they have gone.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            let activity = SendActivity.shared
+            guard activity.waiting > 0 else { return .terminateNow }
+            let alert = NSAlert()
+            alert.messageText = activity.waiting == 1 ? "A message is still being sent" : "\(activity.waiting) messages are still being sent"
+            alert.informativeText = "Mosaic is handing them to Messages. Quit once they have gone, or quit now and they will not be sent."
+            alert.addButton(withTitle: "Quit When Sent")
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Quit Now")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                activity.whenAllSent { NSApp.reply(toApplicationShouldTerminate: true) }
+                return .terminateLater
+            case .alertThirdButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
+        }
+    }
 
     // The Quick Look panel looks along the responder chain for its controller; the app delegate
     // answers for Mosaic's attachments (QuickLook).
