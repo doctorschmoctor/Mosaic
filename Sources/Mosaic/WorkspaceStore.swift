@@ -110,8 +110,23 @@ import MosaicCore
     /// conversations, the least recently used dropped first. A cached history is shown as it was
     /// and brought up to date by the load that follows.
     @ObservationIgnored private var historyCache: [String: (page: ThreadPage, used: Int)] = [:]
-    @ObservationIgnored private var prefetching = Set<String>()
     @ObservationIgnored private var prefetchedRecent = false
+    /// Conversations waiting to be fetched ahead, the most wanted last (`hovered` marks the ones
+    /// the pointer asked for), and the one being fetched. One read ahead runs at a time, so they
+    /// never pile up in the reader's queue in front of a conversation being opened.
+    @ObservationIgnored private var prefetchWaiting: [(id: String, hovered: Bool)] = []
+    @ObservationIgnored private var prefetchRunning: String?
+    /// Tiles opening on a fresh read of their history; reads ahead wait for them.
+    @ObservationIgnored private var openingReads = 0
+    /// The row the pointer rests on, and the pause before its history is fetched ahead.
+    @ObservationIgnored private var hoveredRow: String?
+    @ObservationIgnored private var hoverTask: Task<Void, Never>?
+    /// Reads ahead that ran (tests).
+    @ObservationIgnored private(set) var prefetchReadCount = 0
+    /// How long the pointer rests on a row before its history is fetched ahead.
+    static let hoverDelay: Duration = .milliseconds(150)
+    /// The most reads ahead kept waiting; older wishes are dropped first.
+    static let prefetchWaitLimit = 8
     static let historyCacheLimit = 16
 
     // Bookkeeping no view reads.
@@ -355,13 +370,22 @@ import MosaicCore
             touchCache(id)
             return
         }
+        // Being fetched ahead right now: that read brings it (see `startNextPrefetch`).
+        if prefetchRunning == id { return }
+        // Otherwise it is read now, ahead of any read ahead still waiting.
+        prefetchWaiting.removeAll { $0.id == id }
+        openingReads += 1
         let reader = self.reader
         let requestGeneration = generation
         Task {
-            guard let page = try? await reader.page(forChat: id, limit: Self.pageSize) else { return }
+            let page = try? await reader.page(forChat: id, limit: Self.pageSize)
             guard generation == requestGeneration else { return }
-            remember(page, for: id)
-            apply(page, to: id)
+            openingReads -= 1
+            if let page {
+                remember(page, for: id)
+                apply(page, to: id)
+            }
+            startNextPrefetch()
         }
     }
     /// Puts a fetched or cached page into a conversation that has no history on screen yet.
@@ -388,20 +412,67 @@ import MosaicCore
         entry.used = useCount
         historyCache[id] = entry
     }
-    /// Fetches a conversation's history ahead of opening it (the pointer is over its row), so the
-    /// tile opens on its messages.
-    func prefetch(_ id: String) {
-        guard isLive, historyCache[id] == nil, !prefetching.contains(id), !openIDs.contains(id),
-              conversations.contains(where: { $0.id == id }) else { return }
-        prefetching.insert(id)
-        let reader = self.reader
-        let requestGeneration = generation
-        Task {
-            defer { prefetching.remove(id) }
-            guard let page = try? await reader.page(forChat: id, limit: 100), generation == requestGeneration else { return }
-            remember(page, for: id)
+    /// The pointer came to rest on a row: its history is fetched ahead after a short pause, so the
+    /// tile opens on its messages — and a sweep down the list fetches nothing.
+    func pointerEntered(_ id: String) {
+        hoverTask?.cancel()
+        hoveredRow = id
+        hoverTask = Task { [weak self] in
+            try? await Task.sleep(for: WorkspaceStore.hoverDelay)
+            guard !Task.isCancelled, let self, self.hoveredRow == id else { return }
+            self.hoverTask = nil
+            self.prefetch(id, hovered: true)
         }
     }
+    /// The pointer left a row: a pause not over yet fetches nothing, and a read it asked for that
+    /// has not started is dropped.
+    func pointerExited(_ id: String) {
+        guard hoveredRow == id else { return }
+        hoveredRow = nil
+        hoverTask?.cancel()
+        hoverTask = nil
+        prefetchWaiting.removeAll { $0.id == id && $0.hovered }
+    }
+    /// Fetches a conversation's history ahead of opening it, so the tile opens on its messages.
+    /// Reads ahead go one at a time, the most recently wanted first, and wait while a tile opens
+    /// on a fresh read.
+    func prefetch(_ id: String, hovered: Bool = false) {
+        enqueuePrefetch(id, hovered: hovered)
+        startNextPrefetch()
+    }
+    private func enqueuePrefetch(_ id: String, hovered: Bool = false) {
+        guard isLive, historyCache[id] == nil, prefetchRunning != id, !openIDs.contains(id),
+              conversations.contains(where: { $0.id == id }) else { return }
+        prefetchWaiting.removeAll { $0.id == id }
+        prefetchWaiting.append((id, hovered))
+        if prefetchWaiting.count > Self.prefetchWaitLimit { prefetchWaiting.removeFirst(prefetchWaiting.count - Self.prefetchWaitLimit) }
+    }
+    private func startNextPrefetch() {
+        while prefetchRunning == nil, openingReads == 0, let next = prefetchWaiting.popLast() {
+            let id = next.id
+            // Opened or cached since it was wanted: nothing to fetch.
+            guard isLive, historyCache[id] == nil, !openIDs.contains(id) else { continue }
+            prefetchRunning = id
+            prefetchReadCount += 1
+            let reader = self.reader
+            let requestGeneration = generation
+            Task {
+                let page = try? await reader.page(forChat: id, limit: Self.pageSize)
+                guard generation == requestGeneration else { return }
+                prefetchRunning = nil
+                if let page {
+                    remember(page, for: id)
+                    // Opened while it was being read: the tile shows it now.
+                    apply(page, to: id)
+                }
+                startNextPrefetch()
+            }
+        }
+    }
+    /// Whether reads ahead are running or waiting (tests).
+    var isFetchingAhead: Bool { prefetchRunning != nil || !prefetchWaiting.isEmpty }
+    /// Whether a read ahead for this conversation is waiting its turn (tests).
+    func isWaitingToFetchAhead(_ id: String) -> Bool { prefetchWaiting.contains { $0.id == id } }
     /// Whether a conversation's history is ready to show at once (tests).
     func hasCachedHistory(_ id: String) -> Bool { historyCache[id] != nil }
     /// Which open tile a new conversation replaces when every tile is taken: the one used longest
@@ -690,7 +761,8 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
-        historyCache = [:]; prefetching = []; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
+        historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
+        prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
         if live {
@@ -806,7 +878,9 @@ import MosaicCore
             // most likely to be opened open at once.
             if !prefetchedRecent {
                 prefetchedRecent = true
-                for conversation in loaded.prefix(8) where !ids.contains(conversation.id) { prefetch(conversation.id) }
+                // The most recent is wanted most, so it is queued last (reads ahead take the last first).
+                for conversation in loaded.prefix(8).reversed() where !ids.contains(conversation.id) { enqueuePrefetch(conversation.id) }
+                startNextPrefetch()
             }
             unhideChanged(in: loaded)
             adoptConversations(for: loaded)

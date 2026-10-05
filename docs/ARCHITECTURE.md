@@ -30,7 +30,7 @@ The list is a SwiftUI `List` for its swipe actions. Rows are highlighted only by
 
 ## Opening tiles
 
-A tile opens on its messages without waiting for a full load. The store keeps the histories it recently showed or fetched in memory (`historyCache`, sixteen conversations, least recently used dropped first; never written to disk), fetches the eight most recent conversations after the first load and any conversation whose row the pointer rests on, and fetches a single conversation's page (`MessagesReader.page(forChat:)`) when a tile opens on one it does not have. The full load that follows brings the history up to date.
+A tile opens on its messages without waiting for a full load. The store keeps the histories it recently showed or fetched in memory (`historyCache`, sixteen conversations, least recently used dropped first; never written to disk), fetches the eight most recent conversations after the first load and any conversation whose row the pointer rests on for 150 ms (a sweep down the list fetches nothing; leaving the row drops a read not yet started), and fetches a single conversation's page (`MessagesReader.page(forChat:)`) when a tile opens on one it does not have. Reads ahead go one at a time, the most recently wanted first, at most eight waiting: the reader has one serial queue, so a pile of them would sit in front of the conversation you click. A tile opening on a fresh read takes a waiting read ahead's place and the rest wait until it has its messages; a conversation already being read ahead is shown from that read. The full load that follows brings the history up to date.
 
 ## Messages database
 

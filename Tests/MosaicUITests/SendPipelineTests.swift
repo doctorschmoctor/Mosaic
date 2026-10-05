@@ -257,6 +257,69 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertNil(WorkspaceStore.keepingEarlier(of: shown, in: jumped, depth: 7))
     }
 
+    /// More one-to-one conversations, each with one message.
+    private func addConversations(_ names: [String], at path: String) -> [String] {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        var sql = "BEGIN;"
+        for (n, name) in names.enumerated() {
+            let row = n + 2
+            sql += """
+            INSERT INTO handle VALUES ('\(name)@example.test');
+            INSERT INTO chat VALUES ('iMessage;-;\(name)@example.test', '', '\(name)@example.test', 'iMessage');
+            INSERT INTO chat_handle_join VALUES (\(row), \(row));
+            INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('\(name)-1', 'Hi from \(name)', \(700000003000000000 + Int64(n) * 1_000_000_000), 0, \(row));
+            INSERT INTO chat_message_join VALUES (\(row), last_insert_rowid());
+            """
+        }
+        XCTAssertEqual(sqlite3_exec(db, sql + "COMMIT;", nil, nil, nil), SQLITE_OK)
+        return names.map { "iMessage;-;\($0)@example.test" }
+    }
+
+    /// Sweeping the pointer down the list fetches nothing; resting on a row fetches it after a
+    /// short pause. Reads ahead go one at a time, and a conversation that opens while its read
+    /// ahead is still waiting is read at once, not twice.
+    @MainActor func testReadsAheadWaitForThePointerToRestAndNeverCrowdAnOpeningTile() async throws {
+        let (store, path) = try await liveStore(transport: RecordingTransport())
+        let others = addConversations(["bea", "cal", "dev", "eli", "fay"], at: path)
+        await store.refresh()
+        XCTAssertEqual(Set(store.conversations.map(\.id)), Set(others + [Self.alex]))
+        for _ in 0..<200 where store.isFetchingAhead { try await Task.sleep(for: .milliseconds(10)) }
+        let start = store.prefetchReadCount
+        // A sweep: each row is under the pointer for a moment only.
+        for id in others {
+            store.pointerEntered(id)
+            try await Task.sleep(for: .milliseconds(10))
+            store.pointerExited(id)
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(store.prefetchReadCount, start, "a sweep fetches nothing")
+        XCTAssertFalse(others.contains { store.hasCachedHistory($0) })
+        // Resting on a row fetches it once the pause is over.
+        store.pointerEntered(others[0])
+        XCTAssertEqual(store.prefetchReadCount, start)
+        for _ in 0..<200 where !store.hasCachedHistory(others[0]) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(store.hasCachedHistory(others[0]))
+        XCTAssertEqual(store.prefetchReadCount, start + 1)
+        store.pointerExited(others[0])
+        // Three wanted at once: one reads, the others wait their turn.
+        store.prefetch(others[1]); store.prefetch(others[2]); store.prefetch(others[3])
+        XCTAssertEqual(store.prefetchReadCount, start + 2, "one read ahead at a time")
+        XCTAssertTrue(store.isWaitingToFetchAhead(others[2]))
+        XCTAssertTrue(store.isWaitingToFetchAhead(others[3]))
+        // One of the waiting ones opens: it is read now, and not read ahead as well.
+        store.open(others[2])
+        XCTAssertFalse(store.isWaitingToFetchAhead(others[2]))
+        for _ in 0..<300 where store.isFetchingAhead || store.conversations.first(where: { $0.id == others[2] })?.messages.isEmpty != false {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(store.conversations.first { $0.id == others[2] }?.messages.map(\.text), ["Hi from dev"])
+        XCTAssertTrue(store.hasCachedHistory(others[1]))
+        XCTAssertTrue(store.hasCachedHistory(others[3]))
+        XCTAssertEqual(store.prefetchReadCount, start + 3, "the opened conversation was not read ahead too")
+    }
+
     /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it
     /// counts, sent ones never do, and reading the newest message clears the count.
     @MainActor func testUnreadCountsFollowIncomingMessagesAndTheSeenBoundary() async throws {

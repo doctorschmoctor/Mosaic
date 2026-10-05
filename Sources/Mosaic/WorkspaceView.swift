@@ -337,9 +337,11 @@ struct ConversationRow: View {
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
             .accessibilityAddTraits(isSelected ? .isSelected : [])
-            // No highlight under the pointer; hovering only fetches the history ahead, so the
-            // tile opens on its messages.
-            .onHover { inside in if inside { store.prefetch(conversation.id) } }
+            // No highlight under the pointer. Resting on a row fetches its history ahead (after a
+            // short pause, so a sweep down the list fetches nothing) and the tile opens on its messages.
+            .onHover { inside in
+                if inside { store.pointerEntered(conversation.id) } else { store.pointerExited(conversation.id) }
+            }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
                 Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.openAndType(conversation.id) } }
