@@ -5,8 +5,14 @@ on:
     tags: ['v*']
   pull_request:
   # "Run workflow" on a branch publishes a release of it at the version in Resources/Info.plist,
-  # tagging that commit v<version> first.
+  # tagging that commit v<version> first. "Republish" replaces an existing release of that
+  # version with this commit (its notes, its files, and the tag moves here).
   workflow_dispatch:
+    inputs:
+      republish:
+        description: "Replace the existing release of this version with this commit (moves its tag)"
+        type: boolean
+        default: false
 jobs:
   verify:
     runs-on: macos-15
@@ -48,18 +54,25 @@ jobs:
           path: build
       # Run by hand on a commit that is already tagged at this version, the release is published
       # again (notes and files replaced); on an untagged commit, the tag is made first. A version
-      # that was released from another commit is refused: raise the version instead.
+      # that was released from another commit is refused — raise the version — unless
+      # "republish" was chosen, which moves the tag here and replaces that release.
       - name: Settle the version and its tag
+        env:
+          REPUBLISH: ${{ inputs.republish }}
         run: |
           VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
           TAG="v${VERSION}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
               TAGGED=$(git rev-parse "refs/tags/${TAG}^{commit}")
-              [ "${TAGGED}" = "${GITHUB_SHA}" ] || { echo "Version ${VERSION} was released from ${TAGGED}, not this commit: raise CFBundleShortVersionString in Resources/Info.plist first" >&2; exit 1; }
+              if [ "${TAGGED}" != "${GITHUB_SHA}" ]; then
+                [ "${REPUBLISH}" = "true" ] || { echo "Version ${VERSION} was released from ${TAGGED}, not this commit: raise CFBundleShortVersionString in Resources/Info.plist, or choose republish to replace that release with this commit" >&2; exit 1; }
+                git tag -fa "${TAG}" -m "Mosaic ${VERSION}"
+                git push --force origin "refs/tags/${TAG}"
+              fi
             else
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
               git tag -a "${TAG}" -m "Mosaic ${VERSION}"
               git push origin "refs/tags/${TAG}"
             fi
