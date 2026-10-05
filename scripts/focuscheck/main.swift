@@ -28,7 +28,7 @@ MainActor.assumeIsolated {
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)
 
-    func table() -> NSTableView? {
+    @MainActor func table() -> NSTableView? {
         func find(_ view: NSView) -> NSTableView? {
             if let table = view as? NSTableView { return table }
             for sub in view.subviews { if let found = find(sub) { return found } }
@@ -36,8 +36,8 @@ MainActor.assumeIsolated {
         }
         return find(hosting)
     }
-    func post(_ event: NSEvent?) { if let event { NSApp.postEvent(event, atStart: false) } }
-    func clickRow(of id: String) -> Bool {
+    @MainActor func post(_ event: NSEvent?) { if let event { NSApp.postEvent(event, atStart: false) } }
+    @MainActor func clickRow(of id: String) -> Bool {
         guard let table = table(), let row = store.filteredConversations.firstIndex(where: { $0.id == id }) else { return false }
         table.scrollRowToVisible(row)
         let rect = table.rect(ofRow: row)
@@ -49,7 +49,7 @@ MainActor.assumeIsolated {
                                 context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
         return true
     }
-    func key(_ code: UInt16, _ characters: String, _ modifiers: NSEvent.ModifierFlags = []) {
+    @MainActor func key(_ code: UInt16, _ characters: String, _ modifiers: NSEvent.ModifierFlags = []) {
         let time = ProcessInfo.processInfo.systemUptime
         post(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: time, windowNumber: window.windowNumber,
                               context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
@@ -57,7 +57,7 @@ MainActor.assumeIsolated {
                               context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
     }
     /// Which view holds the keyboard over the next `duration`, sampled every 20 ms.
-    func watch(_ duration: Double = 0.8) async -> [String] {
+    @MainActor func watch(_ duration: Double = 0.8) async -> [String] {
         var seen: [String] = []
         let end = Date().addingTimeInterval(duration)
         while Date() < end {
@@ -67,8 +67,8 @@ MainActor.assumeIsolated {
         }
         return seen
     }
-    var failures = 0
-    func report(_ name: String, expected: String, _ trace: [String]) {
+    nonisolated(unsafe) var failures = 0
+    @MainActor func report(_ name: String, expected: String, _ trace: [String]) {
         let ok = trace.last == "composer(\(expected.prefix(14)))"
         if !ok { failures += 1 }
         print("\(ok ? "PASS" : "FAIL") \(name): \(trace.joined(separator: " → "))  [expected composer(\(expected.prefix(14)))]")
