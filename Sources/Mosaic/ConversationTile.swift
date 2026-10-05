@@ -32,6 +32,7 @@ struct ConversationTile: View {
             } else {
                 MessageList(conversation: conversation, isLive: store.isLive,
                             canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
+                            isLoadingMore: store.loadingMore.contains(conversation.id),
                             senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
                             seenBoundary: store.seenBoundary(conversation.id),
                             onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
@@ -195,6 +196,8 @@ struct MessageList: View, Equatable {
     let conversation: Conversation
     let isLive: Bool
     let canLoadMore: Bool
+    /// Earlier messages are on their way (the spinner at the top shows).
+    var isLoadingMore = false
     let senderNames: [String: String]
     /// The shared conversation zoom: fonts, bubbles and media scale; the tile around them does not.
     var zoom: CGFloat = 1
@@ -221,6 +224,7 @@ struct MessageList: View, Equatable {
 
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
         lhs.conversation == rhs.conversation && lhs.isLive == rhs.isLive && lhs.canLoadMore == rhs.canLoadMore
+            && lhs.isLoadingMore == rhs.isLoadingMore
             && lhs.senderNames == rhs.senderNames && lhs.zoom == rhs.zoom && lhs.animateNew == rhs.animateNew
             && lhs.seenBoundary == rhs.seenBoundary
     }
@@ -261,8 +265,11 @@ struct MessageList: View, Equatable {
             // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
             // which made rows jump.
             VStack(alignment: .leading, spacing: 10 * zoom) {
-                if canLoadMore {
-                    Button("Load earlier messages", action: onLoadMore).font(.caption).frame(maxWidth: .infinity)
+                // Earlier messages load by themselves as the reader nears the top; a small spinner
+                // shows while they come.
+                if canLoadMore && isLoadingMore {
+                    ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, 4)
+                        .accessibilityLabel("Loading earlier messages")
                 }
                 if conversation.messages.isEmpty {
                     Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
@@ -302,7 +309,8 @@ struct MessageList: View, Equatable {
             .coordinateSpace(name: "thread")
             .padding(16 * zoom)
             .environment(\.threadAttachments, attachmentFiles)
-            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry) { near in
+            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry,
+                                             onNearTop: canLoadMore ? onLoadMore : nil) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
         }

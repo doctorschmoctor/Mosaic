@@ -27,6 +27,11 @@ import MosaicCore
     /// beside its name until it is focused (Tab, a click, Return in the list). Mosaic's own, like
     /// the unread counts: nothing is marked read in Messages, and the list shows no dot for it.
     private(set) var tilesWithNews: Set<String> = []
+    /// Contact photos (Contacts' thumbnails) by comparable address (`Recipient.key`), for the
+    /// avatars of one-to-one conversations. Kept in memory only.
+    private(set) var contactPhotos: [String: NSImage] = [:]
+    /// Conversations whose earlier messages are being loaded (scrolling near the top of a thread).
+    private(set) var loadingMore: Set<String> = []
     var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
     var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist() } } }
     var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
@@ -679,7 +684,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
-        historyCache = [:]; prefetching = []; prefetchedRecent = false; tilesWithNews = []
+        historyCache = [:]; prefetching = []; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
         if live {
@@ -839,9 +844,22 @@ import MosaicCore
         }
     }
 
+    /// Loads the next 100 earlier messages of a conversation (up to 1,000), once at a time: the
+    /// thread asks as the reader scrolls near the top of what is loaded.
     func loadMore(_ id: String) {
-        historyLimits[id] = min(1000, (historyLimits[id] ?? 100) + 100)
-        Task { await refresh() }
+        let limit = historyLimits[id] ?? 100
+        guard isLive, !loadingMore.contains(id), limit < 1000 else { return }
+        loadingMore.insert(id)
+        historyLimits[id] = min(1000, limit + 100)
+        Task {
+            await refresh()
+            loadingMore.remove(id)
+        }
+    }
+    /// The photo to show for a one-to-one conversation (or a New Message to one person).
+    func contactPhoto(for conversation: Conversation) -> NSImage? {
+        guard !conversation.isGroup, let handle = conversation.participants.first, !contactPhotos.isEmpty else { return nil }
+        return contactPhotos[Recipient.key(for: handle)]
     }
 
     /// Return in a composer. The text and the files are taken from the composer at once — what is
@@ -1259,21 +1277,35 @@ import MosaicCore
         isLoadingContacts = true
         defer { isLoadingContacts = false }
         do {
-            let entries = try await Task.detached(priority: .userInitiated) {
+            let (entries, photos) = try await Task.detached(priority: .userInitiated) { () -> ([ContactNames.Entry], [String: Data]) in
                 let request = CNContactFetchRequest(keysToFetch: [CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
                     CNContactIdentifierKey as CNKeyDescriptor, CNContactNicknameKey as CNKeyDescriptor,
                     CNContactOrganizationNameKey as CNKeyDescriptor, CNContactPhoneNumbersKey as CNKeyDescriptor,
-                    CNContactEmailAddressesKey as CNKeyDescriptor])
+                    CNContactEmailAddressesKey as CNKeyDescriptor, CNContactImageDataAvailableKey as CNKeyDescriptor,
+                    CNContactThumbnailImageDataKey as CNKeyDescriptor])
                 var entries: [ContactNames.Entry] = []
+                var photos: [String: Data] = [:]
                 try CNContactStore().enumerateContacts(with: request) { contact, _ in
+                    let addresses = contact.phoneNumbers.map { $0.value.stringValue } + contact.emailAddresses.map { $0.value as String }
+                    // The contact's photo goes with each of its numbers and addresses.
+                    if contact.imageDataAvailable, let thumbnail = contact.thumbnailImageData {
+                        for address in addresses { photos[Recipient.key(for: address)] = thumbnail }
+                    }
                     let formatted = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
                     let name = [formatted, contact.nickname, contact.organizationName].first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
                     guard !name.isEmpty else { return }
-                    entries.append(ContactNames.Entry(id: contact.identifier, name: name,
-                        addresses: contact.phoneNumbers.map { $0.value.stringValue } + contact.emailAddresses.map { $0.value as String }))
+                    entries.append(ContactNames.Entry(id: contact.identifier, name: name, addresses: addresses))
                 }
-                return entries
+                return (entries, photos)
             }.value
+            // One image per distinct photo, shared by every address of the same contact.
+            var images: [Data: NSImage] = [:]
+            contactPhotos = photos.compactMapValues { data in
+                if let image = images[data] { return image }
+                let image = NSImage(data: data)
+                images[data] = image
+                return image
+            }
             contactEntries = entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             applyContactNames(ContactNames(entries: entries))
         } catch { contactStatus = "Contact sync failed: \(error.localizedDescription)" }

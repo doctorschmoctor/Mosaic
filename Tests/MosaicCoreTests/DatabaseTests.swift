@@ -96,6 +96,29 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(MessagesDatabase(path: path).watchedPaths, [path, path + "-wal"])
     }
 
+    /// A group's photo is the file of its latest photo change; a later change without a file
+    /// (the photo was removed) leaves it without one. One-to-one chats have none.
+    func testGroupPhotoComesFromTheLatestPhotoChange() throws {
+        let photo = directory.appendingPathComponent("group-photo.jpeg")
+        try Data([0xFF, 0xD8, 0xFF]).write(to: photo)
+        execute("""
+        CREATE TABLE attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT,
+          is_sticker INTEGER DEFAULT 0, hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        INSERT INTO message VALUES (NULL,NULL,700000003000000000,1,0,0,0,0,1,0,3,0);
+        INSERT INTO chat_message_join VALUES (2, 4);
+        INSERT INTO attachment (guid, filename, mime_type) VALUES ('P1', '\(photo.path)', 'image/jpeg');
+        INSERT INTO message_attachment_join VALUES (4, 1);
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let first = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: []), unlessUnchangedFrom: nil))
+        XCTAssertEqual(first.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, photo.path)
+        XCTAssertNil(first.conversations.first { $0.id == alex }?.photoPath)
+        execute("INSERT INTO message VALUES (NULL,NULL,700000004000000000,1,0,0,0,0,0,0,3,0); INSERT INTO chat_message_join VALUES (2, 5);")
+        let removed = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: []), unlessUnchangedFrom: first.token))
+        XCTAssertNil(removed.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, "the photo was removed")
+    }
+
     /// A load reads members only for the chats it lists or has open, attachments only for its
     /// pages' own messages (by ID), and compiles its fixed statements once per connection: a later
     /// load prepares only the variable-length lookups, and an unchanged poll prepares nothing.

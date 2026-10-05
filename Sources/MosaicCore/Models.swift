@@ -176,15 +176,17 @@ public struct Conversation: Identifiable, Equatable, Sendable {
     public var lastMessageID: Int64
     /// A tile for a message that has no conversation yet: the reader is still choosing recipients.
     public var isComposeDraft: Bool
+    /// A group's photo, as Messages keeps it on this Mac (the file of its latest photo change).
+    public var photoPath: String?
 
     public init(id: String, databaseID: Int64 = 0, name: String, participants: [String],
                 service: String = "iMessage", preview: String = "", lastActivity: Date = Date(),
                 unreadCount: Int = 0, messages: [Message] = [], reactions: [ReactionEvent] = [], isComposeDraft: Bool = false,
-                referencedMessages: [String: Message] = [:], lastMessageID: Int64 = 0) {
+                referencedMessages: [String: Message] = [:], lastMessageID: Int64 = 0, photoPath: String? = nil) {
         self.id = id; self.databaseID = databaseID; self.name = name; self.participants = participants
         self.service = service; self.preview = preview; self.lastActivity = lastActivity
         self.unreadCount = unreadCount; self.messages = messages; self.reactions = reactions; self.isComposeDraft = isComposeDraft
-        self.referencedMessages = referencedMessages; self.lastMessageID = lastMessageID
+        self.referencedMessages = referencedMessages; self.lastMessageID = lastMessageID; self.photoPath = photoPath
     }
 
     /// The participants as comparable keys, so a chosen set of people can be matched to a chat.

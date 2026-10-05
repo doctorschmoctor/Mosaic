@@ -147,6 +147,10 @@ final class ScrollPinner: NSObject {
     static let nearBottomTolerance: CGFloat = 24
     private(set) weak var scrollView: NSScrollView?
     var onNearBottomChanged: ((Bool) -> Void)?
+    /// The reader scrolled to within `nearTopDistance` of the top of what is loaded: time to load
+    /// earlier messages. Called for scrolls only (not for content changes), on the next turn.
+    var onNearTop: (() -> Void)?
+    static let nearTopDistance: CGFloat = 600
     private(set) var distanceFromBottom: CGFloat = 0
     /// The distance between the visible area's top edge and the content's top.
     private(set) var distanceFromTop: CGFloat = 0
@@ -308,6 +312,9 @@ final class ScrollPinner: NSObject {
         distanceFromBottom = distance
         distanceFromTop = currentTop() ?? 0
         isNearBottom = distance <= Self.nearBottomTolerance
+        if distanceFromTop <= Self.nearTopDistance, !isNearBottom, let onNearTop {
+            DispatchQueue.main.async { onNearTop() }
+        }
         // The row under the view's top edge, for putting the same message back after a reflow.
         if !isNearBottom, let registry, let top = currentTop(), let row = registry.row(at: top) {
             anchor = (row.id, top - row.frame.minY)
@@ -443,6 +450,8 @@ struct MessageScrollSupport: NSViewRepresentable {
     /// What the thread is about to show, so a size change can be told apart: append, prepend or reflow.
     var content = ThreadContent()
     var registry: ThreadRowRegistry? = nil
+    /// Scrolled near the top of what is loaded (see `ScrollPinner.onNearTop`).
+    var onNearTop: (() -> Void)? = nil
     var onNearBottomChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -450,6 +459,7 @@ struct MessageScrollSupport: NSViewRepresentable {
         let view = InstallerView()
         view.pinner = context.coordinator.pinner
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
+        context.coordinator.pinner.onNearTop = onNearTop
         context.coordinator.pinner.registry = registry
         context.coordinator.pinner.expect(content)
         context.coordinator.request = scrollToBottomRequest
@@ -457,6 +467,7 @@ struct MessageScrollSupport: NSViewRepresentable {
     }
     func updateNSView(_ view: InstallerView, context: Context) {
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
+        context.coordinator.pinner.onNearTop = onNearTop
         context.coordinator.pinner.registry = registry
         // SwiftUI updates run before the document is laid out for the new content, so the pinner
         // knows what the coming size change means before it arrives.

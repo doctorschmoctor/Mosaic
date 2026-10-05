@@ -343,14 +343,42 @@ final class DraftTextView: NSTextView {
         syncContainerWidth()
         super.viewWillDraw()
     }
+    /// Puts the keyboard here (opening a conversation, Tab, a click in the thread). Something the
+    /// request came through — the list row that was clicked, the table under it, the list's
+    /// keyboard — can take the keyboard back a moment later, so for a short while it is claimed
+    /// again from those (never from another message field or text field the reader chose).
     func requestFocus() {
         guard let window else { pendingFocus = true; return }
         pendingFocus = false
+        Self.focusRequests &+= 1
+        let request = Self.focusRequests
+        claimKeyboard(in: window)
+        for delay in Self.reclaimDelays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, let window = self.window, Self.focusRequests == request,
+                      window.firstResponder !== self, Self.mayReclaim(from: window.firstResponder) else { return }
+                self.claimKeyboard(in: window)
+            }
+        }
+    }
+    @MainActor private static var focusRequests = 0
+    static let reclaimDelays: [Double] = [0.05, 0.15, 0.3, 0.6]
+    private func claimKeyboard(in window: NSWindow) {
         // Already typing here: leave the caret where it is.
         guard window.firstResponder !== self else { return }
-        window.makeFirstResponder(self)
+        guard window.makeFirstResponder(self) else { return }
         setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
         scrollRangeToVisible(selectedRange())
+    }
+    /// Whether the keyboard may be taken back from `responder`: nothing, the window, the
+    /// conversation list (its table, a row, its keyboard catcher). Not from a field.
+    static func mayReclaim(from responder: NSResponder?) -> Bool {
+        guard let responder else { return true }
+        if responder is NSWindow { return true }
+        if responder is NSTextView || responder is NSTextField { return false }
+        guard let view = responder as? NSView else { return false }
+        if view is NSTableView || view.enclosingScrollView?.documentView is NSTableView { return true }
+        return view is SidebarKeyFocus.CatcherView
     }
     override func scrollRangeToVisible(_ range: NSRange) {
         // Nothing to bring into view while the whole draft fits; scrolling would only shift the text.

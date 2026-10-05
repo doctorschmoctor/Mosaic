@@ -197,6 +197,19 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertTrue(store.tilesWithNews.isEmpty)
     }
 
+    /// Earlier messages load one step at a time: asking again while a step is loading does nothing.
+    @MainActor func testEarlierMessagesLoadOneStepAtATime() async throws {
+        let (store, _) = try await liveStore(transport: RecordingTransport())
+        store.loadMore(Self.alex)
+        store.loadMore(Self.alex)
+        XCTAssertEqual(store.historyLimits[Self.alex], 200)
+        XCTAssertTrue(store.loadingMore.contains(Self.alex))
+        for _ in 0..<200 where store.loadingMore.contains(Self.alex) { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(store.loadingMore.contains(Self.alex))
+        store.loadMore(Self.alex)
+        XCTAssertEqual(store.historyLimits[Self.alex], 300)
+    }
+
     /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it
     /// counts, sent ones never do, and reading the newest message clears the count.
     @MainActor func testUnreadCountsFollowIncomingMessagesAndTheSeenBoundary() async throws {

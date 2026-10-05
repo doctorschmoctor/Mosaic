@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
 import MosaicCore
@@ -95,7 +97,11 @@ struct WorkspaceView: View {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Find a conversation", text: $store.search).textFieldStyle(.plain).focused($searchFocused)
                     // Return opens the first match; ↓ moves into the list (KeyboardRouter).
-                    .onSubmit { store.activateSidebarSelection() }
+                    .onSubmit {
+                        // The field lets go first: SwiftUI otherwise hands the keyboard back to it.
+                        searchFocused = false
+                        store.activateSidebarSelection()
+                    }
                     .accessibilityLabel("Find a conversation")
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
@@ -358,15 +364,52 @@ struct ConversationRow: View {
     }
 }
 
+/// A conversation's picture: the contact's photo for one person, the group's photo for a group,
+/// else initials (or the group symbol) on a gradient.
 struct Avatar: View {
+    @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
     let size: CGFloat
+    @State private var groupPhoto: NSImage?
+
     var body: some View {
+        let photo = conversation.isGroup ? groupPhoto : store.contactPhoto(for: conversation)
         ZStack {
-            Circle().fill(Palette.avatar.gradient)
-            if conversation.isGroup { Image(systemName: "person.2.fill").font(.system(size: size * 0.33)).foregroundStyle(.white) }
-            else { Text(conversation.initials).font(.system(size: size * 0.30, weight: .semibold, design: .rounded)).foregroundStyle(.white) }
-        }.frame(width: size, height: size).accessibilityHidden(true)
+            if let photo {
+                Image(nsImage: photo).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
+            } else {
+                Circle().fill(Palette.avatar.gradient)
+                if conversation.isGroup { Image(systemName: "person.2.fill").font(.system(size: size * 0.33)).foregroundStyle(.white) }
+                else { Text(conversation.initials).font(.system(size: size * 0.30, weight: .semibold, design: .rounded)).foregroundStyle(.white) }
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .accessibilityHidden(true)
+        .task(id: conversation.photoPath) {
+            guard let path = conversation.photoPath else { groupPhoto = nil; return }
+            groupPhoto = await AvatarImages.shared.image(at: path)
+        }
+    }
+}
+
+/// Group photos, decoded small (avatars are at most 36 points) and kept for the session.
+@MainActor final class AvatarImages {
+    static let shared = AvatarImages()
+    private let images: NSCache<NSString, NSImage> = { let cache = NSCache<NSString, NSImage>(); cache.countLimit = 300; return cache }()
+
+    func image(at path: String) async -> NSImage? {
+        if let hit = images.object(forKey: path as NSString) { return hit }
+        let decoded = await Task.detached(priority: .utility) { () -> CGImage? in
+            guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+                                            kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: 160]
+            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        }.value
+        guard let decoded else { return nil }
+        let image = NSImage(cgImage: decoded, size: NSSize(width: decoded.width, height: decoded.height))
+        images.setObject(image, forKey: path as NSString)
+        return image
     }
 }
 

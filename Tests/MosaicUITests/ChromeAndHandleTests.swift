@@ -314,4 +314,37 @@ final class ChromeAndHandleTests: XCTestCase {
         XCTAssertEqual(store.focused?.id, ids[0], "closing the focused tile falls back to the first open tile")
         XCTAssertEqual(FocusChip.chips(for: store.tiles, focusedID: store.focused?.id).count, 3)
     }
+
+    /// Scrolling to near the top of a long thread asks for earlier messages; reading further down
+    /// does not.
+    @MainActor func testScrollingNearTheTopAsksForEarlierMessages() async throws {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        let document = FlippedView(frame: NSRect(x: 0, y: 0, width: 300, height: 5000))
+        scroll.documentView = document
+        let pinner = ScrollPinner()
+        var asked = 0
+        pinner.onNearTop = { asked += 1 }
+        pinner.attach(to: scroll)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 2500)); scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(asked, 0, "the middle of the thread")
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 300)); scroll.reflectScrolledClipView(scroll.contentView)
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertGreaterThan(asked, 0, "near the top")
+    }
+
+    /// A focus request takes the keyboard back only from the window itself or the conversation
+    /// list, never from a field the reader chose.
+    @MainActor func testTheComposerReclaimsTheKeyboardOnlyFromTheList() {
+        XCTAssertTrue(DraftTextView.mayReclaim(from: nil))
+        XCTAssertTrue(DraftTextView.mayReclaim(from: NSWindow()))
+        XCTAssertTrue(DraftTextView.mayReclaim(from: NSTableView()))
+        XCTAssertTrue(DraftTextView.mayReclaim(from: SidebarKeyFocus.CatcherView()))
+        XCTAssertFalse(DraftTextView.mayReclaim(from: NSTextView()))
+        XCTAssertFalse(DraftTextView.mayReclaim(from: NSTextField()))
+        XCTAssertFalse(DraftTextView.mayReclaim(from: DraftTextView()))
+        XCTAssertFalse(DraftTextView.mayReclaim(from: NSView()))
+    }
 }
+
+private final class FlippedView: NSView { override var isFlipped: Bool { true } }

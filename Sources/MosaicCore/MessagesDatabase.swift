@@ -125,6 +125,9 @@ public final class MessagesReader: @unchecked Sendable {
     /// Counters for tests: statements compiled, and member rows read by the last load.
     private var prepareCount = 0
     private var memberRows = 0
+    /// Group photos by chat, with the chat's newest row when they were looked up: a new photo
+    /// arrives as a new row, so a chat is looked at again only when its newest row changes.
+    private var groupPhotos: [Int64: (lastID: Int64, path: String?)] = [:]
 
     public init(database: MessagesDatabase) { self.database = database }
     deinit {
@@ -239,6 +242,7 @@ public final class MessagesReader: @unchecked Sendable {
         statements.removeAll()
         if let db { sqlite3_close(db) }
         db = nil; schema = nil; lastRequest = nil; fileIdentity = nil
+        groupPhotos.removeAll()
     }
     private static func identity(of path: String) -> UInt64? {
         (try? FileManager.default.attributesOfItem(atPath: path)[.systemFileNumber] as? NSNumber)?.uint64Value
@@ -325,7 +329,8 @@ public final class MessagesReader: @unchecked Sendable {
             conversations.append(Conversation(id: guid, databaseID: summary.rowID, name: name, participants: members,
                 service: summary.service ?? "iMessage", preview: summary.preview.isEmpty ? "Attachment or activity" : summary.preview,
                 lastActivity: MessagesDatabase.appleDate(summary.date), unreadCount: unread,
-                messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: summary.lastID))
+                messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: summary.lastID,
+                photoPath: members.count > 1 ? groupPhoto(db, chatID: summary.rowID, lastID: summary.lastID, schema: schema) : nil))
         }
         for chat in pinned {
             let members = membersByChat[chat.rowID] ?? []
@@ -334,9 +339,36 @@ public final class MessagesReader: @unchecked Sendable {
                 name: chat.displayName.isEmpty ? (members.isEmpty ? (chat.identifier ?? chat.guid) : members.joined(separator: ", ")) : chat.displayName,
                 participants: members, service: chat.service ?? "iMessage", preview: thread.messages.last?.text ?? "",
                 lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions,
-                referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0))
+                referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0,
+                photoPath: members.count > 1 ? groupPhoto(db, chatID: chat.rowID, lastID: thread.messages.last.flatMap { Int64($0.id) } ?? 0, schema: schema) : nil))
         }
         return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, token: token)
+    }
+
+    /// A group's photo: the file attached to its latest photo change (an announcement row,
+    /// `item_type` 3). The latest change without a file means the photo was removed. Never fails
+    /// a load: a schema without these columns, or a missing file, gives no photo.
+    private func groupPhoto(_ db: OpaquePointer, chatID: Int64, lastID: Int64, schema: Schema) -> String? {
+        if let known = groupPhotos[chatID], known.lastID == lastID { return known.path }
+        guard schema.message.contains("item_type"), schema.attachment.contains("filename"),
+              schema.attachmentJoin.contains("attachment_id"), schema.attachmentJoin.contains("message_id"),
+              let statement = try? cached(db, """
+                SELECT a.filename FROM message m
+                JOIN chat_message_join j ON j.message_id = m.ROWID
+                LEFT JOIN message_attachment_join maj ON maj.message_id = m.ROWID
+                LEFT JOIN attachment a ON a.ROWID = maj.attachment_id
+                WHERE j.chat_id = ? AND m.item_type = 3
+                ORDER BY m.date DESC, m.ROWID DESC LIMIT 1
+                """) else { return nil }
+        defer { recycle(statement) }
+        sqlite3_bind_int64(statement, 1, chatID)
+        var path: String?
+        if sqlite3_step(statement) == SQLITE_ROW, let raw = string(statement, 0),
+           let resolved = MessagesDatabase.resolve(raw, home: database.home), FileManager.default.fileExists(atPath: resolved) {
+            path = resolved
+        }
+        groupPhotos[chatID] = (lastID, path)
+        return path
     }
 
     /// One conversation's loaded page: its messages, the reactions on them, and the messages its
