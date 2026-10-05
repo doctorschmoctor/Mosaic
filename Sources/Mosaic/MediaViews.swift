@@ -69,6 +69,8 @@ import MosaicCore
         return tiers.first { $0 >= pixels } ?? tiers[tiers.count - 1]
     }
 
+    /// A picture's cache key: its path, size tier and file version. Making one reads the file's
+    /// metadata, so it is made off the main thread (`resolveKey`).
     struct Key: Hashable {
         let path: String, tier: Int, modified: Date?, size: Int?
         init(path: String, tier: Int) {
@@ -94,9 +96,18 @@ import MosaicCore
     /// Decodes that ran, whether or not they produced a picture (tests).
     private(set) var decodeCount = 0
 
+    /// The key for a picture, with its file version read off the main thread: a stat can be slow
+    /// for a file still arriving from iCloud or on a busy disk, and every bubble asks, cache hit
+    /// or not. Only the lookup that follows runs on the main actor.
+    nonisolated static func resolveKey(path: String, tier: Int) async -> Key {
+        await Task.detached(priority: .userInitiated) { Key(path: path, tier: tier) }.value
+    }
+
     func image(for attachment: Attachment, tier: Int) async -> NSImage? {
         guard let path = attachment.path else { return nil }
-        let key = Key(path: path, tier: tier)
+        let key = await Self.resolveKey(path: path, tier: tier)
+        // The bubble went away while the file was looked at: nothing more to do for it.
+        if Task.isCancelled { return nil }
         // The asked size, or a larger one already decoded.
         for candidate in Self.tiers where candidate >= tier {
             if let hit = images.object(forKey: key.with(tier: candidate).name) { return hit }

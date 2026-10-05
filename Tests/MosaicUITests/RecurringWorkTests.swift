@@ -93,6 +93,26 @@ final class RecurringWorkTests: XCTestCase {
         XCTAssertEqual(requests.activeCount, 0)
     }
 
+    /// A picture's key carries its file version, read off the main thread: a picture that
+    /// finishes arriving gets a new key (and is decoded again); a missing file has no version.
+    @MainActor func testThumbnailKeysFollowTheFileVersion() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: "MosaicTest-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "arriving.jpg")
+        try Data(repeating: 0, count: 4).write(to: file)
+        let partial = await ThumbnailCache.resolveKey(path: file.path, tier: 320)
+        XCTAssertEqual(partial.size, 4)
+        XCTAssertEqual(partial.tier, 320)
+        try Data(repeating: 1, count: 64).write(to: file)
+        let complete = await ThumbnailCache.resolveKey(path: file.path, tier: 320)
+        XCTAssertEqual(complete.size, 64)
+        XCTAssertNotEqual(partial, complete)
+        let missing = await ThumbnailCache.resolveKey(path: folder.appending(path: "absent.jpg").path, tier: 640)
+        XCTAssertNil(missing.size)
+        XCTAssertNil(missing.modified)
+    }
+
     /// Link previews: at most four fetches at once, results kept for a bounded number of URLs, a
     /// failure shown as the plain card and retried only after its time is up.
     @MainActor func testLinkPreviewsAreBoundedAndFailuresRetryLater() async throws {
