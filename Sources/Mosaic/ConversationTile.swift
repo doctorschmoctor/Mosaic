@@ -87,7 +87,15 @@ struct ConversationTile: View {
                 Avatar(conversation: conversation, size: 30)
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    // A new message came in while you were in another tile.
+                    if store.tilesWithNews.contains(conversation.id) {
+                        Circle().fill(Palette.accent).frame(width: 7, height: 7)
+                            .accessibilityLabel("New message")
+                            .help("New message — Tab or click to go to this conversation")
+                    }
+                }
                 Text(conversation.isComposeDraft ? (conversation.participants.isEmpty ? "Choose who to message" : "\(conversation.participants.count) \(conversation.participants.count == 1 ? "person" : "people")")
                      : conversation.isGroup ? "\(conversation.participants.count + 1) people · \(conversation.service)" : conversation.service)
                     .font(.system(size: 10)).foregroundStyle(.secondary)

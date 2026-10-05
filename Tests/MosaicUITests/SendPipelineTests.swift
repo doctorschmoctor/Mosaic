@@ -167,6 +167,36 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertEqual(store.conversations[0].messages.filter { $0.text == "See you at 5" }.count, 1)
     }
 
+    /// A message that arrives in an open tile you are not in puts a dot beside its name until you
+    /// go to that tile; one in the tile you are in, or one you sent, does not.
+    @MainActor func testATileYouAreNotInShowsADotForANewMessage() async throws {
+        let transport = RecordingTransport()
+        let (store, path) = try await liveStore(transport: transport)
+        store.open(Self.alex)
+        await store.refresh()
+        receive("in the tile you are in", at: path)
+        await store.refresh()
+        XCTAssertTrue(store.tilesWithNews.isEmpty, "you are in this tile")
+        // Somewhere else now: a New Message tile has the keyboard.
+        let elsewhere = try XCTUnwrap(store.beginNewChat())
+        XCTAssertEqual(store.workspace.focusedID, elsewhere)
+        record("from me", date: Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000), at: path)
+        await store.refresh()
+        XCTAssertTrue(store.tilesWithNews.isEmpty, "a message you sent is not news")
+        receive("hey", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.tilesWithNews, [Self.alex])
+        store.requestComposerFocus(Self.alex)
+        XCTAssertTrue(store.tilesWithNews.isEmpty, "going to the tile clears its dot")
+        // Closing a tile with a dot lets it go.
+        store.requestComposerFocus(elsewhere)
+        receive("again", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.tilesWithNews, [Self.alex])
+        store.close(Self.alex)
+        XCTAssertTrue(store.tilesWithNews.isEmpty)
+    }
+
     /// Unread counts are Mosaic's own, from a seen boundary: every incoming message after it
     /// counts, sent ones never do, and reading the newest message clears the count.
     @MainActor func testUnreadCountsFollowIncomingMessagesAndTheSeenBoundary() async throws {

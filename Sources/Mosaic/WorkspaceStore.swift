@@ -15,7 +15,18 @@ import MosaicCore
     // The persisted workspace, as separate fields so that typing a draft invalidates only the views
     // that read drafts. `workspace` assembles them for persistence and for tests.
     var openIDs: [String] = [] { didSet { if openIDs != oldValue { persist() } } }
-    var focusedID: String? { didSet { if focusedID != oldValue { persist() } } }
+    var focusedID: String? {
+        didSet {
+            guard focusedID != oldValue else { return }
+            persist()
+            // Going to a tile is what its dot asks for.
+            if let focusedID, tilesWithNews.contains(focusedID) { tilesWithNews.remove(focusedID) }
+        }
+    }
+    /// Open tiles that received a message while the reader was in another tile. Each shows a dot
+    /// beside its name until it is focused (Tab, a click, Return in the list). Mosaic's own, like
+    /// the unread counts: nothing is marked read in Messages, and the list shows no dot for it.
+    private(set) var tilesWithNews: Set<String> = []
     var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
     var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist() } } }
     var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
@@ -401,6 +412,16 @@ import MosaicCore
     /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
         historyLimits[id] = nil
+        if tilesWithNews.contains(id) { tilesWithNews.remove(id) }
+    }
+    /// The newest database row among `messages` (bubbles still being sent are not rows yet).
+    static func newestRow(in messages: [Message]) -> Int64? {
+        messages.compactMap { $0.sendState == nil ? Int64($0.id) : nil }.max()
+    }
+    /// Whether `messages` hold an incoming message newer than row `newest`: a text or file from
+    /// someone else, not a reaction, activity or unsent message.
+    static func receivedMessage(in messages: [Message], after newest: Int64) -> Bool {
+        messages.contains { !$0.isFromMe && $0.kind == .message && !$0.isUnsent && $0.sendState == nil && (Int64($0.id) ?? 0) > newest }
     }
     /// A closed or replaced conversation keeps the files ready in its composer, as it keeps its
     /// text: they are there again when it opens. A photo still arriving lands nowhere (its file
@@ -652,7 +673,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
-        historyCache = [:]; prefetching = []; prefetchedRecent = false
+        historyCache = [:]; prefetching = []; prefetchedRecent = false; tilesWithNews = []
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
         if live {
@@ -713,6 +734,7 @@ import MosaicCore
             var loaded = snapshot.conversations
             let previousByID = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var newBoundaries: [String: String] = [:]
+            var arrivals = Set<String>()
             for index in loaded.indices {
                 let id = loaded[index].id
                 originalTitles[id] = loaded[index].name
@@ -729,6 +751,11 @@ import MosaicCore
                 let reconciled = MessageReconciler.merge(loaded: loaded[index].messages, previous: previous?.messages ?? [], pending: pending[id] ?? [])
                 pending[id] = reconciled.pending
                 loaded[index].messages = reconciled.messages
+                // A message arrived in an open tile the reader is not in: its header shows a dot.
+                if openIDs.contains(id), id != focusedID, let previous, let newest = Self.newestRow(in: previous.messages),
+                   Self.receivedMessage(in: loaded[index].messages, after: newest) {
+                    arrivals.insert(id)
+                }
                 // Unread counts are counted by the reader from the seen boundary: every incoming
                 // message after it, repeated texts and files included. A conversation seen for the
                 // first time starts with its newest row as seen (Messages keeps its own unread state).
@@ -738,6 +765,7 @@ import MosaicCore
                 }
             }
             if !newBoundaries.isEmpty { seenMessageIDs.merge(newBoundaries) { current, _ in current } }
+            if !arrivals.subtracting(tilesWithNews).isEmpty { tilesWithNews.formUnion(arrivals) }
             // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
             // What the open tiles show now is what they will open on next time.
