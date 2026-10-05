@@ -40,23 +40,29 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: Mosaic-macOS
           path: build
+      # Run by hand on a commit that is already tagged at this version, the release is published
+      # again (notes and files replaced); on an untagged commit, the tag is made first. A version
+      # that was released from another commit is refused: raise the version instead.
       - name: Settle the version and its tag
         run: |
           VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Resources/Info.plist)
           TAG="v${VERSION}"
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-              echo "Version ${VERSION} is already released (tag ${TAG} exists): raise CFBundleShortVersionString in Resources/Info.plist first" >&2
-              exit 1
+            if git rev-parse -q --verify "refs/tags/${TAG}^{commit}" >/dev/null; then
+              TAGGED=$(git rev-parse "refs/tags/${TAG}^{commit}")
+              [ "${TAGGED}" = "${GITHUB_SHA}" ] || { echo "Version ${VERSION} was released from ${TAGGED}, not this commit: raise CFBundleShortVersionString in Resources/Info.plist first" >&2; exit 1; }
+            else
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag -a "${TAG}" -m "Mosaic ${VERSION}"
+              git push origin "refs/tags/${TAG}"
             fi
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "${TAG}" -m "Mosaic ${VERSION}"
-            git push origin "refs/tags/${TAG}"
           else
             [ "${GITHUB_REF_NAME}" = "${TAG}" ] || { echo "Tag ${GITHUB_REF_NAME} does not match version ${VERSION} in Resources/Info.plist" >&2; exit 1; }
           fi
@@ -64,9 +70,9 @@ jobs:
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
       - name: Make the disk image
         run: ./scripts/make-dmg.sh "build/Mosaic-${VERSION}.dmg" && cp build/Mosaic.zip "build/Mosaic-${VERSION}.zip"
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # What's new: docs/releases/<version>.md when it exists, else the commit subjects since the
+      # previous release.
+      - name: Write the release notes
         run: |
           {
             echo "## Install"
@@ -82,7 +88,30 @@ jobs:
             echo
             echo "Then follow **Connect Messages** in the app (Full Disk Access, and the Automation prompt on your first send). Requires macOS 14 or later on Apple silicon."
             echo
-            echo "## What's new"
+            echo "## What's new in ${VERSION}"
+            echo
+            if [ -f "docs/releases/${VERSION}.md" ]; then
+              cat "docs/releases/${VERSION}.md"
+            else
+              PREVIOUS=$(git tag --sort=-v:refname | grep -v "^${TAG}$" | head -1)
+              git log --no-merges --format='- %s' ${PREVIOUS:+${PREVIOUS}..}"${TAG}"
+            fi
+            echo
+            if [ -n "${PREVIOUS:-}" ]; then
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREVIOUS}...${TAG}"
+            else
+              echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
+            fi
           } > notes.md
-          gh release create "${TAG}" "build/Mosaic-${VERSION}.dmg" "build/Mosaic-${VERSION}.zip" \
-            --title "Mosaic ${VERSION}" --notes-file notes.md --generate-notes --verify-tag
+          cat notes.md
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" --title "Mosaic ${VERSION}" --notes-file notes.md
+            gh release upload "${TAG}" "build/Mosaic-${VERSION}.dmg" "build/Mosaic-${VERSION}.zip" --clobber
+          else
+            gh release create "${TAG}" "build/Mosaic-${VERSION}.dmg" "build/Mosaic-${VERSION}.zip" \
+              --title "Mosaic ${VERSION}" --notes-file notes.md --verify-tag
+          fi
