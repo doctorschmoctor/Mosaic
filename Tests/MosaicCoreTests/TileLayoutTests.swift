@@ -58,4 +58,14 @@ final class TileLayoutTests: XCTestCase {
         let focused = TileLayout.plan(order: ["a"], viewport: CGSize(width: 800, height: 600), layout: .focus)
         XCTAssertEqual(try XCTUnwrap(focused.frames["a"]), CGRect(x: 4, y: 4, width: 792, height: 592))
     }
+    /// A top inset (Focus's chip row) keeps the top of the canvas free while the plan still
+    /// covers the whole viewport: the tile sits below the inset, and the canvas reaches the bottom.
+    func testTopInsetKeepsTheCanvasWholeAndMovesTheTileDown() throws {
+        let plan = TileLayout.plan(order: ["a"], viewport: CGSize(width: 800, height: 600), layout: .focus, topInset: 44)
+        XCTAssertEqual(plan.size, CGSize(width: 800, height: 600), "the canvas is as tall as the viewport")
+        XCTAssertEqual(try XCTUnwrap(plan.frames["a"]), CGRect(x: 4, y: 48, width: 792, height: 548))
+        let grid = TileLayout.plan(order: ["a", "b", "c"], viewport: CGSize(width: 800, height: 600), layout: .grid, topInset: 44)
+        XCTAssertEqual(grid.frames.values.map(\.minY).min(), 48)
+        XCTAssertEqual(grid.frames.values.map(\.maxY).max(), 596)
+    }
 }

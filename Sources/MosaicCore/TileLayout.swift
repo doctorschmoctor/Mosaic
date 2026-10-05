@@ -26,16 +26,19 @@ public enum TileLayout {
     public static let minimumHeight: CGFloat = 235
     public static let minimumWidth: CGFloat = 275
 
+    /// `topInset` keeps the top of the canvas free (Focus puts its chip row there): the plan's
+    /// size still covers the whole viewport, and the tiles sit below the inset.
     public static func plan(order: [String], viewport: CGSize, layout: WorkspaceLayout,
                             gridFractions: [Int: CGFloat] = [:], rowWeights: [CGFloat] = [],
-                            columnWeights: [CGFloat] = []) -> TilePlan {
+                            columnWeights: [CGFloat] = [], topInset: CGFloat = 0) -> TilePlan {
         let count = order.count
         let rows = layout == .grid ? max(1, (count + 1) / 2) : 1
         // The grid always fits the window: rows share its height, shrinking below their preferred
         // minimum when many are open rather than scrolling. Columns may extend sideways.
         let size = CGSize(width: layout == .columns ? max(viewport.width, CGFloat(count) * 300 + CGFloat(max(0, count - 1)) * gap + inset * 2) : viewport.width,
                           height: viewport.height)
-        let bounds = CGRect(origin: .zero, size: size).insetBy(dx: inset, dy: inset)
+        let top = max(0, min(topInset, size.height))
+        let bounds = CGRect(x: 0, y: top, width: size.width, height: size.height - top).insetBy(dx: inset, dy: inset)
         var frames: [String: CGRect] = [:]
         var dividers: [TileDivider] = []
         var rowSizes: [CGFloat] = []

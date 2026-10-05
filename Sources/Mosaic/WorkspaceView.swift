@@ -526,38 +526,41 @@ struct TileWorkspace: View {
     @State private var columnWeights: [CGFloat] = []
     @State private var resizeStart: (divider: TileDivider.Kind, plan: TilePlan)?
 
+    /// The chip row's height plus the gap under it, in Focus; nothing in the other layouts.
+    static let chipRowHeight = FocusChipBar.height + 8
+
     var body: some View {
         GeometryReader { geometry in
             let layout = store.layout
             let order = layout == .focus ? store.focused.map { [$0.id] } ?? [] : store.displayOrder
-            let viewport = CGSize(width: geometry.size.width, height: geometry.size.height - (layout == .focus ? FocusChipBar.height + 8 : 0))
+            // The canvas is as tall as the workspace in every layout; in Focus its top holds the
+            // chip row and the tile sits below. The chips must be inside the canvas: as a sibling
+            // above the scroll view, the scroll view's document stopped short of the workspace's
+            // bottom, and a press on the tile's message field (drawn there regardless, since
+            // nothing clips) reached nothing — AppKit's hit test ends at the document's frame.
+            let topInset = layout == .focus ? Self.chipRowHeight : 0
+            let viewport = geometry.size
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
-                gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
-            // How any order would lay out right now, so a reorder knows where each tile came from.
+                gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights, topInset: topInset)
+            // How any order would lay out right now, so a reorder knows where each tile was and where it goes.
             let _ = (store.tilePlanner = { [gridFractions, rowWeights, columnWeights] order in
                 TileLayout.plan(order: order, viewport: viewport, layout: layout,
-                                gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights)
+                                gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights, topInset: topInset)
             })
-            VStack(spacing: 8) {
-                if layout == .focus {
-                    FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.focus(id) }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .frame(height: FocusChipBar.height)
-                }
-                // The same view structure in every layout, so switching layouts resizes the tiles
-                // instead of rebuilding them (which reset every conversation's scroll position and
-                // composer). Only Columns can outgrow the window, sideways; the scroll view is
-                // inert in Grid and Focus, whose plans always fit it.
-                ScrollViewReader { scroller in
-                    ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan) }
-                        .scrollDisabled(layout != .columns)
-                        // Grid and Focus never scroll, so a dragged tile may draw over the margins.
-                        .scrollClipDisabled(layout != .columns)
-                        .onChange(of: store.focusToken) { _, _ in
-                            guard layout == .columns, let id = store.focusTarget else { return }
-                            scroller.scrollTo(id)
-                        }
-                }
+            // The same view structure in every layout, so switching between Grid and Columns
+            // resizes the tiles instead of rebuilding them (which reset every conversation's
+            // scroll position and composer); Focus shows the focused tile only. Only Columns can
+            // outgrow the window, sideways; the scroll view is inert in Grid and Focus, whose
+            // plans always fit it.
+            ScrollViewReader { scroller in
+                ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan, chipRow: layout == .focus) }
+                    .scrollDisabled(layout != .columns)
+                    // Grid and Focus never scroll, so a dragged tile may draw over the margins.
+                    .scrollClipDisabled(layout != .columns)
+                    .onChange(of: store.focusToken) { _, _ in
+                        guard layout == .columns, let id = store.focusTarget else { return }
+                        scroller.scrollTo(id)
+                    }
             }
         }
         .onChange(of: store.openIDs.count) { _, _ in
@@ -566,8 +569,13 @@ struct TileWorkspace: View {
         }
     }
 
-    private func canvas(_ plan: TilePlan) -> some View {
+    private func canvas(_ plan: TilePlan, chipRow: Bool) -> some View {
         TileCanvas {
+            if chipRow {
+                FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.focus(id) }
+                    .zIndex(3)
+                    .tileFrame(CGRect(x: 0, y: 0, width: plan.size.width, height: FocusChipBar.height))
+            }
             ForEach(store.tiles) { chat in
                 if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan) }
             }
