@@ -539,6 +539,12 @@ import MosaicCore
     /// or finds its tile, and puts the keyboard in that tile's composer, ready to type.
     func activateSidebarSelection() {
         guard let id = sidebarSelection ?? (search.isEmpty ? nil : filteredConversations.first?.id) else { return }
+        openAndType(id)
+    }
+    /// Opening a conversation from the list (a click, Return, a drag onto a tile, the menu): it
+    /// gets a tile — free space, or the place of the tile used longest ago — or its tile is
+    /// found, and the cursor goes into that tile's message field, ready to type.
+    func openAndType(_ id: String) {
         if !openIDs.contains(id) { open(id) }
         requestComposerFocus(id)
     }

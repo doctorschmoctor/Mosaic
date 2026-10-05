@@ -64,7 +64,7 @@ struct ConversationTile: View {
                 Task { @MainActor in
                     // Accept only known conversation IDs, never external text as a recipient.
                     guard store.conversations.contains(where: { $0.id == value }) else { return }
-                    store.open(value); store.reorder(value, before: conversation.id)
+                    store.openAndType(value); store.reorder(value, before: conversation.id)
                 }
             }
             return true

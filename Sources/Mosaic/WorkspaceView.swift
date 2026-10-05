@@ -335,7 +335,7 @@ struct ConversationRow: View {
             .onHover { inside in if inside { store.prefetch(conversation.id) } }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
-                Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.open(conversation.id) } }
+                Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.openAndType(conversation.id) } }
                 if store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
                 Divider()
                 Button("Delete", role: .destructive) { store.hide(conversation.id) }
@@ -354,7 +354,7 @@ struct ConversationRow: View {
         wasOpenAtFirstClick = isOpen
         // While the list has the keyboard, a click also moves the keyboard's row here.
         if store.sidebarSelection != nil { store.selectSidebarRow(conversation.id) }
-        store.open(conversation.id)
+        store.openAndType(conversation.id)
     }
 }
 

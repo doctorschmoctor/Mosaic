@@ -31,6 +31,27 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.drafts[ids[0]], "Keep this draft")
     }
 
+    /// Opening a conversation from the list puts the cursor in its tile's message field, whether
+    /// it opens into free space, takes the place of the tile used longest ago, or is already open.
+    @MainActor func testOpeningFromTheListPutsTheCursorInTheTile() {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let all = store.conversations.map(\.id)
+        let open = store.workspace.openIDs
+        store.close(open[3])
+        let free = all.first { !store.workspace.openIDs.contains($0) }!
+        store.openAndType(free)
+        XCTAssertTrue(store.workspace.openIDs.contains(free))
+        XCTAssertEqual(store.focusTarget, free, "into free space")
+        let replacing = all.first { !store.workspace.openIDs.contains($0) }!
+        store.openAndType(replacing)
+        XCTAssertEqual(store.workspace.openIDs.count, Workspace.maximumTiles)
+        XCTAssertEqual(store.focusTarget, replacing, "in place of the tile used longest ago")
+        let token = store.focusToken
+        store.openAndType(open[1])
+        XCTAssertEqual(store.focusTarget, open[1], "an open tile is found")
+        XCTAssertGreaterThan(store.focusToken, token)
+    }
+
     /// The list stays at the top when a message moves a conversation there: it was at the top
     /// when the row that was first starts at the visible area's top edge (the list held on to it)
     /// or the list shows its first row; scrolled further down, it stays put.
