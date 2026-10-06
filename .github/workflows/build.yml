@@ -29,7 +29,7 @@ jobs:
           name: Mosaic-macOS
           path: build/Mosaic.zip
       - name: Render demo preview
-        run: mkdir -p build/preview && ./scripts/render-preview.sh build/preview/workspace.png && .build/MosaicPreview build/preview/workspace-zoom-160.png --demo --zoom 1.6 && .build/MosaicPreview build/preview/workspace-zoom-80.png --demo --zoom 0.8
+        run: mkdir -p build/preview && ./scripts/render-preview.sh build/preview/workspace.png && .build/MosaicPreview build/preview/workspace-zoom-160.png --demo --zoom 1.6 && .build/MosaicPreview build/preview/workspace-zoom-80.png --demo --zoom 0.8 && .build/MosaicPreview build/preview/workspace-attachments.png --demo --attachments 9 && .build/MosaicPreview build/preview/workspace-loading.png --demo --loading --settle 2
       - uses: actions/upload-artifact@v4
         with:
           name: Mosaic-preview

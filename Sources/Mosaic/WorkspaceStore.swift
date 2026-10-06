@@ -53,7 +53,8 @@ import MosaicCore
     /// Messages is being read for the first time since launch (or since switching to it): the
     /// window shows that it is loading rather than an empty workspace that asks to connect.
     /// Over once a load succeeds or fails.
-    private(set) var isLoadingConversations = false
+    /// Settable within the app only for the preview renderer's loading state.
+    var isLoadingConversations = false
     /// Why Messages cannot be read right now. Shown where there is room for it — the empty
     /// workspace and the connection settings — and announced in an alert when conversations are
     /// on screen (the window's title area never carries messages).

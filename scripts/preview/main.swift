@@ -4,6 +4,7 @@ import SwiftUI
 // Render the app's own view with fictional demo data. This captures the NSHostingView,
 // never the user's desktop, real conversations, or another application.
 // Usage: MosaicPreview [output.png] --demo [--dark] [--columns|--focus] [--sms] [--scale N] [--settle SECONDS] [--zoom Z]
+//        [--attachments N] (N demo pictures waiting in the focused tile's composer) [--loading] (the launch's loading state)
 
 MainActor.assumeIsolated {
     let output = CommandLine.arguments.dropFirst().first ?? "docs/workspace.png"
@@ -26,6 +27,15 @@ MainActor.assumeIsolated {
         store.conversations[0] = Conversation(id: chat.id, databaseID: chat.databaseID, name: chat.name,
             participants: chat.participants, service: "SMS", preview: chat.preview, lastActivity: chat.lastActivity,
             unreadCount: chat.unreadCount, messages: chat.messages)
+    }
+    let attachments = Int(option("--attachments", default: 0))
+    if attachments > 0, let id = store.focused?.id {
+        let pictures = DemoAssets.imagePaths().map { URL(fileURLWithPath: $0) }
+        if !pictures.isEmpty { store.attach((0..<attachments).map { pictures[$0 % pictures.count] }, to: id) }
+    }
+    if CommandLine.arguments.contains("--loading") {
+        store.conversations = []
+        store.isLoadingConversations = true
     }
     let view = WorkspaceView().environment(store).frame(width: 1320, height: 860)
     let hosting = NSHostingView(rootView: view)
