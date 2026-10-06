@@ -158,3 +158,8 @@ jobs:
           if git diff --cached --quiet; then echo "The tap already has Mosaic ${VERSION}"; exit 0; fi
           git commit -m "mosaic ${VERSION}"
           git push origin HEAD:main
+
+  # Installs the release from the tap on a clean Mac and checks it.
+  homebrew-check:
+    needs: release
+    uses: ./.github/workflows/homebrew-check.yml

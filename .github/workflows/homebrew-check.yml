@@ -1,0 +1,28 @@
+name: Homebrew install check
+# Installs Mosaic from the tap on a clean Mac, as a user would, and checks what landed. Runs after
+# every release (called by the release job) and on demand ("Run workflow").
+on:
+  workflow_dispatch:
+  workflow_call:
+jobs:
+  install:
+    runs-on: macos-15
+    steps:
+      - name: Install from the tap
+        run: |
+          brew install --cask "${GITHUB_REPOSITORY_OWNER}/mosaic/mosaic"
+          brew info --cask "${GITHUB_REPOSITORY_OWNER}/mosaic/mosaic"
+      - name: Check the installed app
+        run: |
+          APP=/Applications/Mosaic.app
+          test -d "$APP"
+          codesign --verify --deep --strict "$APP"
+          INSTALLED=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$APP/Contents/Info.plist")
+          CASK=$(brew info --cask --json=v2 "${GITHUB_REPOSITORY_OWNER}/mosaic/mosaic" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["casks"][0]["version"])')
+          echo "Installed ${INSTALLED}; the cask says ${CASK}"
+          [ "$INSTALLED" = "$CASK" ]
+          if xattr -p com.apple.quarantine "$APP" >/dev/null 2>&1; then echo "The app is still quarantined" >&2; exit 1; fi
+      - name: Uninstall cleanly
+        run: |
+          brew uninstall --cask --zap "${GITHUB_REPOSITORY_OWNER}/mosaic/mosaic"
+          test ! -d /Applications/Mosaic.app
