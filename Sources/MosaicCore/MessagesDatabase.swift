@@ -61,10 +61,14 @@ public struct LoadRequest: Equatable, Sendable {
     /// `MessagesReader.earlierPage`), by conversation. The load does not read them again; it
     /// looks up the reactions on them too, so their badges stay current.
     public var earlierRows: [String: EarlierRows]
+    /// Only the list: each conversation's name, members, preview and unread count, and the open
+    /// ones outside the list — no histories, and group photos only where already looked up.
+    /// What Mosaic shows first at launch, while the full load reads the open tiles' histories.
+    public var listOnly: Bool
     public init(openIDs: Set<String>, limit: Int = 500, historyLimits: [String: Int] = [:], defaultHistoryLimit: Int = 100,
-                seenBoundaries: [String: Int64] = [:], earlierRows: [String: EarlierRows] = [:]) {
+                seenBoundaries: [String: Int64] = [:], earlierRows: [String: EarlierRows] = [:], listOnly: Bool = false) {
         self.openIDs = openIDs; self.limit = limit; self.historyLimits = historyLimits; self.defaultHistoryLimit = defaultHistoryLimit
-        self.seenBoundaries = seenBoundaries; self.earlierRows = earlierRows
+        self.seenBoundaries = seenBoundaries; self.earlierRows = earlierRows; self.listOnly = listOnly
     }
     public func historyLimit(for id: String) -> Int { historyLimits[id] ?? defaultHistoryLimit }
     /// Two requests load the same content when they cover the same conversations to the same
@@ -74,7 +78,7 @@ public struct LoadRequest: Equatable, Sendable {
     /// that runs anyway (the database changed) looks up.
     public static func == (lhs: LoadRequest, rhs: LoadRequest) -> Bool {
         lhs.openIDs == rhs.openIDs && lhs.limit == rhs.limit && lhs.historyLimits == rhs.historyLimits
-            && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit
+            && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit && lhs.listOnly == rhs.listOnly
     }
 }
 
@@ -358,7 +362,7 @@ public final class MessagesReader: @unchecked Sendable {
             let fallback = members.isEmpty ? (summary.identifier ?? "Conversation") : members.joined(separator: ", ")
             let name = summary.displayName.isEmpty ? fallback : summary.displayName
             let guid = summary.guid
-            let thread = request.openIDs.contains(guid)
+            let thread = request.openIDs.contains(guid) && !request.listOnly
                 ? try history(db, chatID: summary.rowID, schema: schema, limit: request.historyLimit(for: guid), earlier: request.earlierRows[guid])
                 : LoadedThread()
             let unread = try request.seenBoundaries[guid].map { boundary in
@@ -368,27 +372,29 @@ public final class MessagesReader: @unchecked Sendable {
                 service: summary.service ?? "iMessage", preview: summary.preview.isEmpty ? "Attachment or activity" : summary.preview,
                 lastActivity: MessagesDatabase.appleDate(summary.date), unreadCount: unread,
                 messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced, lastMessageID: summary.lastID,
-                photoPath: members.count > 1 ? groupPhoto(db, chatID: summary.rowID, lastID: summary.lastID, schema: schema) : nil))
+                photoPath: members.count > 1 ? groupPhoto(db, chatID: summary.rowID, lastID: summary.lastID, schema: schema, lookUp: !request.listOnly) : nil))
         }
         for chat in pinned {
             let members = membersByChat[chat.rowID] ?? []
-            let thread = try history(db, chatID: chat.rowID, schema: schema, limit: request.historyLimit(for: chat.guid), earlier: request.earlierRows[chat.guid])
+            let thread = request.listOnly ? LoadedThread()
+                : try history(db, chatID: chat.rowID, schema: schema, limit: request.historyLimit(for: chat.guid), earlier: request.earlierRows[chat.guid])
             conversations.append(Conversation(id: chat.guid, databaseID: chat.rowID,
                 name: chat.displayName.isEmpty ? (members.isEmpty ? (chat.identifier ?? chat.guid) : members.joined(separator: ", ")) : chat.displayName,
                 participants: members, service: chat.service ?? "iMessage", preview: thread.messages.last?.text ?? "",
                 lastActivity: thread.messages.last?.date ?? .distantPast, messages: thread.messages, reactions: thread.reactions,
                 referencedMessages: thread.referenced, lastMessageID: thread.messages.last.flatMap { Int64($0.id) } ?? 0,
-                photoPath: members.count > 1 ? groupPhoto(db, chatID: chat.rowID, lastID: thread.messages.last.flatMap { Int64($0.id) } ?? 0, schema: schema) : nil))
+                photoPath: members.count > 1 ? groupPhoto(db, chatID: chat.rowID, lastID: thread.messages.last.flatMap { Int64($0.id) } ?? 0, schema: schema, lookUp: !request.listOnly) : nil))
         }
         return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, token: token)
     }
 
     /// A group's photo: the file attached to its latest photo change (an announcement row,
     /// `item_type` 3). The latest change without a file means the photo was removed. Never fails
-    /// a load: a schema without these columns, or a missing file, gives no photo.
-    private func groupPhoto(_ db: OpaquePointer, chatID: Int64, lastID: Int64, schema: Schema) -> String? {
+    /// a load: a schema without these columns, or a missing file, gives no photo. Without
+    /// `lookUp`, only a photo already looked up is given (the list shown first at launch).
+    private func groupPhoto(_ db: OpaquePointer, chatID: Int64, lastID: Int64, schema: Schema, lookUp: Bool = true) -> String? {
         if let known = groupPhotos[chatID], known.lastID == lastID { return known.path }
-        guard schema.message.contains("item_type"), schema.attachment.contains("filename"),
+        guard lookUp, schema.message.contains("item_type"), schema.attachment.contains("filename"),
               schema.attachmentJoin.contains("attachment_id"), schema.attachmentJoin.contains("message_id"),
               let statement = try? cached(db, """
                 SELECT a.filename FROM message m

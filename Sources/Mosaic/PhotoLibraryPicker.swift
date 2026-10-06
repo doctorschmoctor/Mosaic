@@ -191,7 +191,9 @@ struct PickerButtonStyle: ButtonStyle {
     var count: Int { assets?.count ?? 0 }
     func asset(at index: Int) -> PHAsset { assets!.object(at: index) }
     func isSelected(_ id: String) -> Bool { selectedSet.contains(id) }
-    @ObservationIgnored private var selectedSet = Set<String>()
+    /// Observed: each cell reads it for its check and outline, so a click redraws the cells at
+    /// once. (Ignored by observation, only the footer's count followed a click.)
+    private var selectedSet = Set<String>()
     func toggle(_ asset: PHAsset) { toggle(asset.localIdentifier, asset: asset) }
     /// Chooses or unchooses one picture; the order chosen is the order sent.
     func toggle(_ id: String, asset: PHAsset? = nil) {

@@ -50,6 +50,10 @@ import MosaicCore
     var contactEntries: [ContactNames.Entry] = []
     var search = ""
     var isLive = false
+    /// Messages is being read for the first time since launch (or since switching to it): the
+    /// window shows that it is loading rather than an empty workspace that asks to connect.
+    /// Over once a load succeeds or fails.
+    private(set) var isLoadingConversations = false
     /// Why Messages cannot be read right now. Shown where there is room for it — the empty
     /// workspace and the connection settings — and announced in an alert when conversations are
     /// on screen (the window's title area never carries messages).
@@ -122,6 +126,8 @@ import MosaicCore
     @ObservationIgnored private var hoverTask: Task<Void, Never>?
     /// Reads ahead that ran (tests).
     @ObservationIgnored private(set) var prefetchReadCount = 0
+    /// Launches that showed the list before the full load (tests).
+    @ObservationIgnored private(set) var listShownFirstCount = 0
     /// How long the pointer rests on a row before its history is fetched ahead.
     static let hoverDelay: Duration = .milliseconds(150)
     /// The most reads ahead kept waiting; older wishes are dropped first.
@@ -194,6 +200,7 @@ import MosaicCore
         // launch — no settings sheet, no Contacts prompt (that waits for the settings' button).
         isLive = !forcedDemo && (defaults.object(forKey: "Mosaic.live") as? Bool ?? true)
         if isLive {
+            isLoadingConversations = true
             restore()
             // Messages and Contacts load side by side; names apply to the conversations as they arrive.
             Task { await self.refresh() }
@@ -772,6 +779,7 @@ import MosaicCore
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
         defaults.set(live, forKey: "Mosaic.live")
         loadingState = true
+        isLoadingConversations = live
         if live {
             conversations = []; restore()
             Task { await refresh() }
@@ -813,6 +821,17 @@ import MosaicCore
 
     private func performRefresh(background: Bool = false) async {
         let requestGeneration = generation
+        defer {
+            if isLoadingConversations, generation == requestGeneration, connectedBefore || connectionError != nil {
+                isLoadingConversations = false
+            }
+        }
+        // The first read since launch shows the list first: it takes a fraction of the full load,
+        // which then reads the open tiles' histories (each says it is loading meanwhile).
+        if conversations.isEmpty, !connectedBefore {
+            await showListFirst(background: background)
+            guard generation == requestGeneration, isLive else { return }
+        }
         // Each open tile's newest 100 messages; earlier ones a tile paged in are not read again,
         // only the reactions on them. The reader skips the load when nothing was committed since
         // the last one and the request is the same.
@@ -913,6 +932,27 @@ import MosaicCore
                 connectionError = error.localizedDescription
             }
         }
+    }
+
+    /// The conversation list on its own (`LoadRequest.listOnly`), shown while nothing is on screen
+    /// yet. A failure here is left to the full load that follows, which reports it.
+    private func showListFirst(background: Bool) async {
+        let requestGeneration = generation
+        let request = LoadRequest(openIDs: Set(openIDs), defaultHistoryLimit: Self.pageSize,
+                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, listOnly: true)
+        guard let snapshot = try? await reader.load(request, unlessUnchangedFrom: nil, background: background),
+              generation == requestGeneration, isLive, conversations.isEmpty else { return }
+        listShownFirstCount += 1
+        connectedBefore = true; consecutiveLoadFailures = 0
+        if connectionError != nil { connectionError = nil }
+        var list = snapshot.conversations
+        for index in list.indices {
+            originalTitles[list[index].id] = list[index].name
+            list[index].name = contactNames.title(for: list[index])
+            // As the full load does: a conversation seen for the first time has nothing unread.
+            if seenBoundary(list[index].id) == nil { list[index].unreadCount = 0 }
+        }
+        instantly { conversations = list }
     }
 
     /// Refreshes within a moment of Messages writing to its database, instead of at the next poll.

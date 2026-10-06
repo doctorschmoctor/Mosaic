@@ -1,6 +1,7 @@
 import XCTest
 import AppKit
 import UniformTypeIdentifiers
+import Observation
 import MosaicCore
 @testable import Mosaic
 
@@ -219,6 +220,40 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(PhotoLibraryModel.duration(9), "0:09")
         XCTAssertEqual(PhotoLibraryModel.duration(754), "12:34")
         XCTAssertEqual(PhotoLibraryModel.duration(3725), "1:02:05")
+    }
+
+    /// The composer's thumbnails fill the field's width and continue on the next row; the strip
+    /// grows with its rows up to two, then scrolls (showing a little of the third).
+    func testComposerThumbnailsWrapInsideTheField() {
+        let square = CGSize(width: 60, height: 60)
+        let frames = WrappingRows.frames(for: Array(repeating: square, count: 9), width: 300, spacing: 10, rowSpacing: 10)
+        XCTAssertEqual(frames.map(\.minX), [0, 70, 140, 210, 0, 70, 140, 210, 0])
+        XCTAssertEqual(frames.map(\.minY), [0, 0, 0, 0, 70, 70, 70, 70, 140])
+        XCTAssertTrue(frames.allSatisfy { $0.maxX <= 300 }, "nothing passes the field's edge")
+        XCTAssertEqual(WrappingRows.frames(for: [square, square], width: 40, spacing: 10, rowSpacing: 10).map(\.minY), [0, 70],
+                       "one too wide for the row still gets a row of its own")
+        // A field 320 points wide holds four in a row (inside its 10-point margins).
+        XCTAssertEqual(AttachmentStrip.perRow(width: 320), 4)
+        XCTAssertEqual(AttachmentStrip.perRow(width: 20), 1)
+        XCTAssertEqual(AttachmentStrip.rows(count: 9, width: 320), 3)
+        XCTAssertEqual(AttachmentStrip.height(count: 0, width: 320), 0)
+        XCTAssertEqual(AttachmentStrip.height(count: 3, width: 320), 72, "one row: the height the strip always had")
+        XCTAssertEqual(AttachmentStrip.height(count: 8, width: 320), 142, "two rows")
+        XCTAssertEqual(AttachmentStrip.height(count: 9, width: 320), 166, "two rows and a peek at the third, which scrolls")
+        XCTAssertEqual(AttachmentStrip.height(count: 30, width: 320), 166)
+    }
+
+    /// A cell that asked whether its picture is chosen hears about the click that chooses or
+    /// unchooses it, so the check and the outline follow the click (not only the Add count).
+    @MainActor func testPhotoCellsAreToldWhenTheirSelectionChanges() {
+        let model = PhotoLibraryModel()
+        for expected in [true, false] {
+            var told = false
+            withObservationTracking { _ = model.isSelected("a") } onChange: { told = true }
+            model.toggle("a")
+            XCTAssertTrue(told, "the cell is redrawn when its picture is \(expected ? "chosen" : "unchosen")")
+            XCTAssertEqual(model.isSelected("a"), expected)
+        }
     }
 
     /// Preheating covers a bounded window around the visible cells, and moving it starts and

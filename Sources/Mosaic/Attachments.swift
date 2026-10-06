@@ -221,14 +221,39 @@ enum OutgoingFiles {
 
 /// The files waiting in a composer, as thumbnails above the text in the order they were added,
 /// each with a remove badge: a placeholder while one is still on its way in, a warning for one
-/// that could not be added.
+/// that could not be added. They fill the field's width and continue on the next row, inside the
+/// field; past `visibleRows` rows the strip scrolls rather than push the thread out of the tile.
 struct AttachmentStrip: View {
     let files: [OutgoingAttachment]
     let onRemove: (String) -> Void
+    @State private var width: CGFloat = 0
+
+    static let slot: CGFloat = 60
+    static let spacing: CGFloat = 10
+    static let rowSpacing: CGFloat = 10
+    static let insets = EdgeInsets(top: 10, leading: 10, bottom: 2, trailing: 10)
+    /// Rows shown before the strip scrolls; a little of the next row shows, so it reads as more.
+    static let visibleRows = 2
+
+    /// How many thumbnails fit in a row of a field this wide (at least one).
+    static func perRow(width: CGFloat) -> Int {
+        let room = width - insets.leading - insets.trailing
+        return max(1, Int(((room + spacing) / (slot + spacing)).rounded(.down)))
+    }
+    static func rows(count: Int, width: CGFloat) -> Int { count == 0 ? 0 : (count + perRow(width: width) - 1) / perRow(width: width) }
+    static func contentHeight(rows: Int) -> CGFloat {
+        rows == 0 ? 0 : CGFloat(rows) * slot + CGFloat(rows - 1) * rowSpacing + insets.top + insets.bottom
+    }
+    /// The strip's height: every row up to `visibleRows`, then that plus a peek at the next.
+    static func height(count: Int, width: CGFloat) -> CGFloat {
+        let rows = rows(count: count, width: width)
+        return rows <= visibleRows ? contentHeight(rows: rows) : contentHeight(rows: visibleRows) + slot * 0.4
+    }
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
+        let scrolls = Self.rows(count: files.count, width: width) > Self.visibleRows
+        ScrollView(.vertical, showsIndicators: scrolls) {
+            WrappingRows(spacing: Self.spacing, rowSpacing: Self.rowSpacing) {
                 ForEach(files) { file in
                     slot(file)
                         .overlay(alignment: .topTrailing) {
@@ -241,10 +266,13 @@ struct AttachmentStrip: View {
                         }
                 }
             }
-            .padding(.horizontal, 10).padding(.top, 10).padding(.bottom, 2)
+            .padding(Self.insets)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .scrollClipDisabled()
-        .frame(height: 72)
+        .scrollDisabled(!scrolls)
+        .frame(maxWidth: .infinity)
+        .frame(height: Self.height(count: files.count, width: width))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
     }
     @ViewBuilder private func slot(_ file: OutgoingAttachment) -> some View {
         switch file.state {
@@ -262,6 +290,41 @@ struct AttachmentStrip: View {
                 .help(reason)
                 .accessibilityLabel("Could not add this file: \(reason)")
         }
+    }
+}
+
+/// Lays its views out left to right, starting a new row when the next one would pass the
+/// width it is offered; rows are top-aligned and start at the leading edge.
+struct WrappingRows: Layout {
+    var spacing: CGFloat
+    var rowSpacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let frames = Self.frames(for: subviews.map { $0.sizeThatFits(.unspecified) }, width: proposal.width ?? .infinity,
+                                 spacing: spacing, rowSpacing: rowSpacing)
+        let used = frames.reduce(CGSize.zero) { CGSize(width: max($0.width, $1.maxX), height: max($0.height, $1.maxY)) }
+        return CGSize(width: proposal.width.map { $0.isFinite ? $0 : used.width } ?? used.width, height: used.height)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        for (subview, frame) in zip(subviews, Self.frames(for: sizes, width: bounds.width, spacing: spacing, rowSpacing: rowSpacing)) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          proposal: ProposedViewSize(frame.size))
+        }
+    }
+    /// Where each view goes, from the top-left corner.
+    static func frames(for sizes: [CGSize], width: CGFloat, spacing: CGFloat, rowSpacing: CGFloat) -> [CGRect] {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        for size in sizes {
+            if x > 0, x + size.width > width + 0.5 {
+                x = 0; y += rowHeight + rowSpacing; rowHeight = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return frames
     }
 }
 

@@ -127,7 +127,14 @@ struct WorkspaceView: View {
                                     .tint(.red)
                             }
                     }
-                    if store.filteredConversations.isEmpty {
+                    if store.filteredConversations.isEmpty && store.isLoadingConversations && store.search.isEmpty {
+                        // Messages is being read: rows in outline where the conversations will be.
+                        ForEach(0..<8, id: \.self) { index in
+                            LoadingConversationRow(index: index)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
+                                .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                        }
+                    } else if store.filteredConversations.isEmpty {
                         Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
                             .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
                             .listRowSeparator(.hidden).listRowBackground(Color.clear)
@@ -155,7 +162,20 @@ struct WorkspaceView: View {
         // Holds the keyboard for the list (⌘L); draws nothing and takes no clicks.
         .background(alignment: .topLeading) { SidebarKeyFocus(keyboard: sidebarKeyboard, store: store).frame(width: 1, height: 1) }
     }
-    private var emptyWorkspace: some View {
+    @ViewBuilder private var emptyWorkspace: some View {
+        if store.isLoadingConversations && store.conversations.isEmpty {
+            // Reading Messages for the first time since launch: not a workspace that asks to connect.
+            VStack(spacing: 14) {
+                ProgressView().controlSize(.regular)
+                Text("Loading your conversations…").font(.callout).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityElement(children: .combine)
+        } else {
+            idleWorkspace
+        }
+    }
+    private var idleWorkspace: some View {
         let unconnected = store.isLive && store.conversations.isEmpty
         return VStack(spacing: 16) {
             Image(systemName: "rectangle.split.2x2").font(.system(size: 54, weight: .ultraLight)).foregroundStyle(Palette.accent.opacity(0.6))
@@ -175,6 +195,27 @@ struct WorkspaceView: View {
                 }
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// A sidebar row in outline (avatar, name and preview as soft shapes), shown while Messages is
+/// read at launch; the widths vary a little from row to row, as names and previews do.
+struct LoadingConversationRow: View {
+    let index: Int
+    private static let nameWidths: [CGFloat] = [96, 124, 80, 110, 72, 132, 90, 104]
+    private static let previewWidths: [CGFloat] = [170, 140, 186, 120, 160, 150, 178, 132]
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Circle().fill(Color.primary.opacity(0.08)).frame(width: 36, height: 36)
+            VStack(alignment: .leading, spacing: 7) {
+                Capsule().fill(Color.primary.opacity(0.1)).frame(maxWidth: Self.nameWidths[index % 8]).frame(height: 10)
+                Capsule().fill(Color.primary.opacity(0.06)).frame(maxWidth: Self.previewWidths[index % 8]).frame(height: 8)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
+        .accessibilityHidden(true)
     }
 }
 

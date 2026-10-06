@@ -415,6 +415,45 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertEqual(store.conversations[0].messages.last?.text, "Fresh")
     }
 
+    /// Reopening Mosaic: it says it is loading (not "Connect Messages") until Messages has been
+    /// read, shows the conversation list before the open tiles' histories, and then the histories.
+    @MainActor func testRelaunchShowsLoadingThenTheListThenHistories() async throws {
+        let path = try makeDatabase()
+        let defaults = UserDefaults(suiteName: "MosaicTest-\(UUID())")!
+        let first = WorkspaceStore(defaults: defaults, database: MessagesDatabase(path: path), transport: RecordingTransport())
+        for _ in 0..<200 where first.openIDs.isEmpty { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertEqual(first.openIDs, [Self.alex], "a fresh workspace opens its first conversation")
+        first.persistNow()
+
+        let store = WorkspaceStore(defaults: defaults, database: MessagesDatabase(path: path), transport: RecordingTransport())
+        XCTAssertTrue(store.isLoadingConversations, "at launch the window says it is loading")
+        XCTAssertTrue(store.conversations.isEmpty)
+        XCTAssertEqual(store.openIDs, [Self.alex], "the open tile is restored")
+        for _ in 0..<200 where store.isLoadingConversations { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertFalse(store.isLoadingConversations, "loading is over once Messages has been read")
+        XCTAssertEqual(store.listShownFirstCount, 1, "the list was shown before the full load")
+        XCTAssertEqual(store.conversations.first?.name, "alex@example.test")
+        XCTAssertEqual(store.conversations.first?.messages.map(\.text), ["Hello", "Hi!"], "then the open tile's history")
+        XCTAssertTrue(store.canSend)
+        XCTAssertNil(store.connectionError)
+        // Later loads go straight to the full load.
+        receive("Later", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.listShownFirstCount, 1)
+        XCTAssertEqual(store.conversations.first?.messages.last?.text, "Later")
+    }
+
+    /// Without access to Messages, loading ends with the reason, and the workspace asks to connect.
+    @MainActor func testLoadingEndsWhenMessagesCannotBeRead() async throws {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!,
+                                   database: MessagesDatabase(path: directory.appending(path: "missing.db").path), transport: RecordingTransport())
+        XCTAssertTrue(store.isLoadingConversations)
+        for _ in 0..<200 where store.isLoadingConversations { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertFalse(store.isLoadingConversations)
+        XCTAssertNotNil(store.connectionError)
+        XCTAssertEqual(store.listShownFirstCount, 0)
+    }
+
     @MainActor func testDemoModeNeverTouchesTheLiveTransport() async throws {
         let transport = RecordingTransport()
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true, transport: transport)

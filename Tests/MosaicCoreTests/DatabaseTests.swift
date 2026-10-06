@@ -119,6 +119,42 @@ final class DatabaseTests: XCTestCase {
         XCTAssertNil(removed.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, "the photo was removed")
     }
 
+    /// The list on its own (what launch shows first): every conversation with its name, members,
+    /// preview and unread count, the open ones outside the list too, and no history; group photos
+    /// only as already looked up. It is a different request from the full load, so the full load
+    /// that follows is never skipped as unchanged.
+    func testTheListLoadsOnItsOwnWithoutHistories() throws {
+        let photo = directory.appendingPathComponent("group-photo.jpeg")
+        try Data([0xFF, 0xD8, 0xFF]).write(to: photo)
+        execute("""
+        CREATE TABLE attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT,
+          is_sticker INTEGER DEFAULT 0, hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        INSERT INTO message VALUES (NULL,NULL,700000003000000000,1,0,0,0,0,1,0,3,0);
+        INSERT INTO chat_message_join VALUES (2, 4);
+        INSERT INTO attachment (guid, filename, mime_type) VALUES ('P1', '\(photo.path)', 'image/jpeg');
+        INSERT INTO message_attachment_join VALUES (4, 1);
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let listOnly = LoadRequest(openIDs: [alex, "iMessage;+;group"], limit: 1, seenBoundaries: [alex: 1], listOnly: true)
+        let list = try XCTUnwrap(try reader.loadSync(listOnly, unlessUnchangedFrom: nil))
+        XCTAssertEqual(Set(list.conversations.map(\.id)), [alex, "iMessage;+;group"], "an open conversation outside the list is there")
+        XCTAssertTrue(list.conversations.allSatisfy { $0.messages.isEmpty }, "no histories")
+        XCTAssertNil(list.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, "no photo looked up for the list")
+        let shown = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [alex], seenBoundaries: [alex: 1], listOnly: true), unlessUnchangedFrom: nil))
+        let alexInList = try XCTUnwrap(shown.conversations.first { $0.id == alex })
+        XCTAssertEqual(alexInList.name, "alex@example.test")
+        XCTAssertEqual(alexInList.lastMessageID, 2)
+        XCTAssertEqual(alexInList.preview, "Second")
+        XCTAssertNotEqual(LoadRequest(openIDs: [alex], listOnly: true), LoadRequest(openIDs: [alex]))
+        let full = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [alex]), unlessUnchangedFrom: shown.token),
+                                 "the full load after the list is not skipped")
+        XCTAssertEqual(full.conversations.first { $0.id == alex }?.messages.map(\.text), ["First", "Second"])
+        XCTAssertEqual(full.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, photo.path)
+        let again = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [], listOnly: true), unlessUnchangedFrom: nil))
+        XCTAssertEqual(again.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, photo.path, "a photo already looked up is given")
+    }
+
     /// A load reads members only for the chats it lists or has open, attachments only for its
     /// pages' own messages (by ID), and compiles its fixed statements once per connection: a later
     /// load prepares only the variable-length lookups, and an unchanged poll prepares nothing.
