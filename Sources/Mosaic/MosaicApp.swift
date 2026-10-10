@@ -41,6 +41,13 @@ import Quartz
                 Button("Reopen Closed Tile") { store.reopenLastClosedTile() }.keyboardShortcut("t", modifiers: [.command, .shift])
                     .disabled(!store.canReopenClosedTile)
                 Button("Hidden Conversations…") { store.showHiddenConversations = true }
+                Divider()
+                Button("Go to Next Unread") { if !store.goToNextUnread() { NSSound.beep() } }.keyboardShortcut("u", modifiers: [.command, .option])
+                Button(store.focused.map { store.needsReply($0.id) } == true ? "Clear Needs Reply" : "Mark as Needs Reply") {
+                    if let id = store.focused?.id { store.toggleNeedsReply(id) }
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+                .disabled(store.focused?.isComposeDraft != false)
                 Button("Refresh Messages") { Task { await store.refresh() } }.keyboardShortcut("r", modifiers: .command)
                 Button("Connect Messages…") { store.showSetup = true }
             }

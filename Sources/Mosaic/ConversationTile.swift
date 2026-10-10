@@ -36,7 +36,8 @@ struct ConversationTile: View {
                             senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
                             seenBoundary: store.seenBoundary(conversation.id),
                             onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
-                            onTailSeen: { [store, id = conversation.id] in store.markSeen(id) })
+                            onTailSeen: { [store, id = conversation.id] in store.tailSeen(id) },
+                            onTailLeft: { [store, id = conversation.id] in store.tailLeft(id) })
                     .equatable()
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A click anywhere in the thread puts the keyboard in this tile's composer; links
@@ -87,6 +88,11 @@ struct ConversationTile: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    if store.needsReply(conversation.id) {
+                        Image(systemName: "flag.fill").font(.system(size: 9)).foregroundStyle(Palette.needsReply)
+                            .help("Needs Reply — clear it from this header's menu or the sidebar")
+                            .accessibilityLabel("Needs reply")
+                    }
                     if store.isProtected(conversation.id) {
                         Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary)
                             .help("Protected: never replaced to make room for another conversation")
@@ -132,6 +138,8 @@ struct ConversationTile: View {
         return [
             // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
             .init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }),
+            .init(title: store.needsReply(id) ? "Clear Needs Reply" : "Mark as Needs Reply",
+                  isEnabled: { [store] in store.conversations.contains { $0.id == id } }) { [store] in store.toggleNeedsReply(id) },
             .init(title: conversation.isComposeDraft ? "Discard New Message" : "Discard Draft",
                   isEnabled: { [store] in store.composeDrafts[id] != nil || store.hasDraft(id) }) { [store] in store.discardDraft(id) },
             .init(title: "Close Tile", action: { [store] in store.close(id) }, separatedAbove: true),
@@ -222,8 +230,10 @@ struct MessageList: View, Equatable {
     /// The newest row the reader has seen; incoming messages after it are new.
     var seenBoundary: Int64? = nil
     let onLoadMore: () -> Void
-    /// The newest message is in view: everything up to it has been seen.
+    /// The newest message is in view (the store marks it seen once the reader can see the tile),
+    /// and when it no longer is.
     var onTailSeen: () -> Void = {}
+    var onTailLeft: () -> Void = {}
     @State private var isNearBottom = true
     /// A reply's original that was just jumped to, outlined for a moment.
     @State private var highlightedID: String?
@@ -341,7 +351,8 @@ struct MessageList: View, Equatable {
             }
         }
         .onAppear { if isNearBottom { onTailSeen() } }
-        .onChange(of: isNearBottom) { _, near in if near { onTailSeen() } }
+        .onDisappear { onTailLeft() }
+        .onChange(of: isNearBottom) { _, near in if near { onTailSeen() } else { onTailLeft() } }
         .onChange(of: ids) { old, new in
             // Only rows appended at the tail animate: never the initial load (no change event),
             // an older page loading above, a reconnect or confirmation (same identities), a

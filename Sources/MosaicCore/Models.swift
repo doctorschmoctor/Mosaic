@@ -366,6 +366,9 @@ public struct Workspace: Codable, Equatable, Sendable {
     /// Open tiles that are never replaced to make room for another conversation. Protection
     /// belongs to the open tile: it ends when the tile closes.
     public var protectedIDs: Set<String> = []
+    /// Conversations the reader marked as needing a reply: a reminder of their own, kept until
+    /// they clear it, apart from what is unread.
+    public var needsReplyIDs: Set<String> = []
 
     /// The zoom steps Mosaic offers.
     public static let zoomRange: ClosedRange<Double> = 0.8...1.6
@@ -380,7 +383,7 @@ public struct Workspace: Codable, Equatable, Sendable {
         self.openIDs = Array(openIDs.filter { seen.insert($0).inserted }.prefix(Self.maximumTiles))
         self.focusedID = self.openIDs.first
     }
-    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden, zoom, pinnedIDs, protectedIDs }
+    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden, zoom, pinnedIDs, protectedIDs, needsReplyIDs }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         openIDs = try container.decodeIfPresent([String].self, forKey: .openIDs) ?? []
@@ -393,6 +396,7 @@ public struct Workspace: Codable, Equatable, Sendable {
         pinnedIDs = try container.decodeIfPresent([String].self, forKey: .pinnedIDs) ?? []
         protectedIDs = try container.decodeIfPresent(Set<String>.self, forKey: .protectedIDs) ?? []
         protectedIDs.formIntersection(openIDs)
+        needsReplyIDs = try container.decodeIfPresent(Set<String>.self, forKey: .needsReplyIDs) ?? []
     }
     @discardableResult public mutating func open(_ id: String) -> Bool {
         if openIDs.contains(id) { focusedID = id; return true }

@@ -10,6 +10,7 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 - **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft and attached files are kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch; nothing is sent at launch.
 - **Drafts** — A conversation with something unsent says **Draft** in the sidebar, with its first line. Closing a tile (×, Esc or ⌘⇧W) never throws work away: a New Message you close keeps its recipients, text and files and waits under **Drafts** at the top of the sidebar, along with every conversation that has a draft; open it from there to carry on. **Discard Draft** (right-click a row or a tile's header) throws one draft away, and **Undo** (or ⌘Z) brings it back for a few seconds. A file you chose is never deleted.
+- **What needs attention** — The sidebar's **Unread**, **Needs Reply** (the flag) and **Drafts** filters list just those conversations, each with a count. **Mark as Needs Reply** (right-click a row or a tile's header, or ⌘⇧R) is your own reminder: reading the conversation keeps it until you clear it. **Go to Next Unread** (⌘⌥U) opens the next conversation with something unread. Focus chips show a blue dot for unread and an orange one for a draft. Unread is Mosaic's own: a message counts as read only once its tile shows it while Mosaic is in front and the tile is on screen; Messages is never told and no read receipt is sent.
 - **Pins and protected tiles** — Right-click a conversation and choose **Pin to Top** to keep it at the top of Mosaic's sidebar (Messages' own pins are untouched; a pinned conversation is listed however old it is). Right-click a tile's header and choose **Protect from Replacement** to keep that tile open when a fifth conversation needs room; a lock marks it. When every tile is protected, Mosaic asks which one to close — showing which have drafts — or lets you cancel.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
 - **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else, and received pictures can be copied or saved with a right-click.
@@ -75,6 +76,8 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **⌘⌥1 · ⌘⌥2 · ⌘⌥3** | Grid · Columns · Focus |
 | **⌘⇧W** | Close the focused tile |
 | **⌘⇧T** | Reopen the tile closed last, with its draft |
+| **⌘⌥U** | Go to the next conversation with something unread |
+| **⌘⇧R** | Mark the focused conversation as Needs Reply, or clear it |
 | **⌘Z** | Undo hiding a conversation or discarding a draft (while the sidebar offers it) |
 | **⌘R** | Refresh |
 | **⌘,** | Settings |
@@ -102,7 +105,7 @@ Mosaic covers existing conversations and text replies. It reads `~/Library/Messa
 - Sending reactions, threaded replies, edits and unsends, calls and brand-new groups is done in Messages — its scripting dictionary sends only text and files; **Reply in Messages** and **Open Messages** take you there.
 - Photos' own search (people, places, things) is not available to other apps, so the Photos grid is a plain library view.
 - Messages from one sender within fifteen minutes form a run with a single time stamp. **Delivered** / **Read** appears under the latest sent message once Messages reports it. Sends are never retried automatically.
-- Mosaic does not write to Apple's database or send read receipts. Its unread counts are its own: incoming messages after the newest one you had in view.
+- Mosaic does not write to Apple's database or send read receipts. Its unread counts are its own: incoming messages after the newest one you had in view — counted as seen only while Mosaic is the active app, its window is on screen, and the tile is in view (in Columns, scrolled into the window; in Focus, the one shown).
 - The database schema is Apple's and undocumented; a macOS release may require an update.
 
 ## Privacy

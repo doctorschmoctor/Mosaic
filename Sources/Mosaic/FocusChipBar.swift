@@ -11,18 +11,24 @@ struct FocusChip: Equatable, Identifiable {
     let initials: String
     let isGroup: Bool
     let isSelected: Bool
+    /// Something in it is unread (or a message arrived while you were elsewhere).
+    var hasUnread = false
+    /// Its composer holds something unsent.
+    var hasDraft = false
 
-    init(conversation: Conversation, isSelected: Bool) {
+    init(conversation: Conversation, isSelected: Bool, hasUnread: Bool = false, hasDraft: Bool = false) {
         id = conversation.id; name = conversation.name; initials = conversation.initials
-        isGroup = conversation.isGroup; self.isSelected = isSelected
+        isGroup = conversation.isGroup; self.isSelected = isSelected; self.hasUnread = hasUnread; self.hasDraft = hasDraft
     }
-    init(id: String, name: String, initials: String, isGroup: Bool = false, isSelected: Bool = false) {
+    init(id: String, name: String, initials: String, isGroup: Bool = false, isSelected: Bool = false, hasUnread: Bool = false, hasDraft: Bool = false) {
         self.id = id; self.name = name; self.initials = initials; self.isGroup = isGroup; self.isSelected = isSelected
+        self.hasUnread = hasUnread; self.hasDraft = hasDraft
     }
 
-    /// The chips for a set of open tiles, in tile order, with the focused one selected.
-    static func chips(for tiles: [Conversation], focusedID: String?) -> [FocusChip] {
-        tiles.map { FocusChip(conversation: $0, isSelected: $0.id == focusedID) }
+    /// The chips for a set of open tiles, in tile order, with the focused one selected and the
+    /// unread and drafted ones marked.
+    static func chips(for tiles: [Conversation], focusedID: String?, unread: Set<String> = [], drafts: Set<String> = []) -> [FocusChip] {
+        tiles.map { FocusChip(conversation: $0, isSelected: $0.id == focusedID, hasUnread: unread.contains($0.id), hasDraft: drafts.contains($0.id)) }
     }
 }
 
@@ -84,8 +90,11 @@ struct FocusChipBar: NSViewRepresentable {
             let measured = (chip.name as NSString).size(withAttributes: [.font: Self.nameFont]).width.rounded(.up)
             return min(measured, Self.maximumNameWidth)
         }
+        /// Room after the name for the unread dot and the draft mark.
+        static let markWidth: CGFloat = 11
         private func chipWidth(_ chip: FocusChip) -> CGFloat {
-            Self.horizontalPadding + Self.avatarSize + 7 + nameWidth(chip) + Self.horizontalPadding
+            let marks = CGFloat((chip.hasUnread ? 1 : 0) + (chip.hasDraft ? 1 : 0)) * Self.markWidth
+            return Self.horizontalPadding + Self.avatarSize + 7 + nameWidth(chip) + marks + Self.horizontalPadding
         }
         private func invalidateLayout() {
             var x: CGFloat = 0
@@ -98,7 +107,7 @@ struct FocusChipBar: NSViewRepresentable {
             elements = zip(chips, frames).map { chip, frame in
                 let element = PressableAccessibilityElement()
                 element.setAccessibilityRole(.button)
-                element.setAccessibilityLabel("Show \(chip.name)")
+                element.setAccessibilityLabel("Show \(chip.name)" + (chip.hasUnread ? ", unread" : "") + (chip.hasDraft ? ", draft" : ""))
                 element.setAccessibilityParent(self)
                 element.setAccessibilityFrameInParentSpace(frame)
                 element.onPress = { [weak self] in self?.onSelect?(chip.id) }
@@ -158,7 +167,15 @@ struct FocusChipBar: NSViewRepresentable {
                     initials.draw(at: CGPoint(x: avatar.midX - size.width / 2, y: avatar.midY - size.height / 2), withAttributes: attributes)
                 }
                 let nameX = avatar.maxX + 7
-                let nameRect = CGRect(x: nameX, y: frame.minY, width: frame.maxX - Self.horizontalPadding - nameX, height: frame.height)
+                let marks = CGFloat((chip.hasUnread ? 1 : 0) + (chip.hasDraft ? 1 : 0)) * Self.markWidth
+                let nameRect = CGRect(x: nameX, y: frame.minY, width: frame.maxX - Self.horizontalPadding - marks - nameX, height: frame.height)
+                // After the name: a blue dot for unread, an orange one for a draft.
+                var markX = nameRect.maxX + 5
+                for (shown, color) in [(chip.hasUnread, NSColor.systemBlue), (chip.hasDraft, NSColor.systemOrange)] where shown {
+                    color.setFill()
+                    NSBezierPath(ovalIn: CGRect(x: markX, y: frame.midY - 3, width: 6, height: 6)).fill()
+                    markX += Self.markWidth
+                }
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.lineBreakMode = .byTruncatingTail
                 let attributes: [NSAttributedString.Key: Any] = [.font: Self.nameFont, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]

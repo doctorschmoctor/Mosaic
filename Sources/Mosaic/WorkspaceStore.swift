@@ -47,6 +47,8 @@ import MosaicCore
     var pinnedIDs: [String] = [] { didSet { if pinnedIDs != oldValue { persist() } } }
     /// Open tiles never replaced to make room for another conversation.
     var protectedIDs: Set<String> = [] { didSet { if protectedIDs != oldValue { persist() } } }
+    /// Conversations marked Needs Reply (a reminder the reader sets and clears; not unread state).
+    var needsReplyIDs: Set<String> = [] { didSet { if needsReplyIDs != oldValue { persist() } } }
     /// Every open tile is protected and another conversation needs one: the reader chooses which closes.
     private(set) var replacementChoice: ReplacementChoice?
     /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
@@ -324,10 +326,12 @@ import MosaicCore
         guard let scheduled = scheduledPollInterval, pollInterval < scheduled else { return }
         startPolling()
     }
-    private func setAppActive(_ active: Bool) {
+    /// Whether Mosaic is the active app (from the app's notifications; tests set it directly).
+    func setAppActive(_ active: Bool) {
         guard appActive != active else { return }
         appActive = active
         if active, isLive { Task { await self.refresh() } }
+        if active { seeingMayHaveChanged() }
         pollCadenceMayHaveChanged()
     }
 
@@ -345,7 +349,7 @@ import MosaicCore
             var state = Workspace()
             state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
             state.drafts = drafts; state.seenMessageIDs = seenMessageIDs; state.hidden = hidden
-            state.zoom = zoom; state.pinnedIDs = pinnedIDs; state.protectedIDs = protectedIDs
+            state.zoom = zoom; state.pinnedIDs = pinnedIDs; state.protectedIDs = protectedIDs; state.needsReplyIDs = needsReplyIDs
             return state
         }
         set {
@@ -358,6 +362,7 @@ import MosaicCore
             if zoom != newValue.zoom { zoom = newValue.zoom }
             if pinnedIDs != newValue.pinnedIDs { pinnedIDs = newValue.pinnedIDs }
             if protectedIDs != newValue.protectedIDs { protectedIDs = newValue.protectedIDs }
+            if needsReplyIDs != newValue.needsReplyIDs { needsReplyIDs = newValue.needsReplyIDs }
         }
     }
     /// Applies a `Workspace` mutation, writing back only the fields it changed.
@@ -375,6 +380,8 @@ import MosaicCore
         let rows: [Conversation]
         switch sidebarFilter {
         case .all: rows = pinnedFirst(visibleConversations)
+        case .unread: rows = pinnedFirst(unreadConversations)
+        case .needsReply: rows = pinnedFirst(visibleConversations.filter { needsReplyIDs.contains($0.id) })
         case .drafts: rows = draftRows
         }
         guard !search.isEmpty else { return rows }
@@ -422,6 +429,41 @@ import MosaicCore
         return newMessages + visibleConversations.filter { draftSummaries[$0.id] != nil }
     }
     var draftCount: Int { draftRows.count }
+    /// Conversations with messages Mosaic has not seen you read (its own count; nothing is
+    /// marked read in Messages and no one is told).
+    var unreadConversations: [Conversation] { visibleConversations.filter { $0.unreadCount > 0 } }
+    var unreadCount: Int { unreadConversations.count }
+    var needsReplyCount: Int { visibleConversations.filter { needsReplyIDs.contains($0.id) }.count }
+    /// How many rows a filter lists, for its count in the sidebar.
+    func count(for filter: SidebarFilter) -> Int {
+        switch filter {
+        case .all: return 0
+        case .unread: return unreadCount
+        case .needsReply: return needsReplyCount
+        case .drafts: return draftCount
+        }
+    }
+    func needsReply(_ id: String) -> Bool { needsReplyIDs.contains(id) }
+    /// Marks a conversation as needing a reply, or clears that. Reading it changes nothing here:
+    /// only the reader clears it.
+    func toggleNeedsReply(_ id: String) {
+        guard conversations.contains(where: { $0.id == id }) else { return }
+        instantly { if needsReplyIDs.contains(id) { needsReplyIDs.remove(id) } else { needsReplyIDs.insert(id) } }
+    }
+    /// Opens the next conversation with unread messages (or an open tile with a new message),
+    /// after the focused one in the sidebar's order, wrapping around; the cursor goes to its field.
+    /// Returns false when there is none.
+    @discardableResult func goToNextUnread() -> Bool {
+        let rows = pinnedFirst(visibleConversations)
+        let waiting = Set(rows.filter { $0.unreadCount > 0 || tilesWithNews.contains($0.id) }.map(\.id))
+        guard !waiting.isEmpty else { return false }
+        let ids = rows.map(\.id)
+        let start = focusedID.flatMap { ids.firstIndex(of: $0) } ?? (ids.count - 1)
+        // The first one after the focused conversation, wrapping round (to itself last).
+        guard let next = (1...ids.count).lazy.map({ ids[(start + $0) % ids.count] }).first(where: waiting.contains) else { return false }
+        openAndType(next)
+        return true
+    }
     var tiles: [Conversation] { openIDs.compactMap(tile(for:)) }
     /// A tile's content: a conversation, or the placeholder for a new message being addressed.
     func tile(for id: String) -> Conversation? {
@@ -632,6 +674,8 @@ import MosaicCore
     /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
         historyLimits[id] = nil
+        tilesOutOfView.remove(id)
+        tailsInView.remove(id)
         if tilesWithNews.contains(id) { tilesWithNews.remove(id) }
     }
     /// The newest database row among `messages` (bubbles still being sent are not rows yet).
@@ -758,7 +802,11 @@ import MosaicCore
     }
     func focus(_ id: String) {
         guard openIDs.contains(id) else { return }
-        if focusedID != id { instantly { focusedID = id } }
+        if focusedID != id {
+            instantly { focusedID = id }
+            // In Focus the focused tile is the one on screen.
+            if layout == .focus { markSeenIfVisible(id) }
+        }
         // Focusing a tile scrolled up in history does not read what is below.
         noteUse(id)
     }
@@ -985,6 +1033,72 @@ import MosaicCore
     func draft(_ id: String) -> Binding<String> {
         Binding(get: { self.drafts[id] ?? "" }, set: { if self.drafts[id] ?? "" != $0 { self.drafts[id] = $0; self.noteUse(id) } })
     }
+    // MARK: Seeing the newest message
+
+    /// Threads showing their newest message right now (reported by the thread as it scrolls).
+    @ObservationIgnored private var tailsInView: Set<String> = []
+    /// Open tiles scrolled out of the workspace's view (Columns can be wider than the window).
+    @ObservationIgnored private var tilesOutOfView: Set<String> = []
+    /// Whether the workspace window is on screen: not minimized and not fully covered.
+    @ObservationIgnored private(set) var windowVisible = true
+    @ObservationIgnored private var windowObservers: [NSObjectProtocol] = []
+    @ObservationIgnored private weak var window: NSWindow?
+
+    /// A thread shows its newest message: everything up to it is seen — once the reader can
+    /// actually see it: Mosaic is the active app, its window is on screen, and the tile is in view.
+    /// Until then it waits (`seeingMayHaveChanged`), so nothing is marked seen behind the reader's back.
+    func tailSeen(_ id: String) {
+        tailsInView.insert(id)
+        markSeenIfVisible(id)
+    }
+    /// A thread no longer shows its newest message (scrolled up, closed, or out of the layout).
+    func tailLeft(_ id: String) { tailsInView.remove(id) }
+    /// Whether the reader could be looking at this tile now.
+    func canSee(_ id: String) -> Bool {
+        guard appActive, windowVisible, openIDs.contains(id), !tilesOutOfView.contains(id) else { return false }
+        return layout != .focus || focused?.id == id
+    }
+    private func markSeenIfVisible(_ id: String) {
+        guard tailsInView.contains(id), canSee(id) else { return }
+        markSeen(id)
+    }
+    /// Something that decides what the reader can see changed: waiting threads are seen now.
+    func seeingMayHaveChanged() {
+        for id in tailsInView { markSeenIfVisible(id) }
+    }
+    /// A tile came into the workspace's view or left it (Columns).
+    func setTileInView(_ id: String, _ inView: Bool) {
+        if inView { if tilesOutOfView.remove(id) != nil { markSeenIfVisible(id) } }
+        else { tilesOutOfView.insert(id) }
+    }
+    /// The workspace window (from the view that hosts it): the keyboard hand-over works in it, and
+    /// what is seen follows whether it is on screen.
+    func attach(window: NSWindow?) {
+        composerFocus.attach(window: window)
+        guard let window, window !== self.window else { return }
+        self.window = window
+        for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
+        let center = NotificationCenter.default
+        windowObservers = [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification]
+            .map { name in
+                center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.windowVisibilityChanged() }
+                }
+            }
+        windowVisibilityChanged()
+    }
+    private func windowVisibilityChanged() {
+        guard let window else { return }
+        let visible = !window.isMiniaturized && window.occlusionState.contains(.visible)
+        setWindowVisible(visible)
+    }
+    /// Whether the workspace window is on screen (tests set it directly).
+    func setWindowVisible(_ visible: Bool) {
+        guard windowVisible != visible else { return }
+        windowVisible = visible
+        if visible { seeingMayHaveChanged() }
+    }
+
     /// Everything in the conversation up to its newest row has been seen: the unread count clears
     /// and the seen boundary moves to that row. Called when a thread's newest message is in view,
     /// and after sending (sending is reading).
@@ -1007,6 +1121,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false; replacementChoice = nil
+        tailsInView = []; tilesOutOfView = []
         composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
@@ -2099,11 +2214,13 @@ struct DraftSummary: Equatable {
 
 /// What the sidebar lists.
 enum SidebarFilter: String, CaseIterable, Identifiable {
-    case all, drafts
+    case all, unread, needsReply, drafts
     var id: String { rawValue }
     var title: String {
         switch self {
         case .all: return "All"
+        case .unread: return "Unread"
+        case .needsReply: return "Needs Reply"
         case .drafts: return "Drafts"
         }
     }

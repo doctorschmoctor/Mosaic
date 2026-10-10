@@ -19,6 +19,8 @@ enum Palette {
     })
     /// The "Draft" mark on a sidebar row.
     static let draft = Color(nsColor: .systemOrange)
+    /// The Needs Reply flag.
+    static let needsReply = Color(nsColor: .systemRed)
     /// #218AFF — outgoing iMessage bubbles.
     static let bubbleBlue = Color(red: 0x21 / 255, green: 0x8A / 255, blue: 0xFF / 255)
     static func outgoing(service: String) -> Color {
@@ -85,7 +87,7 @@ struct WorkspaceView: View {
         .background(WindowReader { window in
             WindowChrome.apply(to: window)
             keyboard.attach(window: window, store: store, sidebar: sidebarKeyboard)
-            store.composerFocus.attach(window: window)
+            store.attach(window: window)
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
         .sheet(isPresented: $store.showHiddenConversations) { HiddenConversationsView().environment(store) }
@@ -405,6 +407,7 @@ struct ConversationRow: View {
     private var row: some View {
         let draft = store.draftSummaries[conversation.id]
         let pinned = store.isPinned(conversation.id)
+        let flagged = store.needsReply(conversation.id)
         return Button(action: activate) {
             HStack(spacing: 10) {
                 if conversation.isComposeDraft { NewMessageAvatar(size: 36) } else { Avatar(conversation: conversation, size: 36) }
@@ -413,8 +416,11 @@ struct ConversationRow: View {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         if pinned { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityHidden(true) }
                         Spacer(minLength: 0)
+                        // Your own reminder, apart from what is unread.
+                        if flagged { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundStyle(Palette.needsReply) }
+                        // Unread shows on an open conversation too, beside the grid icon.
+                        if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
                         if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
-                        else if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
                     }
                     if let draft {
                         // Something unsent waits in this conversation's composer (or this New Message).
@@ -437,7 +443,9 @@ struct ConversationRow: View {
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle())
             .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
-                                + (pinned ? ", pinned" : "") + (draft.map { ", draft: \($0.line)" } ?? ""))
+                                + (pinned ? ", pinned" : "")
+                                + (conversation.unreadCount > 0 ? ", \(conversation.unreadCount) unread" : "")
+                                + (flagged ? ", needs reply" : "") + (draft.map { ", draft: \($0.line)" } ?? ""))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             // No highlight under the pointer. Resting on a row fetches its history ahead (after a
             // short pause, so a sweep down the list fetches nothing) and the tile opens on its messages.
@@ -452,6 +460,7 @@ struct ConversationRow: View {
                 if !conversation.isComposeDraft {
                     // Mosaic's own pin: the conversation stays at the top of this sidebar. Messages' pins are untouched.
                     Button(pinned ? "Unpin" : "Pin to Top") { store.togglePin(conversation.id) }
+                    Button(flagged ? "Clear Needs Reply" : "Mark as Needs Reply") { store.toggleNeedsReply(conversation.id) }
                 }
                 if !conversation.isComposeDraft, store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
                 if draft != nil || conversation.isComposeDraft {
@@ -490,40 +499,63 @@ struct SidebarFilterBar: View {
     @Environment(WorkspaceStore.self) private var store
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(SidebarFilter.allCases) { filter in
-                let selected = store.sidebarFilter == filter
-                let count = filter == .drafts ? store.draftCount : 0
-                Button {
-                    if store.sidebarFilter != filter { instantly { store.sidebarFilter = filter; store.sidebarSelection = nil } }
-                } label: {
-                    HStack(spacing: 4) {
-                        Text(filter.title)
-                        if count > 0 { Text("\(count)").monospacedDigit().foregroundStyle(selected ? Palette.accent.opacity(0.8) : .secondary) }
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 9).padding(.vertical, 4)
-                    .foregroundStyle(selected ? Palette.accent : Color.primary)
-                    .background(selected ? Palette.accent.opacity(0.15) : Color.primary.opacity(0.05), in: Capsule())
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(count > 0 ? "\(filter.title), \(count)" : filter.title)
-                .accessibilityAddTraits(selected ? .isSelected : [])
-                .help(filter == .drafts ? "Unsent messages, including New Messages you closed" : "All conversations")
-            }
+        // With every count showing, the hidden-conversations button gives way first (it is also
+        // in the Workspace menu and in Settings).
+        ViewThatFits(in: .horizontal) {
+            bar(showsHidden: !store.hidden.isEmpty)
+            bar(showsHidden: false)
+        }
+        .padding(.horizontal, 12).padding(.top, 8)
+    }
+
+    private func bar(showsHidden: Bool) -> some View {
+        HStack(spacing: 4) {
+            ForEach(SidebarFilter.allCases) { filter in pill(filter) }
             Spacer(minLength: 0)
-            if !store.hidden.isEmpty {
+            if showsHidden {
                 Button { store.showHiddenConversations = true } label: {
                     Image(systemName: "eye.slash").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                        .frame(width: 24, height: 22).contentShape(Rectangle())
+                        .frame(width: 22, height: 22).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Hidden conversations (\(store.hidden.count))")
                 .accessibilityLabel("Hidden conversations, \(store.hidden.count)")
             }
         }
-        .padding(.horizontal, 12).padding(.top, 8)
+    }
+
+    private func pill(_ filter: SidebarFilter) -> some View {
+        let selected = store.sidebarFilter == filter
+        let count = store.count(for: filter)
+        return Button {
+            if store.sidebarFilter != filter { instantly { store.sidebarFilter = filter; store.sidebarSelection = nil } }
+        } label: {
+            HStack(spacing: 3) {
+                // Needs Reply is a flag, to keep the row short; its name is in the help and for VoiceOver.
+                if filter == .needsReply { Image(systemName: "flag.fill").font(.system(size: 9, weight: .semibold)) }
+                else { Text(filter.title) }
+                if count > 0 { Text("\(count)").monospacedDigit().foregroundStyle(selected ? Palette.accent.opacity(0.8) : .secondary) }
+            }
+            .font(.system(size: 11, weight: .medium))
+            .padding(.horizontal, 7).padding(.vertical, 4)
+            .frame(minHeight: 20)
+            .foregroundStyle(selected ? Palette.accent : filter == .needsReply ? Palette.needsReply : Color.primary)
+            .background(selected ? Palette.accent.opacity(0.15) : Color.primary.opacity(0.05), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(count > 0 ? "\(filter.title), \(count)" : filter.title)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .help(Self.help(for: filter))
+    }
+
+    static func help(for filter: SidebarFilter) -> String {
+        switch filter {
+        case .all: return "All conversations"
+        case .unread: return "Conversations with messages you haven't seen in Mosaic (Messages and the sender are not told)"
+        case .needsReply: return "Needs Reply: conversations you flagged to answer; reading them keeps the flag until you clear it"
+        case .drafts: return "Unsent messages, including New Messages you closed"
+        }
     }
 }
 
@@ -759,6 +791,7 @@ struct TileWorkspace: View {
             // nothing clips) reached nothing — AppKit's hit test ends at the document's frame.
             let topInset = layout == .focus ? Self.chipRowHeight : 0
             let viewport = geometry.size
+            let viewFrame = geometry.frame(in: .global)
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights, topInset: topInset)
             // How any order would lay out right now, so a reorder knows where each tile was and where it goes.
@@ -772,7 +805,7 @@ struct TileWorkspace: View {
             // outgrow the window, sideways; the scroll view is inert in Grid and Focus, whose
             // plans always fit it.
             ScrollViewReader { scroller in
-                ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan, chipRow: layout == .focus) }
+                ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan, chipRow: layout == .focus, viewFrame: viewFrame) }
                     .scrollDisabled(layout != .columns)
                     // Grid and Focus never scroll, so a dragged tile may draw over the margins.
                     .scrollClipDisabled(layout != .columns)
@@ -788,16 +821,15 @@ struct TileWorkspace: View {
         }
     }
 
-    private func canvas(_ plan: TilePlan, chipRow: Bool) -> some View {
+    private func canvas(_ plan: TilePlan, chipRow: Bool, viewFrame: CGRect) -> some View {
         TileCanvas {
             if chipRow {
-                // Choosing a chip shows that tile and puts the keyboard in its message field.
-                FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.requestComposerFocus(id) }
+                FocusChipRow()
                     .zIndex(3)
                     .tileFrame(CGRect(x: 0, y: 0, width: plan.size.width, height: FocusChipBar.height))
             }
             ForEach(store.tiles) { chat in
-                if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan) }
+                if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, viewFrame: viewFrame) }
             }
             ForEach(plan.dividers) { divider in
                 DividerHandle(divider: divider, enabled: store.heldTile == nil,
@@ -811,7 +843,7 @@ struct TileWorkspace: View {
         .coordinateSpace(name: TileCanvas.space)
     }
 
-    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan) -> some View {
+    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, viewFrame: CGRect) -> some View {
         let held = store.heldTile?.id == chat.id ? store.heldTile : nil
         // A held tile keeps its size; its place in the layout is the slot a release would give
         // it, and it is drawn where the pointer has it (`TileMotion`).
@@ -825,6 +857,12 @@ struct TileWorkspace: View {
                 onDragEnded: { store.finishTileDrag(chat.id) })
                 .frame(width: frame.width, height: frame.height)
         }
+        // Whether the tile is within the workspace's view (Columns can scroll tiles out of it): a
+        // tile out of view does not count as read.
+        .onGeometryChange(for: Bool.self) { proxy in
+            let frame = proxy.frame(in: .global)
+            return frame.width <= 0 || frame.intersection(viewFrame).width >= frame.width * 0.8
+        } action: { [store, id = chat.id] inView in store.setTileInView(id, inView) }
         .id(chat.id)
         .zIndex(raised ? 100 : 1)
         .tileFrame(frame)
@@ -843,6 +881,21 @@ struct TileWorkspace: View {
             rowWeights = TileLayout.resizedPair(start.rowSizes, at: index, delta: translation.height, minimum: TileLayout.minimumHeight)
         case .column(let index):
             columnWeights = TileLayout.resizedPair(start.columnSizes, at: index, delta: translation.width, minimum: 300)
+        }
+    }
+}
+
+/// Focus layout's chips. Choosing one shows that tile and puts the keyboard in its message field;
+/// a chip says when its conversation has something unread, or a draft. A view of its own, so
+/// what it reads (drafts change as you type) re-renders only the chips.
+struct FocusChipRow: View {
+    @Environment(WorkspaceStore.self) private var store
+    var body: some View {
+        let tiles = store.tiles
+        FocusChipBar(chips: FocusChip.chips(for: tiles, focusedID: store.focused?.id,
+                                            unread: Set(tiles.filter { $0.unreadCount > 0 || store.tilesWithNews.contains($0.id) }.map(\.id)),
+                                            drafts: Set(tiles.map(\.id).filter { store.draftSummaries[$0] != nil }))) { id in
+            store.requestComposerFocus(id)
         }
     }
 }
