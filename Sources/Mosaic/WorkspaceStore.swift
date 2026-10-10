@@ -90,6 +90,11 @@ import MosaicCore
     private(set) var draftSummaries: [String: DraftSummary] = [:]
     /// What the sidebar lists: every conversation, or only the drafts.
     var sidebarFilter: SidebarFilter = .all
+    /// Shows one of the sidebar's filters (its pills, or ⌃⌘1–4); the keyboard's row starts over.
+    func setSidebarFilter(_ filter: SidebarFilter) {
+        guard sidebarFilter != filter else { return }
+        instantly { sidebarFilter = filter; sidebarSelection = nil }
+    }
     /// A change that can still be taken back (a discarded draft, a hidden conversation), shown at
     /// the bottom of the sidebar for a few seconds.
     private(set) var undoNote: UndoNote?
@@ -240,7 +245,8 @@ import MosaicCore
         self.defaults = defaults; self.database = database; self.services = services
         liveTransport = transport ?? (isolated ? UnavailableTransport() : AppleScriptTransport())
         animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
-        linkPreviews = defaults.string(forKey: "Mosaic.linkPreviews").flatMap(LinkPreviewPolicy.init(rawValue:)) ?? .automatic
+        let linkPreviews = defaults.string(forKey: "Mosaic.linkPreviews").flatMap(LinkPreviewPolicy.init(rawValue:)) ?? .automatic
+        self.linkPreviews = linkPreviews
         LinkPreviewLoader.shared.allowsFetching = linkPreviews != .off
         reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
@@ -851,6 +857,36 @@ import MosaicCore
         composerFocus.request(id, token: focusToken)
     }
     func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
+
+    // MARK: Tiles from the keyboard
+
+    /// Whether the focused tile can move or change size (not in Focus, not alone, not held).
+    var canArrangeTiles: Bool { layout != .focus && openIDs.count > 1 && tileDrag == nil }
+    /// Moves the focused tile one place earlier or later (Workspace › Move Tile Left / Right): it
+    /// trades places with the tile there, which springs over as when dragging. The keyboard stays
+    /// where it was. False (the menu beeps) when there is no place that way.
+    @discardableResult func moveFocusedTile(by offset: Int) -> Bool {
+        guard canArrangeTiles, let id = focused?.id else { return false }
+        var moved = workspace
+        guard moved.move(id, by: offset) else { return false }
+        let springs = springOffsets(from: openIDs, to: moved.openIDs, except: "")
+        instantly {
+            workspace = moved
+            tileSprings.merge(springs) { _, new in new }
+        }
+        if !springs.isEmpty { settleSprings() }
+        return true
+    }
+    /// Makes the focused tile a step wider, narrower, taller or shorter (the workspace's tile
+    /// view holds the proportions and answers; it beeps when the tile cannot change that way).
+    func resizeFocusedTile(_ step: TileResizeStep) {
+        guard canArrangeTiles, let id = focused?.id else { NSSound.beep(); return }
+        NotificationCenter.default.post(name: .resizeTile, object: TileResizeRequest(id: id, step: step))
+    }
+    /// Gives every tile the same size again (Workspace › Equal Tile Sizes).
+    func equalizeTiles() {
+        NotificationCenter.default.post(name: .equalizeTiles, object: nil)
+    }
 
     /// The tiles the reader can choose from when every one is protected: name, and whether it
     /// holds a draft (which is kept either way).

@@ -421,6 +421,13 @@ public struct Workspace: Codable, Equatable, Sendable {
         openIDs.removeAll { $0 == source }
         if let index = openIDs.firstIndex(of: destination) { openIDs.insert(source, at: index) }
     }
+    /// Moves a tile one place earlier (`offset` −1) or later (+1) in the layout's reading order,
+    /// trading places with the tile there. False when there is no place that way.
+    @discardableResult public mutating func move(_ id: String, by offset: Int) -> Bool {
+        guard let index = openIDs.firstIndex(of: id), openIDs.indices.contains(index + offset), offset != 0 else { return false }
+        openIDs.swapAt(index, index + offset)
+        return true
+    }
     public mutating func reconcile(availableIDs: Set<String>) {
         var seen = Set<String>()
         openIDs = Array(openIDs.filter { availableIDs.contains($0) && seen.insert($0).inserted }.prefix(Self.maximumTiles))

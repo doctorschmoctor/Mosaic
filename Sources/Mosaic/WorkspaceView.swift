@@ -529,7 +529,7 @@ struct SidebarFilterBar: View {
         let selected = store.sidebarFilter == filter
         let count = store.count(for: filter)
         return Button {
-            if store.sidebarFilter != filter { instantly { store.sidebarFilter = filter; store.sidebarSelection = nil } }
+            store.setSidebarFilter(filter)
         } label: {
             HStack(spacing: 3) {
                 // Needs Reply is a flag, to keep the row short; its name is in the help and for VoiceOver.
@@ -821,6 +821,22 @@ struct TileWorkspace: View {
             gridFractions = [:]; rowWeights = []; columnWeights = []
             resizeStart = nil
         }
+        // The Workspace menu's tile sizes: a step for the focused tile, or equal sizes.
+        .onReceive(NotificationCenter.default.publisher(for: .resizeTile)) { note in
+            guard let request = note.object as? TileResizeRequest, let plan = store.tilePlanner?(store.displayOrder),
+                  let next = TileLayout.resized(request.id, request.step, in: plan, layout: store.layout, proportions: proportions)
+            else { NSSound.beep(); return }
+            instantly { proportions = next }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .equalizeTiles)) { _ in
+            resizeStart = nil
+            if proportions.isEqualSizes { NSSound.beep() } else { instantly { proportions = .equal } }
+        }
+    }
+
+    private var proportions: TileProportions {
+        get { TileProportions(gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights) }
+        nonmutating set { gridFractions = newValue.gridFractions; rowWeights = newValue.rowWeights; columnWeights = newValue.columnWeights }
     }
 
     private func canvas(_ plan: TilePlan, chipRow: Bool, viewFrame: CGRect) -> some View {
@@ -986,6 +1002,9 @@ struct DividerHandle: View {
 
     func handle(_ event: NSEvent) -> Bool {
         guard let store, let window, event.window === window, window.attachedSheet == nil, NSApp.modalWindow == nil else { return false }
+        // Composing with an input method (Japanese, Chinese, accents held down): every key belongs
+        // to the composition — Tab, Esc and the arrows included — in any text field of the window.
+        if let text = window.firstResponder as? NSTextView, text.hasMarkedText() { return false }
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         if let key = event.charactersIgnoringModifiers?.lowercased() {
             if modifiers == .command {
@@ -1018,7 +1037,6 @@ struct DividerHandle: View {
         case 48: // Tab
             guard modifiers.subtracting(.shift).isEmpty else { return false }
             let editor = window.firstResponder as? DraftTextView
-            if let editor, editor.hasMarkedText() { return false }
             return store.moveFocus(forward: !modifiers.contains(.shift), from: editor?.conversationID)
         case 125, 126: // ↓ ↑ from the search field: into the list.
             guard modifiers.isEmpty, inSearchField, let sidebar else { return false }
@@ -1064,4 +1082,17 @@ struct WindowReader: NSViewRepresentable {
         }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
+}
+
+/// A keyboard step for one tile, posted by the store to the tile view that holds the proportions.
+struct TileResizeRequest {
+    let id: String
+    let step: TileResizeStep
+}
+
+extension Notification.Name {
+    /// A `TileResizeRequest` for the workspace's tiles.
+    static let resizeTile = Notification.Name("Mosaic.resizeTile")
+    /// Every tile back to the same size.
+    static let equalizeTiles = Notification.Name("Mosaic.equalizeTiles")
 }

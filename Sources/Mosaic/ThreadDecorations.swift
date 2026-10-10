@@ -131,6 +131,7 @@ struct ReplyExcerpt: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Reply to " + label)
         .accessibilityAddTraits(context == .missing ? [] : .isButton)
+        .accessibilityAction(named: "Show Original") { activate() }
     }
 
     private var label: String {

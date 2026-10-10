@@ -220,4 +220,6 @@ final class PressableAccessibilityElement: NSAccessibilityElement {
     var onPress: (() -> Void)?
     override func accessibilityPerformPress() -> Bool { onPress?(); return true }
     override func isAccessibilityElement() -> Bool { true }
+    /// Pressable: VoiceOver otherwise reported these buttons (a tile's close, a Focus chip) as dimmed.
+    override func isAccessibilityEnabled() -> Bool { onPress != nil }
 }

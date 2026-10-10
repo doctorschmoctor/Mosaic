@@ -777,11 +777,20 @@ struct MessageBubble: View {
                     .padding(.horizontal, 12 * zoom).padding(.vertical, 8 * zoom)
                     .background(fromMe ? Palette.outgoing(service: service) : Palette.incoming,
                                 in: RoundedRectangle(cornerRadius: 15 * zoom, style: .continuous))
-                    .contextMenu {
-                        Button("Copy") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.text, forType: .string)
+                    // VoiceOver reads who wrote it, and offers the context menu's actions by name.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(fromMe ? "You: \(message.text)" : "\(authorName): \(message.text)")
+                    .accessibilityActions {
+                        Button("Copy") { copyText() }
+                        ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
+                            Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
                         }
+                        if message.sendState?.isFailed == true {
+                            Button("Try Again") { Task { await store.retrySend(message.presentationID, in: threadID) } }
+                        }
+                    }
+                    .contextMenu {
+                        Button("Copy") { copyText() }
                         ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
                             Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
                         }
@@ -830,6 +839,11 @@ struct MessageBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)
         .padding(fromMe ? .leading : .trailing, 36 * zoom)
+    }
+
+    private func copyText() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message.text, forType: .string)
     }
 
     /// What can be done with a message Messages refused: send it as it was, take it back into the
@@ -1023,3 +1037,4 @@ struct OlderHistorySearchView: View {
         .accessibilityLabel("\(match.isFromMe ? "You" : senderName(match.sender)), \(MessageText.day(match.date)): \(MessageExcerpt.of(match))")
     }
 }
+

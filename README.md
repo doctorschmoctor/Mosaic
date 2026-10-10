@@ -79,6 +79,9 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **Esc** | Close a New Message tile (it is kept in Drafts) |
 | **⌘+ / ⌘− / ⌘0** | Zoom the conversations in · out · back to 100% (all tiles together) |
 | **⌘⌥1 · ⌘⌥2 · ⌘⌥3** | Grid · Columns · Focus |
+| **⌥⌘← / ⌥⌘→** | Move the focused tile one place earlier / later |
+| **⌃⌥⌘← → ↑ ↓** | Make the focused tile narrower · wider · shorter · taller (**Workspace › Equal Tile Sizes** evens them out) |
+| **⌃⌘1 – ⌃⌘4** | Sidebar: All · Unread · Needs Reply · Drafts |
 | **⌘⇧W** | Close the focused tile |
 | **⌘⇧T** | Reopen the tile closed last, with its draft |
 | **⌘⌥U** | Go to the next conversation with something unread |
@@ -87,7 +90,9 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **⌘R** | Refresh |
 | **⌘,** | Settings |
 
-In the New Message To field, **↑ ↓** move through suggestions, **Return** adds the highlighted person and **⌫** removes the last one.
+In the New Message To field, **↑ ↓** move through suggestions, **Return** adds the highlighted person and **⌫** removes the last one; **Esc** clears what you were typing first, then closes the tile (keeping it in Drafts). While an input method is composing (Japanese, Chinese, a held-down accent), every key — Tab, Esc, the arrows, ⌘F — goes to the composition.
+
+With VoiceOver, a message reads who wrote it, and its actions (VO-⌘-Space) are **Copy**, **Open** for each link and **Try Again** for one Messages refused; a reply's quote offers **Show Original**. Focus chips, tile buttons and the sidebar's filters are buttons with their full names, even when a narrow window cuts a chip's name (its tooltip shows it too).
 
 ## Mouse and trackpad
 

@@ -58,4 +58,20 @@ final class WorkspaceTests: XCTestCase {
         state.reorder("unknown", before: "a")
         XCTAssertEqual(state.openIDs, ["b", "a"])
     }
+
+    /// Moving a tile from the keyboard trades places with its neighbour, and stops at either end.
+    func testMovingATileTradesPlacesWithItsNeighbour() {
+        var workspace = Workspace()
+        workspace.openIDs = ["a", "b", "c"]
+        XCTAssertTrue(workspace.move("b", by: 1))
+        XCTAssertEqual(workspace.openIDs, ["a", "c", "b"])
+        XCTAssertFalse(workspace.move("b", by: 1), "already last")
+        XCTAssertTrue(workspace.move("b", by: -1))
+        XCTAssertTrue(workspace.move("b", by: -1))
+        XCTAssertEqual(workspace.openIDs, ["b", "a", "c"])
+        XCTAssertFalse(workspace.move("b", by: -1), "already first")
+        XCTAssertFalse(workspace.move("missing", by: 1))
+        XCTAssertFalse(workspace.move("a", by: 0))
+        XCTAssertEqual(workspace.openIDs, ["b", "a", "c"])
+    }
 }

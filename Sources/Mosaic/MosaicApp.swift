@@ -26,6 +26,13 @@ import Quartz
                     .keyboardShortcut("f", modifiers: .command)
                 Button("Go to Conversations") { NotificationCenter.default.post(name: .focusConversationList, object: nil) }
                     .keyboardShortcut("l", modifiers: .command)
+                // The sidebar's filters, for the keyboard (and VoiceOver's menu search).
+                ForEach(Array(SidebarFilter.allCases.enumerated()), id: \.element) { index, filter in
+                    Toggle("Show \(filter.title)", isOn: Binding(get: { store.sidebarFilter == filter },
+                                                                set: { if $0 { store.setSidebarFilter(filter) } }))
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command, .control])
+                }
+                Divider()
                 // Searches the focused tile's loaded messages (⌘F finds a conversation).
                 Button("Find in Conversation") { store.beginFind() }.keyboardShortcut("f", modifiers: [.command, .option])
                 Button("Conversation Details") { store.showDetails() }.keyboardShortcut("i", modifiers: .command)
@@ -39,6 +46,25 @@ import Quartz
                 Button("Grid Layout") { store.setLayout(.grid) }.keyboardShortcut("1", modifiers: [.command, .option])
                 Button("Column Layout") { store.setLayout(.columns) }.keyboardShortcut("2", modifiers: [.command, .option])
                 Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])
+                Divider()
+                // The focused tile from the keyboard: its place, and its size (taken from the tile
+                // beside it, as dragging the divider between them would).
+                Group {
+                    Button("Move Tile Left") { if !store.moveFocusedTile(by: -1) { NSSound.beep() } }
+                        .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                    Button("Move Tile Right") { if !store.moveFocusedTile(by: 1) { NSSound.beep() } }
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                    Button("Make Tile Wider") { store.resizeFocusedTile(.wider) }
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .option, .control])
+                    Button("Make Tile Narrower") { store.resizeFocusedTile(.narrower) }
+                        .keyboardShortcut(.leftArrow, modifiers: [.command, .option, .control])
+                    Button("Make Tile Taller") { store.resizeFocusedTile(.taller) }
+                        .keyboardShortcut(.downArrow, modifiers: [.command, .option, .control])
+                    Button("Make Tile Shorter") { store.resizeFocusedTile(.shorter) }
+                        .keyboardShortcut(.upArrow, modifiers: [.command, .option, .control])
+                    Button("Equal Tile Sizes") { store.equalizeTiles() }
+                }
+                .disabled(!store.canArrangeTiles)
                 Divider()
                 Button("Close Focused Tile") { if let id = store.focused?.id { store.close(id) } }.keyboardShortcut("w", modifiers: [.command, .shift])
                 Button("Reopen Closed Tile") { store.reopenLastClosedTile() }.keyboardShortcut("t", modifiers: [.command, .shift])

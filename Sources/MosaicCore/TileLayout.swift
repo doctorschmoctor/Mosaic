@@ -110,6 +110,76 @@ public enum TileLayout {
     }
 }
 
+/// A step a tile takes from the keyboard (Workspace › Make Tile Wider, and so on).
+public enum TileResizeStep: Sendable { case wider, narrower, taller, shorter }
+
+/// How the tiles share the workspace beyond the layout's defaults: the split of each grid row, the
+/// grid's row heights and the columns' widths. Empty is equal sizes. Lives with the view for the
+/// session only (tile proportions are not saved).
+public struct TileProportions: Equatable, Sendable {
+    public var gridFractions: [Int: CGFloat]
+    public var rowWeights: [CGFloat]
+    public var columnWeights: [CGFloat]
+    public init(gridFractions: [Int: CGFloat] = [:], rowWeights: [CGFloat] = [], columnWeights: [CGFloat] = []) {
+        self.gridFractions = gridFractions; self.rowWeights = rowWeights; self.columnWeights = columnWeights
+    }
+    public static let equal = TileProportions()
+    public var isEqualSizes: Bool { self == .equal }
+}
+
+extension TileLayout {
+    /// How far one keyboard step moves a tile's edge.
+    public static let keyboardStep: CGFloat = 60
+
+    /// The proportions after a tile takes one step bigger or smaller from the keyboard, with the
+    /// room taken from (or given to) its neighbour — the other tile in its grid row, the row below
+    /// it (above, for the last row), the column after it (before, for the last) — exactly as
+    /// dragging the divider between them would. Nil when the tile cannot change that way: alone
+    /// in its row, a single row or column, Focus, or already at the smallest size either tile
+    /// can be.
+    public static func resized(_ id: String, _ step: TileResizeStep, in plan: TilePlan, layout: WorkspaceLayout,
+                               proportions: TileProportions, amount: CGFloat = keyboardStep) -> TileProportions? {
+        guard let index = plan.order.firstIndex(of: id) else { return nil }
+        let grows = step == .wider || step == .taller
+        var result = proportions
+        switch (layout, step) {
+        case (.grid, .wider), (.grid, .narrower):
+            let row = index / 2
+            guard row * 2 + 1 < plan.order.count, let first = plan.frames[plan.order[row * 2]] else { return nil }
+            // The row's split is the first tile's width: the second tile grows as the first shrinks.
+            let delta = (index % 2 == 0) == grows ? amount : -amount
+            let available = plan.size.width - inset * 2 - gap
+            guard available > minimumWidth * 2 else { return nil }
+            let width = min(max(first.width + delta, minimumWidth), available - minimumWidth)
+            guard abs(width - first.width) > 0.5 else { return nil }
+            result.gridFractions[row] = width / available
+        case (.grid, .taller), (.grid, .shorter):
+            guard let sizes = steppedPair(plan.rowSizes, at: index / 2, grows: grows, amount: amount, minimum: minimumHeight) else { return nil }
+            result.rowWeights = sizes
+        case (.columns, .wider), (.columns, .narrower):
+            guard let sizes = steppedPair(plan.columnSizes, at: index, grows: grows, amount: amount, minimum: 300) else { return nil }
+            result.columnWeights = sizes
+        default:
+            return nil
+        }
+        return result
+    }
+
+    /// One size in a row of sizes taking `amount` from, or giving it to, the next one (the one
+    /// before, for the last); nil when neither can change.
+    private static func steppedPair(_ sizes: [CGFloat], at index: Int, grows: Bool, amount: CGFloat, minimum: CGFloat) -> [CGFloat]? {
+        guard sizes.count > 1, sizes.indices.contains(index) else { return nil }
+        let pair = index + 1 < sizes.count ? index : index - 1
+        // `resizedPair` moves the first of the pair; the tile is the second when it is the last.
+        let delta = (pair == index) == grows ? amount : -amount
+        // Squeezed below the usual minimum (many grid rows in a short window): neither may get smaller than half the pair.
+        let floor = min(minimum, (sizes[pair] + sizes[pair + 1]) / 2)
+        let result = resizedPair(sizes, at: pair, delta: delta, minimum: floor)
+        guard abs(result[pair] - sizes[pair]) > 0.5 else { return nil }
+        return result
+    }
+}
+
 public struct TileDragSession: Equatable {
     public let id: String
     public let origin: CGRect

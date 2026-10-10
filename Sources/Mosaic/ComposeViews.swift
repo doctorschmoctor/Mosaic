@@ -140,7 +140,9 @@ struct RecipientField: View {
             guard let last = draft.recipients.last else { return false }
             store.removeRecipient(last, from: draftID); return true
         case .cancel:
-            // Esc closes the new message.
+            // Esc first takes back what is being typed or shown here; then it closes the new
+            // message (which keeps it as a draft).
+            if !query.isEmpty || showsAll { query = ""; showsAll = false; selection = 0; return true }
             store.close(draftID)
             return true
         }

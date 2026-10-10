@@ -68,4 +68,82 @@ final class TileLayoutTests: XCTestCase {
         XCTAssertEqual(grid.frames.values.map(\.minY).min(), 48)
         XCTAssertEqual(grid.frames.values.map(\.maxY).max(), 596)
     }
+
+    // MARK: Keyboard steps
+
+    private func plan(_ order: [String], _ layout: WorkspaceLayout, _ proportions: TileProportions = .equal,
+                      viewport: CGSize = CGSize(width: 1000, height: 820)) -> TilePlan {
+        TileLayout.plan(order: order, viewport: viewport, layout: layout, gridFractions: proportions.gridFractions,
+                        rowWeights: proportions.rowWeights, columnWeights: proportions.columnWeights)
+    }
+
+    /// A grid tile's wider/narrower moves the divider in its row, from either side; the other row
+    /// is untouched, and a tile alone in its row cannot change width.
+    func testKeyboardWidthStepsMoveTheDividerInTheTilesRow() throws {
+        let order = ["a", "b", "c"]
+        let start = plan(order, .grid)
+        let a = try XCTUnwrap(start.frames["a"]), b = try XCTUnwrap(start.frames["b"])
+        let wider = try XCTUnwrap(TileLayout.resized("a", .wider, in: start, layout: .grid, proportions: .equal))
+        let afterA = plan(order, .grid, wider)
+        XCTAssertEqual(try XCTUnwrap(afterA.frames["a"]).width, a.width + TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap(afterA.frames["b"]).width, b.width - TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertEqual(afterA.frames["c"], start.frames["c"], "the other row keeps its size")
+        // The right-hand tile grows leftwards.
+        let bWider = try XCTUnwrap(TileLayout.resized("b", .wider, in: start, layout: .grid, proportions: .equal))
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, bWider).frames["b"]).width, b.width + TileLayout.keyboardStep, accuracy: 0.5)
+        let bNarrower = try XCTUnwrap(TileLayout.resized("b", .narrower, in: start, layout: .grid, proportions: .equal))
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, bNarrower).frames["b"]).width, b.width - TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertNil(TileLayout.resized("c", .wider, in: start, layout: .grid, proportions: .equal), "alone in its row")
+    }
+
+    /// Steps stop at the minimum width: the last one that changes anything lands on it, and the
+    /// next is refused.
+    func testKeyboardStepsStopAtTheMinimum() throws {
+        let order = ["a", "b"]
+        var proportions = TileProportions.equal
+        var steps = 0
+        while let next = TileLayout.resized("a", .narrower, in: plan(order, .grid, proportions), layout: .grid, proportions: proportions) {
+            proportions = next
+            steps += 1
+            XCTAssertLessThan(steps, 50)
+        }
+        XCTAssertGreaterThan(steps, 0)
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, proportions).frames["a"]).width, TileLayout.minimumWidth, accuracy: 0.5)
+    }
+
+    /// Taller and shorter trade height with the row below — or above, for the last row — and a
+    /// single row has nothing to trade with.
+    func testKeyboardHeightStepsTradeWithTheNeighbouringRow() throws {
+        let order = ["a", "b", "c", "d"]
+        let start = plan(order, .grid)
+        let top = try XCTUnwrap(start.frames["a"]).height, bottom = try XCTUnwrap(start.frames["c"]).height
+        let taller = try XCTUnwrap(TileLayout.resized("b", .taller, in: start, layout: .grid, proportions: .equal))
+        let afterTop = plan(order, .grid, taller)
+        XCTAssertEqual(try XCTUnwrap(afterTop.frames["a"]).height, top + TileLayout.keyboardStep, accuracy: 0.5, "the whole row grows")
+        XCTAssertEqual(try XCTUnwrap(afterTop.frames["d"]).height, bottom - TileLayout.keyboardStep, accuracy: 0.5)
+        let lastTaller = try XCTUnwrap(TileLayout.resized("d", .taller, in: start, layout: .grid, proportions: .equal))
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, lastTaller).frames["d"]).height, bottom + TileLayout.keyboardStep, accuracy: 0.5)
+        let lastShorter = try XCTUnwrap(TileLayout.resized("c", .shorter, in: start, layout: .grid, proportions: .equal))
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, lastShorter).frames["a"]).height, top + TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertNil(TileLayout.resized("a", .taller, in: plan(["a", "b"], .grid), layout: .grid, proportions: .equal), "one row")
+    }
+
+    /// In Columns a tile trades width with the next column (the one before, for the last);
+    /// height and Focus have nothing to change.
+    func testKeyboardStepsInColumnsAndFocus() throws {
+        let order = ["a", "b", "c"]
+        let start = plan(order, .columns, viewport: CGSize(width: 1400, height: 820))
+        let c = try XCTUnwrap(start.frames["c"]).width, b = try XCTUnwrap(start.frames["b"]).width
+        let wider = try XCTUnwrap(TileLayout.resized("c", .wider, in: start, layout: .columns, proportions: .equal))
+        let after = plan(order, .columns, wider, viewport: CGSize(width: 1400, height: 820))
+        XCTAssertEqual(try XCTUnwrap(after.frames["c"]).width, c + TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertEqual(try XCTUnwrap(after.frames["b"]).width, b - TileLayout.keyboardStep, accuracy: 0.5)
+        XCTAssertEqual(after.frames["a"], start.frames["a"])
+        XCTAssertNil(TileLayout.resized("a", .taller, in: start, layout: .columns, proportions: .equal))
+        let focus = plan(["a"], .focus)
+        for step in [TileResizeStep.wider, .narrower, .taller, .shorter] {
+            XCTAssertNil(TileLayout.resized("a", step, in: focus, layout: .focus, proportions: .equal))
+        }
+        XCTAssertNil(TileLayout.resized("missing", .wider, in: start, layout: .columns, proportions: .equal))
+    }
 }
