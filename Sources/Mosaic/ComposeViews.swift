@@ -162,8 +162,9 @@ struct RecipientTextField: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> FocusingTextField {
         let field = FocusingTextField()
-        field.placeholderString = placeholder
         field.cell = CenteredTextFieldCell(textCell: "")
+        // After the cell: the placeholder is the cell's.
+        field.placeholderString = placeholder
         field.isEditable = true
         field.isSelectable = true
         field.isBordered = false
