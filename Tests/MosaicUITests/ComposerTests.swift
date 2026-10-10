@@ -105,7 +105,8 @@ final class ComposerTests: XCTestCase {
         let run = try await MessagesBridge.runTool(URL(fileURLWithPath: "/bin/sleep"), ["0.5"])
         ticker.cancel()
         XCTAssertEqual(run.status, 0)
-        XCTAssertGreaterThan(ticks.count, 10, "the main actor ran while the tool was waited for")
+        // A blocked main actor would not tick at all; a busy test machine ticks less than every 10 ms.
+        XCTAssertGreaterThan(ticks.count, 3, "the main actor ran while the tool was waited for")
     }
     /// A text the helper's arguments cannot carry (a NUL, or one near the system's size limit)
     /// is sent in process instead; ordinary sends fit.

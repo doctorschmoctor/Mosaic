@@ -19,7 +19,7 @@ final class IsolationTests: XCTestCase {
 
     /// A Messages-shaped database with one fictional conversation.
     private func makeDatabase() throws -> String {
-        let path = directory.appending(path: "chat.db").path
+        let path = directory.appending(path: "chat-\(UUID().uuidString).db").path
         var db: OpaquePointer?
         XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
         defer { sqlite3_close(db) }
