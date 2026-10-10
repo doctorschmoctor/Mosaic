@@ -46,8 +46,6 @@ struct OutgoingAttachment: Identifiable, Equatable {
     }
     var isMissing: Bool { state.isFailed && url != nil }
     var name: String { url?.lastPathComponent ?? "Photo" }
-    /// Whether the file is one Mosaic wrote (and may remove), not one the user chose.
-    var isOwnedByMosaic: Bool { url.map(OutgoingFiles.isOwned) ?? false }
     /// The file as a message attachment, with its size (read from disk) for matching the row
     /// Messages later writes for it.
     var attachment: Attachment {
@@ -77,12 +75,14 @@ struct OutgoingAttachment: Identifiable, Equatable {
 /// folder in Application Support. At send time every file is copied into a folder inside
 /// `~/Library/Messages`: Messages' sandbox reads attachments only from its own folders, so a file
 /// handed to it from anywhere else is accepted by AppleScript and then quietly fails to send.
+///
+/// The folders are the installed app's (`OutgoingStorage.system`) — or, in a fixture run (tests,
+/// the preview renderer, a `--demo` launch), a temporary folder of the run's own.
 enum OutgoingFiles {
-    static let home = FileManager.default.homeDirectoryForCurrentUser
-    static var pendingDirectory: URL { home.appending(path: "Library/Application Support/Mosaic/Outgoing") }
-    static var stagingDirectory: URL { home.appending(path: "Library/Messages/.mosaic-outgoing") }
+    static var pendingDirectory: URL { OutgoingStorage.processDefault.pending }
+    static var stagingDirectory: URL { OutgoingStorage.processDefault.staging }
     /// Whether a file is in Mosaic's own outgoing folder (one it wrote, and may remove).
-    static func isOwned(_ url: URL) -> Bool { url.path.hasPrefix(pendingDirectory.path) }
+    static func isOwned(_ url: URL) -> Bool { OutgoingStorage.processDefault.owns(url) }
 
     /// Writes picture data (pasted or dropped) as its own file. TIFF, the clipboard's native
     /// picture format, is converted to PNG; everything else keeps its format (a GIF stays animated).
@@ -177,13 +177,13 @@ enum OutgoingFiles {
     }
     /// Drops leftovers from earlier runs: staged copies, and pending files more than two days old
     /// that no saved draft still points at. Only Mosaic's own folders are looked at.
-    static func purgeStale(now: Date = Date(), keeping referenced: Set<String> = []) {
-        purge(stagingDirectory, olderThan: 3600, now: now)
-        purge(pendingDirectory, olderThan: 2 * 86400, now: now, keeping: referenced)
+    static func purgeStale(in storage: OutgoingStorage, now: Date = Date(), keeping referenced: Set<String> = []) {
+        purge(storage.staging, olderThan: 3600, now: now)
+        purge(storage.pending, olderThan: 2 * 86400, now: now, keeping: referenced)
     }
     /// The same cleanup on a utility thread, so launch never waits for it.
-    static func purgeStaleInBackground(keeping referenced: Set<String>) {
-        Task.detached(priority: .utility) { purgeStale(keeping: referenced) }
+    static func purgeStaleInBackground(in storage: OutgoingStorage, keeping referenced: Set<String>) {
+        Task.detached(priority: .utility) { purgeStale(in: storage, keeping: referenced) }
     }
     static func purge(_ directory: URL, olderThan age: TimeInterval, now: Date, keeping referenced: Set<String> = []) {
         let manager = FileManager.default

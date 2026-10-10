@@ -75,7 +75,8 @@ import MosaicCore
     var historyLimits: [String: Int] = [:]
     var isLoadingContacts = false
     var contactStatus: String?
-    private(set) var contactAuthorization = CNContactStore.authorizationStatus(for: .contacts)
+    /// Whether Mosaic may read Contacts, as last asked (off the main thread; "not determined" until then).
+    private(set) var contactAuthorization: CNAuthorizationStatus = .notDetermined
     /// The tile being dragged and the order a release would give. Not observed: the pointer moves
     /// it on every frame. What views read is published from it below, so the workspace re-renders
     /// only when the order changes, and the pointer's movement changes one transform.
@@ -151,6 +152,8 @@ import MosaicCore
     static let failuresBeforeError = 3
     private let defaults: UserDefaults
     private let database: MessagesDatabase
+    /// Contacts and the outgoing folders: the system's in the installed app, a fixture run's own otherwise.
+    @ObservationIgnored let services: StoreServices
     /// How messages leave Mosaic: Messages' AppleScript dictionary when live, nowhere in the demo,
     /// and whatever a test injects.
     @ObservationIgnored private let liveTransport: MessageTransport
@@ -189,10 +192,17 @@ import MosaicCore
     @ObservationIgnored private var connectedBefore = false
     private let forcedDemo: Bool
 
-    init(defaults: UserDefaults = .standard, database: MessagesDatabase = MessagesDatabase(), forceDemo: Bool = false,
-         transport: MessageTransport? = nil) {
-        self.defaults = defaults; self.database = database
-        liveTransport = transport ?? AppleScriptTransport()
+    /// Everything left out comes from `StoreServices.processDefault`: the installed app reads the
+    /// signed-in Messages database, Contacts and its own preferences and sends through Messages; a
+    /// fixture run (the tests, the preview, a `--demo` or `--isolated` launch) reads only what it
+    /// is given, keeps its preferences and files apart from the app's, and cannot send.
+    init(defaults: UserDefaults? = nil, database: MessagesDatabase? = nil, forceDemo: Bool = false,
+         transport: MessageTransport? = nil, services: StoreServices = .processDefault) {
+        let isolated = MosaicRuntime.isIsolated
+        let defaults = defaults ?? (isolated ? UserDefaults(suiteName: MosaicRuntime.isolatedDefaultsSuite) ?? .standard : .standard)
+        let database = database ?? (isolated ? MessagesDatabase(path: MosaicRuntime.isolatedRoot.appending(path: "chat.db").path) : MessagesDatabase())
+        self.defaults = defaults; self.database = database; self.services = services
+        liveTransport = transport ?? (isolated ? UnavailableTransport() : AppleScriptTransport())
         animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
         reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
@@ -213,8 +223,14 @@ import MosaicCore
         loadingState = false
         // Leftovers from earlier runs go, off the main thread — never a file a saved draft (this
         // workspace's or the other one's) still points at.
-        OutgoingFiles.purgeStaleInBackground(keeping: SavedDrafts.referencedPaths(in: defaults)
+        OutgoingFiles.purgeStaleInBackground(in: services.outgoing, keeping: SavedDrafts.referencedPaths(in: defaults)
             .union(outgoing.values.joined().compactMap { $0.url?.path }))
+        // What Contacts allows is asked off the main thread: a slow answer holds up nothing.
+        Task { [weak self] in
+            guard let self else { return }
+            let status = await self.services.contacts.authorizationStatus()
+            if self.contactAuthorization != status { self.contactAuthorization = status }
+        }
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .CNContactStoreDidChange, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -228,7 +244,7 @@ import MosaicCore
             Task { @MainActor in
                 guard let self else { return }
                 self.setAppActive(true)
-                let status = CNContactStore.authorizationStatus(for: .contacts)
+                let status = await self.services.contacts.authorizationStatus()
                 let changed = status != self.contactAuthorization
                 self.contactAuthorization = status
                 if changed, self.isLive, status == .authorized { await self.loadContacts(requestPermission: false) }
@@ -527,13 +543,15 @@ import MosaicCore
         let files = outgoing[id] ?? []
         let kept = keepingFiles ? files.filter { $0.state == .ready || $0.isMissing } : []
         let keptIDs = Set(kept.map(\.id))
-        for file in files where !keptIDs.contains(file.id) && file.isOwnedByMosaic {
+        for file in files where !keptIDs.contains(file.id) && ownsFile(file) {
             if let url = file.url { try? FileManager.default.removeItem(at: url) }
         }
         if outgoing[id] != nil { outgoing[id] = kept.isEmpty ? nil : kept }
         sendNotes[id] = nil
         resumeImportWaiters(for: id)
     }
+    /// Whether a composer's file is one this store wrote (and may remove), never one the user chose.
+    func ownsFile(_ file: OutgoingAttachment) -> Bool { file.url.map(services.outgoing.owns) ?? false }
     private func noteUse(_ id: String) {
         useCount += 1
         lastUsed[id] = useCount
@@ -1303,8 +1321,9 @@ import MosaicCore
     /// thread, behind a placeholder.
     func attachPicture(_ data: Data, type: UTType, to id: String) {
         guard let slot = beginImports(1, to: id).first else { return }
+        let pending = services.outgoing.pending
         Task.detached(priority: .userInitiated) {
-            let url = try? OutgoingFiles.store(data, type: type)
+            let url = try? OutgoingFiles.store(data, type: type, in: pending)
             await MainActor.run { self.completeImport(slot, url: url, in: id, failure: "The pasted picture couldn't be kept.") }
         }
     }
@@ -1320,7 +1339,7 @@ import MosaicCore
     /// closed or replaced — takes nothing, and a file written for it is removed.
     func completeImport(_ slot: String, url: URL?, in id: String, failure: String = "This photo couldn't be added.") {
         guard let index = outgoing[id]?.firstIndex(where: { $0.id == slot }) else {
-            if let url, OutgoingFiles.isOwned(url) { try? FileManager.default.removeItem(at: url) }
+            if let url, services.outgoing.owns(url) { try? FileManager.default.removeItem(at: url) }
             return
         }
         instantly {
@@ -1347,7 +1366,7 @@ import MosaicCore
                let error = sendErrors[id], error.contains("couldn't be added") || error.contains("no longer on this Mac") { sendErrors[id] = nil }
         }
         // A picture Mosaic wrote for this message is not needed any more; a chosen file is the user's.
-        if file.isOwnedByMosaic, let url = file.url { try? FileManager.default.removeItem(at: url) }
+        if ownsFile(file), let url = file.url { try? FileManager.default.removeItem(at: url) }
         if outgoing[id]?.contains(where: { $0.state == .importing }) != true { resumeImportWaiters(for: id) }
     }
 
@@ -1487,7 +1506,8 @@ import MosaicCore
     /// Loads contact names. With `requestPermission`, asks macOS for Contacts access first if needed.
     func loadContacts(requestPermission: Bool = true) async {
         guard !isLoadingContacts else { return }
-        var status = CNContactStore.authorizationStatus(for: .contacts)
+        let contacts = services.contacts
+        var status = await contacts.authorizationStatus()
         contactAuthorization = status
         if status != .authorized {
             guard requestPermission else { return }
@@ -1501,9 +1521,9 @@ import MosaicCore
             default: break
             }
             isLoadingContacts = true
-            let granted = (try? await CNContactStore().requestAccess(for: .contacts)) ?? false
+            let granted = await contacts.requestAccess()
             isLoadingContacts = false
-            status = CNContactStore.authorizationStatus(for: .contacts)
+            status = await contacts.authorizationStatus()
             contactAuthorization = status
             guard granted, status == .authorized else {
                 contactStatus = "Mosaic wasn't given Contacts access. Turn it on in System Settings → Privacy & Security → Contacts."
@@ -1513,28 +1533,8 @@ import MosaicCore
         isLoadingContacts = true
         defer { isLoadingContacts = false }
         do {
-            // Names and addresses only, and whether each contact has a photo: the photos themselves
-            // are fetched one contact at a time, for the avatars that are shown.
-            let (entries, photoIDs) = try await Task.detached(priority: .userInitiated) { () -> ([ContactNames.Entry], [String: String]) in
-                let request = CNContactFetchRequest(keysToFetch: [CNContactFormatter.descriptorForRequiredKeys(for: .fullName),
-                    CNContactIdentifierKey as CNKeyDescriptor, CNContactNicknameKey as CNKeyDescriptor,
-                    CNContactOrganizationNameKey as CNKeyDescriptor, CNContactPhoneNumbersKey as CNKeyDescriptor,
-                    CNContactEmailAddressesKey as CNKeyDescriptor, CNContactImageDataAvailableKey as CNKeyDescriptor])
-                var entries: [ContactNames.Entry] = []
-                var photoIDs: [String: String] = [:]
-                try CNContactStore().enumerateContacts(with: request) { contact, _ in
-                    let addresses = contact.phoneNumbers.map { $0.value.stringValue } + contact.emailAddresses.map { $0.value as String }
-                    // Each of the contact's numbers and addresses leads to its photo.
-                    if contact.imageDataAvailable {
-                        for address in addresses { photoIDs[Recipient.key(for: address)] = contact.identifier }
-                    }
-                    let formatted = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
-                    let name = [formatted, contact.nickname, contact.organizationName].first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
-                    guard !name.isEmpty else { return }
-                    entries.append(ContactNames.Entry(id: contact.identifier, name: name, addresses: addresses))
-                }
-                return (entries, photoIDs)
-            }.value
+            let snapshot = try await contacts.entries()
+            let entries = snapshot.entries, photoIDs = snapshot.photoIDs
             // A photo may have changed with the contacts: the ones on screen are fetched again.
             ContactPhotos.shared.reset()
             contactPhotoIDs = photoIDs

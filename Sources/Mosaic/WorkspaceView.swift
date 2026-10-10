@@ -469,7 +469,8 @@ struct Avatar: View {
     init(capacity: Int = 200, concurrency: Int = 3, fetch: Fetch? = nil) {
         images = LRUCache(capacity: capacity)
         limiter = AsyncLimiter(limit: concurrency)
-        fetcher = fetch ?? { id in await ContactPhotos.thumbnail(forContact: id) }
+        let contacts = StoreServices.processDefault.contacts
+        fetcher = fetch ?? { id in await contacts.thumbnail(forContact: id) }
     }
 
     /// The photo when it is already here; nothing is fetched.
@@ -503,19 +504,6 @@ struct Avatar: View {
     func reset() {
         images.removeAll()
         withoutPhoto.removeAll()
-    }
-
-    /// One contact's thumbnail, decoded no larger than avatars need.
-    nonisolated static func thumbnail(forContact contactID: String) async -> CGImage? {
-        await Task.detached(priority: .utility) { () -> CGImage? in
-            let keys = [CNContactThumbnailImageDataKey as CNKeyDescriptor]
-            guard let contact = try? CNContactStore().unifiedContact(withIdentifier: contactID, keysToFetch: keys),
-                  let data = contact.thumbnailImageData,
-                  let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
-            let options: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
-                                            kCGImageSourceShouldCacheImmediately: true, kCGImageSourceThumbnailMaxPixelSize: 120]
-            return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        }.value
     }
 }
 
