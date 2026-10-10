@@ -112,6 +112,43 @@ public struct ThreadPage: Equatable, Sendable {
     }
 }
 
+/// Where a history search goes on from: the oldest row it has read (or the oldest message a tile
+/// shows, to begin).
+public struct HistorySearchCursor: Equatable, Sendable {
+    public let rowID: Int64
+    public let date: Date
+    public init(rowID: Int64, date: Date) { self.rowID = rowID; self.date = date }
+}
+
+/// One part of a history search: the matches found (newest first), where the next part would
+/// start (nil once the conversation's first message was read), and how many rows were read.
+public struct HistorySearchPage: Equatable, Sendable {
+    public let matches: [Message]
+    public let next: HistorySearchCursor?
+    public let scanned: Int
+    public init(matches: [Message], next: HistorySearchCursor?, scanned: Int) { self.matches = matches; self.next = next; self.scanned = scanned }
+}
+
+/// Messages around one message in a conversation's history.
+public struct HistoryContext: Equatable, Sendable {
+    public let page: ThreadPage
+    /// The message the window is around.
+    public let anchorID: String
+    /// The window runs to the conversation's newest message.
+    public let reachesLatest: Bool
+    /// The window starts at the conversation's first message.
+    public let reachesStart: Bool
+}
+
+/// Words in a message's text, as Find matches them: ignoring case and accents, every character
+/// literal.
+public enum TextSearch {
+    public static let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+    public static func contains(_ text: String, _ query: String) -> Bool {
+        !query.isEmpty && text.range(of: query, options: options) != nil
+    }
+}
+
 /// The result of a load: the conversations and the state they correspond to.
 public struct DatabaseSnapshot: Sendable {
     public let conversations: [Conversation]
@@ -201,6 +238,153 @@ public final class MessagesReader: @unchecked Sendable {
     public func earlierPageSync(forChat guid: String, before rowID: Int64, date: Date, limit: Int = 100) throws -> ThreadPage? {
         try queue.sync { try self.pageNow(forChat: guid, limit: limit, before: HistoryCursor(rowID: rowID, date: date)) }
     }
+    /// Part of a search of one conversation's history older than `cursor` (the oldest message a
+    /// tile shows): reads at most `scanLimit` rows, newest first, decodes each one's words — the
+    /// plain text and the rich bodies newer systems store — and keeps those containing `query`
+    /// (ignoring case and accents; `%`, `_` and every other character are matched literally), up
+    /// to `maxMatches`. Reactions, activity lines and unsent messages are not searched, nor are
+    /// attachments' contents or earlier versions of edited messages. Read-only, like every read:
+    /// nothing is indexed or kept. Nil when the conversation is not in the database.
+    public func searchHistory(forChat guid: String, matching query: String, before cursor: HistorySearchCursor,
+                              scanLimit: Int = 2000, maxMatches: Int = 50) async throws -> HistorySearchPage? {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.searchNow(forChat: guid, matching: query, before: cursor, scanLimit: scanLimit, maxMatches: maxMatches)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func searchHistorySync(forChat guid: String, matching query: String, before cursor: HistorySearchCursor,
+                                  scanLimit: Int = 2000, maxMatches: Int = 50) throws -> HistorySearchPage? {
+        try queue.sync { try self.searchNow(forChat: guid, matching: query, before: cursor, scanLimit: scanLimit, maxMatches: maxMatches) }
+    }
+    /// The messages around one message (`before` older ones, the message, `after` newer ones),
+    /// with their reactions and the originals their replies quote — a window into older history,
+    /// apart from the newest page a tile shows. Nil when the conversation or the message is gone.
+    public func context(forChat guid: String, around rowID: Int64, before: Int = 30, after: Int = 30) async throws -> HistoryContext? {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.contextNow(forChat: guid, around: rowID, before: before, after: after)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func contextSync(forChat guid: String, around rowID: Int64, before: Int = 30, after: Int = 30) throws -> HistoryContext? {
+        try queue.sync { try self.contextNow(forChat: guid, around: rowID, before: before, after: after) }
+    }
+
+    private func chatRowID(_ db: OpaquePointer, guid: String) throws -> Int64? {
+        let lookup = try cached(db, "SELECT ROWID FROM chat WHERE guid = ?")
+        defer { recycle(lookup) }
+        bind(lookup, 1, guid)
+        return sqlite3_step(lookup) == SQLITE_ROW ? sqlite3_column_int64(lookup, 0) : nil
+    }
+    private func searchNow(forChat guid: String, matching query: String, before cursor: HistorySearchCursor,
+                           scanLimit: Int, maxMatches: Int) throws -> HistorySearchPage? {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let db = try openIfNeeded()
+            try execute(db, "BEGIN DEFERRED")
+            defer { try? execute(db, "ROLLBACK") }
+            let schema = try schema(db)
+            guard let chatID = try chatRowID(db, guid: guid) else { return nil }
+            guard !needle.isEmpty else { return HistorySearchPage(matches: [], next: nil, scanned: 0) }
+            func col(_ name: String, _ fallback: String = "0") -> String { schema.col(name, prefix: "m", fallback: fallback) }
+            let notReaction = schema.message.contains("associated_message_type")
+                ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
+            let statement = try cached(db, """
+                SELECT m.ROWID, m.text, \(col("attributedBody", "NULL")), m.date, m.is_from_me, h.id, \(col("item_type")),
+                       \(col("date_retracted", "NULL")), \(col("guid", "NULL"))
+                FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
+                LEFT JOIN handle h ON h.ROWID = m.handle_id
+                WHERE j.chat_id = ?1 \(notReaction)
+                  AND (m.date, m.ROWID) < (COALESCE((SELECT date FROM message WHERE ROWID = ?3), ?4), ?3)
+                ORDER BY m.date DESC, m.ROWID DESC LIMIT ?2
+                """)
+            defer { recycle(statement) }
+            let cursorRow = HistoryCursor(rowID: cursor.rowID, date: cursor.date)
+            sqlite3_bind_int64(statement, 1, chatID)
+            sqlite3_bind_int(statement, 2, Int32(max(1, min(scanLimit, 20_000))))
+            sqlite3_bind_int64(statement, 3, cursor.rowID)
+            sqlite3_bind_int64(statement, 4, cursorRow.rawDate)
+            var matches: [Message] = []
+            var scanned = 0
+            var last: HistorySearchCursor?
+            var status = sqlite3_step(statement)
+            while status == SQLITE_ROW {
+                scanned += 1
+                let rowID = sqlite3_column_int64(statement, 0)
+                let date = MessagesDatabase.appleDate(sqlite3_column_int64(statement, 3))
+                last = HistorySearchCursor(rowID: rowID, date: date)
+                let isActivity = sqlite3_column_int(statement, 6) != 0
+                let isUnsent = optionalDate(statement, 7) != nil
+                if !isActivity, !isUnsent {
+                    let text = BodyDecoder.decode(text: string(statement, 1), attributedBody: blob(statement, 2))
+                    if TextSearch.contains(text, needle) {
+                        matches.append(Message(id: String(rowID), text: text, date: date, isFromMe: sqlite3_column_int(statement, 4) != 0,
+                                               sender: string(statement, 5), guid: string(statement, 8)))
+                        // Enough for now: the next part starts after this one.
+                        if matches.count >= maxMatches { return HistorySearchPage(matches: matches, next: last, scanned: scanned) }
+                    }
+                }
+                status = sqlite3_step(statement)
+            }
+            guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+            // Fewer rows than asked for: the conversation's first message was read.
+            return HistorySearchPage(matches: matches, next: scanned < scanLimit ? nil : last, scanned: scanned)
+        } catch let error as DatabaseError {
+            if case .sqlite = error { closeConnection() }
+            throw error
+        }
+    }
+    private func contextNow(forChat guid: String, around rowID: Int64, before: Int, after: Int) throws -> HistoryContext? {
+        do {
+            let db = try openIfNeeded()
+            try execute(db, "BEGIN DEFERRED")
+            defer { try? execute(db, "ROLLBACK") }
+            let schema = try schema(db)
+            guard let chatID = try chatRowID(db, guid: guid) else { return nil }
+            let notReaction = schema.message.contains("associated_message_type")
+                ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
+            // The message itself must still be in this conversation.
+            let target = try cached(db, "SELECT m.date FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID WHERE j.chat_id = ?1 AND m.ROWID = ?2")
+            defer { recycle(target) }
+            sqlite3_bind_int64(target, 1, chatID)
+            sqlite3_bind_int64(target, 2, rowID)
+            guard sqlite3_step(target) == SQLITE_ROW else { return nil }
+            let targetDate = sqlite3_column_int64(target, 0)
+            // The messages after it, to find where the window ends.
+            let newer = try cached(db, """
+                SELECT m.ROWID, m.date FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
+                WHERE j.chat_id = ?1 \(notReaction) AND (m.date, m.ROWID) > (?2, ?3)
+                ORDER BY m.date ASC, m.ROWID ASC LIMIT ?4
+                """)
+            defer { recycle(newer) }
+            sqlite3_bind_int64(newer, 1, chatID)
+            sqlite3_bind_int64(newer, 2, targetDate)
+            sqlite3_bind_int64(newer, 3, rowID)
+            sqlite3_bind_int(newer, 4, Int32(max(0, after) + 1))
+            var following: [(row: Int64, date: Int64)] = []
+            while sqlite3_step(newer) == SQLITE_ROW { following.append((sqlite3_column_int64(newer, 0), sqlite3_column_int64(newer, 1))) }
+            let thread: LoadedThread
+            let reachesLatest = following.count <= after
+            if reachesLatest {
+                // The window runs to the newest message: it is the newest page, deep enough to hold it.
+                thread = try history(db, chatID: chatID, schema: schema, limit: before + 1 + following.count)
+            } else {
+                let end = following[after]
+                thread = try history(db, chatID: chatID, schema: schema, limit: before + 1 + after,
+                                     before: HistoryCursor(rowID: end.row, date: MessagesDatabase.appleDate(end.date)))
+            }
+            let olderCount = thread.messages.prefix { $0.id != String(rowID) }.count
+            return HistoryContext(page: ThreadPage(messages: thread.messages, reactions: thread.reactions, referencedMessages: thread.referenced),
+                                  anchorID: String(rowID), reachesLatest: reachesLatest, reachesStart: olderCount < before)
+        } catch let error as DatabaseError {
+            if case .sqlite = error { closeConnection() }
+            throw error
+        }
+    }
+
     /// Where an earlier page ends: the loaded message it comes before.
     struct HistoryCursor {
         let rowID: Int64

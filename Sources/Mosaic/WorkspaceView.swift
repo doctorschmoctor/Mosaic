@@ -1007,6 +1007,8 @@ struct DividerHandle: View {
                 store.undoLast()
                 return true
             }
+            // ⌘G / ⇧⌘G step through the open find bar's matches (older / newer).
+            if modifiers.subtracting(.shift) == .command, key == "g", store.findStep(older: !modifiers.contains(.shift)) { return true }
             if modifiers == .command { return false }
         }
         let inSearchField = searchFieldHasFocus && window.firstResponder is NSTextView

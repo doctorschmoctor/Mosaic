@@ -280,6 +280,29 @@ final class FocusHandoffTests: XCTestCase {
         XCTAssertEqual(store.composerFocus.claimCount, claims, "nothing was handed over")
     }
 
+    /// ⌥⌘F opens the focused tile's find bar with the keyboard in it; Esc closes it and the
+    /// keyboard goes back to the tile's message field.
+    @MainActor func testTheFindBarTakesTheKeyboardAndGivesItBack() async throws {
+        let host = try await makeHost(layout: .grid)
+        defer { close(host) }
+        let store = host.store
+        let id = try XCTUnwrap(store.focused?.id)
+        store.beginFind()
+        try await settle(host, seconds: 0.4)
+        let field = host.window.firstResponder as? NSTextView
+        XCTAssertEqual((field?.delegate as? NSTextField)?.placeholderString, "Find in loaded messages",
+                       "the find field has the keyboard; it is in \(describe(host.window.firstResponder))")
+        XCTAssertEqual(store.activeFindTile, id)
+        typeText("coffee", in: host)
+        try await settle(host, seconds: 0.4)
+        XCTAssertTrue(store.findStep(older: true), "⌘G steps through the open bar's matches")
+        XCTAssertNil(store.drafts[id].flatMap { $0.contains("coffee") ? $0 : nil }, "typing went to the find field, not the draft")
+        press(53, "\u{1b}", in: host)
+        try await settleFocus(host)
+        XCTAssertNil(store.activeFindTile, "Esc closed the bar")
+        assertKeyboard(in: id, host, "Esc in the find bar")
+    }
+
     /// Opening conversations again and again, by every route, never leaves the keyboard elsewhere.
     @MainActor func testRepeatedOpeningsNeverLoseTheKeyboard() async throws {
         let host = try await makeHost(layout: .grid)

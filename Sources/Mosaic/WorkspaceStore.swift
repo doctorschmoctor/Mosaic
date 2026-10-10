@@ -674,6 +674,9 @@ import MosaicCore
     /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
         historyLimits[id] = nil
+        cancelOlderSearch(id)
+        contextWindows[id] = nil
+        if activeFindTile == id { activeFindTile = nil }
         tilesOutOfView.remove(id)
         tailsInView.remove(id)
         if tilesWithNews.contains(id) { tilesWithNews.remove(id) }
@@ -1033,6 +1036,107 @@ import MosaicCore
     func draft(_ id: String) -> Binding<String> {
         Binding(get: { self.drafts[id] ?? "" }, set: { if self.drafts[id] ?? "" != $0 { self.drafts[id] = $0; self.noteUse(id) } })
     }
+    // MARK: Find in Conversation
+
+    /// The tile whose find bar is open (⌘G and ⇧⌘G step through its matches).
+    @ObservationIgnored private(set) var activeFindTile: String?
+    /// Opens the focused tile's find bar (⌥⌘F), or puts the keyboard back in it.
+    func beginFind() {
+        guard let id = focused?.id, !(focused?.isComposeDraft ?? true) else { return }
+        composerFocus.cancel("the find bar was opened")
+        NotificationCenter.default.post(name: .findInConversation, object: id)
+    }
+    func findOpened(_ id: String) { activeFindTile = id }
+    func findClosed(_ id: String) { if activeFindTile == id { activeFindTile = nil } }
+    /// ⌘G (older) or ⇧⌘G (newer) in the open find bar. False when no bar is open.
+    @discardableResult func findStep(older: Bool) -> Bool {
+        guard let id = activeFindTile, openIDs.contains(id) else { return false }
+        NotificationCenter.default.post(name: .findNextInConversation, object: FindStep(conversationID: id, older: older))
+        return true
+    }
+
+    // MARK: Searching older history
+
+    /// Each tile's search of the history older than what it shows (`searchOlderHistory`).
+    private(set) var historySearches: [String: HistorySearch] = [:]
+    /// Tiles showing a window into older history around a search result instead of their newest
+    /// messages (`showInContext`); "Back to Latest" leaves it.
+    private(set) var contextWindows: [String: HistoryContext] = [:]
+    @ObservationIgnored private var searchTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var searchGeneration = 0
+    /// Rows one part of a search reads before it stops and offers to go on.
+    static let searchScanLimit = 2000
+
+    /// Searches the tile's history older than the oldest message it shows, for `query` — part by
+    /// part, each reading at most `searchScanLimit` rows. A new search (or `cancelOlderSearch`)
+    /// supersedes the one running, whose results are never shown.
+    func searchOlderHistory(_ id: String, query: String) {
+        cancelOlderSearch(id)
+        let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isLive, !words.isEmpty, let start = oldestShownRow(id) else { return }
+        historySearches[id] = HistorySearch(query: words, matches: [], next: start, scanned: 0, isSearching: false)
+        continueOlderSearch(id)
+    }
+    /// Reads the next part of the tile's search.
+    func continueOlderSearch(_ id: String) {
+        guard var search = historySearches[id], !search.isSearching, let cursor = search.next else { return }
+        search.isSearching = true
+        historySearches[id] = search
+        searchGeneration += 1
+        let generation = searchGeneration, readerGeneration = self.generation
+        let reader = self.reader, query = search.query
+        searchTasks[id] = Task { [weak self] in
+            let page = try? await reader.searchHistory(forChat: id, matching: query, before: cursor, scanLimit: WorkspaceStore.searchScanLimit)
+            // A search that was superseded or cancelled meanwhile publishes nothing.
+            guard let self, !Task.isCancelled, readerGeneration == self.generation,
+                  self.searchTaskGenerations[id] == generation, var current = self.historySearches[id], current.query == query else { return }
+            current.isSearching = false
+            if let page {
+                current.matches += page.matches
+                current.next = page.next
+                current.scanned += page.scanned
+            } else {
+                current.failed = true
+            }
+            self.historySearches[id] = current
+            self.searchTasks[id] = nil
+        }
+        searchTaskGenerations[id] = generation
+    }
+    @ObservationIgnored private var searchTaskGenerations: [String: Int] = [:]
+    /// Stops the tile's search and forgets its results.
+    func cancelOlderSearch(_ id: String) {
+        searchTasks[id]?.cancel()
+        searchTasks[id] = nil
+        searchTaskGenerations[id] = nil
+        if historySearches[id] != nil { historySearches[id] = nil }
+    }
+    /// The oldest database row the tile shows, where a search of older history begins.
+    private func oldestShownRow(_ id: String) -> HistorySearchCursor? {
+        guard let oldest = conversations.first(where: { $0.id == id })?.messages.first(where: { $0.sendState == nil }),
+              let row = Int64(oldest.id) else { return nil }
+        return HistorySearchCursor(rowID: row, date: oldest.date)
+    }
+    /// Shows the messages around a search result in the tile, in place of its newest messages.
+    /// Nothing in the window counts as read: it is not the newest messages.
+    func showInContext(_ id: String, messageID: String) async {
+        guard isLive, openIDs.contains(id), let row = Int64(messageID) else { return }
+        let readerGeneration = generation
+        guard let context = try? await reader.context(forChat: id, around: row),
+              readerGeneration == generation, openIDs.contains(id) else { return }
+        // A window that runs to the newest message is just the conversation: show that.
+        if context.reachesLatest, conversations.first(where: { $0.id == id })?.messages.contains(where: { $0.id == messageID }) == true {
+            leaveContext(id)
+            return
+        }
+        instantly { contextWindows[id] = context }
+        tailLeft(id)
+    }
+    /// Back to the tile's newest messages.
+    func leaveContext(_ id: String) {
+        if contextWindows[id] != nil { instantly { contextWindows[id] = nil } }
+    }
+
     // MARK: Seeing the newest message
 
     /// Threads showing their newest message right now (reported by the thread as it scrolls).
@@ -1122,6 +1226,8 @@ import MosaicCore
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false; replacementChoice = nil
         tailsInView = []; tilesOutOfView = []
+        for task in searchTasks.values { task.cancel() }
+        searchTasks = [:]; searchTaskGenerations = [:]; historySearches = [:]; contextWindows = [:]; activeFindTile = nil
         composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
@@ -2224,6 +2330,19 @@ enum SidebarFilter: String, CaseIterable, Identifiable {
         case .drafts: return "Drafts"
         }
     }
+}
+
+/// A tile's search of its older history.
+struct HistorySearch: Equatable {
+    let query: String
+    /// Matches found so far, newest first.
+    var matches: [Message]
+    /// Where the next part starts; nil once the conversation's first message was read.
+    var next: HistorySearchCursor?
+    /// Rows read so far.
+    var scanned: Int
+    var isSearching: Bool
+    var failed = false
 }
 
 /// A conversation (or a new message, `incoming` nil) waiting for a tile while every open tile is protected.

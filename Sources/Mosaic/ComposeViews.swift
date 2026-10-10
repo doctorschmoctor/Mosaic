@@ -154,11 +154,15 @@ struct RecipientTextField: NSViewRepresentable {
     enum Command { case deleteBackwardWhenEmpty, moveUp, moveDown, submit, cancel }
     @Binding var text: String
     var takesFocus = false
+    var placeholder: String? = nil
+    /// A change asks for the keyboard again (the field also takes it when it appears, with `takesFocus`).
+    var focusToken = 0
     let onCommand: (Command) -> Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> FocusingTextField {
         let field = FocusingTextField()
+        field.placeholderString = placeholder
         field.cell = CenteredTextFieldCell(textCell: "")
         field.isEditable = true
         field.isSelectable = true
@@ -179,6 +183,14 @@ struct RecipientTextField: NSViewRepresentable {
     func updateNSView(_ field: FocusingTextField, context: Context) {
         context.coordinator.parent = self
         if field.stringValue != text { field.stringValue = text }
+        if focusToken != context.coordinator.focusToken {
+            context.coordinator.focusToken = focusToken
+            // Never inside the update: on the next turn.
+            DispatchQueue.main.async { [weak field] in
+                guard let field, let window = field.window, field.currentEditor() == nil else { return }
+                window.makeFirstResponder(field)
+            }
+        }
     }
     /// At least room for a few words, and all the room its line has (see WrapLayout); as tall as the
     /// chips beside it, with the text centered in that height by the cell.
@@ -206,7 +218,8 @@ struct RecipientTextField: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: RecipientTextField
-        init(_ parent: RecipientTextField) { self.parent = parent }
+        var focusToken = 0
+        init(_ parent: RecipientTextField) { self.parent = parent; focusToken = parent.focusToken }
         func controlTextDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextField else { return }
             if parent.text != field.stringValue { parent.text = field.stringValue }
