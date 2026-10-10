@@ -33,6 +33,25 @@ final class DatabaseTests: XCTestCase {
     }
     override func tearDownWithError() throws { try FileManager.default.removeItem(at: directory) }
 
+    /// A pinned conversation older than the listed most recent ones is still listed, with its
+    /// preview and unread count, by its exact identity, and without its history unless it is open.
+    func testKeptConversationsOutsideTheLimitAreListed() throws {
+        let alex = "iMessage;-;alex@example.test", group = "iMessage;+;group"
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let plain = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [], limit: 1), unlessUnchangedFrom: nil))
+        XCTAssertEqual(plain.conversations.map(\.id), [group], "only the most recent")
+        let kept = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [], limit: 1, seenBoundaries: [alex: 1], keptIDs: [alex, "iMessage;-;nobody"]),
+                                                      unlessUnchangedFrom: nil))
+        XCTAssertEqual(kept.conversations.map(\.id), [group, alex], "the pinned one after the rest; an unknown one is skipped")
+        let listed = try XCTUnwrap(kept.conversations.last)
+        XCTAssertEqual(listed.preview, "Second")
+        XCTAssertTrue(listed.messages.isEmpty, "no history unless it is open")
+        let open = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: [alex], limit: 1, keptIDs: [alex]), unlessUnchangedFrom: nil))
+        XCTAssertEqual(open.conversations.filter { $0.id == alex }.count, 1, "listed once")
+        XCTAssertEqual(open.conversations.first { $0.id == alex }?.messages.map(\.text), ["First", "Second"])
+        XCTAssertNotEqual(LoadRequest(openIDs: [], keptIDs: [alex]), LoadRequest(openIDs: []), "pinning changes what a load covers")
+    }
+
     func testHistoriesAreIsolatedOrderedAndReadOnly() throws {
         let before = try Data(contentsOf: URL(fileURLWithPath: path))
         let result = try MessagesDatabase(path: path).load(openIDs: ["iMessage;-;alex@example.test", "iMessage;+;group"])

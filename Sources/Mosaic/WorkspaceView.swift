@@ -89,6 +89,18 @@ struct WorkspaceView: View {
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
         .sheet(isPresented: $store.showHiddenConversations) { HiddenConversationsView().environment(store) }
+        // Every tile is protected: which one makes room is the reader's choice, or none.
+        .confirmationDialog("Every tile is protected", isPresented: Binding(get: { store.replacementChoice != nil }, set: { _ in }),
+                            titleVisibility: .visible, presenting: store.replacementChoice) { choice in
+            ForEach(store.replacementCandidates, id: \.id) { candidate in
+                Button(candidate.hasDraft ? "Close \(candidate.name) (its draft is kept)" : "Close \(candidate.name)") {
+                    store.chooseReplacement(candidate.id)
+                }
+            }
+            Button("Cancel", role: .cancel) { store.cancelReplacement() }
+        } message: { choice in
+            Text("Choose a tile to close to make room for \(choice.incomingName), or cancel to keep them all.")
+        }
         .alert(item: $store.alert) { alert in Alert(title: Text(alert.title), message: Text(alert.message)) }
         // ⌘F and ⌘L are the reader choosing where the keyboard goes: a request still pending gives way.
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
@@ -121,11 +133,14 @@ struct WorkspaceView: View {
             SidebarFilterBar()
             // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
             ScrollViewReader { scroller in
+                let pinnedCount = store.pinnedRowCount
                 List {
-                    ForEach(store.filteredConversations) { conversation in
+                    ForEach(Array(store.filteredConversations.enumerated()), id: \.element.id) { index, conversation in
                         // Rows run to the sidebar's trailing edge, so the swipe action sits flush
-                        // against the row instead of beside a gap.
-                        ConversationRow(conversation: conversation)
+                        // against the row instead of beside a gap. Pinned rows come first, under a
+                        // small caption (drawn in the row, so rows and the list's rows stay one to one).
+                        ConversationRow(conversation: conversation,
+                                        caption: pinnedCount == 0 ? nil : index == 0 ? "Pinned" : index == pinnedCount ? "Conversations" : nil)
                             .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
                             .listRowSeparator(.hidden)
                             // Inside the list's scroll view: gives it the slim scroller the tiles have,
@@ -368,6 +383,8 @@ struct WindowDragRegion: NSViewRepresentable {
 struct ConversationRow: View {
     @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
+    /// A small heading drawn above the row: where the pinned conversations begin and end.
+    var caption: String? = nil
     private var isOpen: Bool { store.openIDs.contains(conversation.id) }
     /// The keyboard is on this row (the list has keyboard focus: ⌘L or ↓ from the search field).
     private var isSelected: Bool { store.sidebarSelection == conversation.id }
@@ -375,13 +392,26 @@ struct ConversationRow: View {
     private var isHighlighted: Bool { store.highlightedSidebarRow == conversation.id }
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let caption {
+                Text(caption).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    .padding(.leading, 10).padding(.top, 6)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            row
+        }
+    }
+
+    private var row: some View {
         let draft = store.draftSummaries[conversation.id]
-        Button(action: activate) {
+        let pinned = store.isPinned(conversation.id)
+        return Button(action: activate) {
             HStack(spacing: 10) {
                 if conversation.isComposeDraft { NewMessageAvatar(size: 36) } else { Avatar(conversation: conversation, size: 36) }
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 4) {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        if pinned { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityHidden(true) }
                         Spacer(minLength: 0)
                         if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
                         else if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
@@ -406,7 +436,8 @@ struct ConversationRow: View {
                 }
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle())
-            .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)") + (draft.map { ", draft: \($0.line)" } ?? ""))
+            .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
+                                + (pinned ? ", pinned" : "") + (draft.map { ", draft: \($0.line)" } ?? ""))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             // No highlight under the pointer. Resting on a row fetches its history ahead (after a
             // short pause, so a sweep down the list fetches nothing) and the tile opens on its messages.
@@ -417,6 +448,10 @@ struct ConversationRow: View {
             .contextMenu {
                 Button(isOpen ? "Close tile" : conversation.isComposeDraft ? "Open New Message" : "Open in workspace") {
                     if isOpen { store.close(conversation.id) } else { store.openAndType(conversation.id) }
+                }
+                if !conversation.isComposeDraft {
+                    // Mosaic's own pin: the conversation stays at the top of this sidebar. Messages' pins are untouched.
+                    Button(pinned ? "Unpin" : "Pin to Top") { store.togglePin(conversation.id) }
                 }
                 if !conversation.isComposeDraft, store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
                 if draft != nil || conversation.isComposeDraft {

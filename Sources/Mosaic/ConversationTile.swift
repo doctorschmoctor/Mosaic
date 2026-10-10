@@ -87,6 +87,11 @@ struct ConversationTile: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                    if store.isProtected(conversation.id) {
+                        Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary)
+                            .help("Protected: never replaced to make room for another conversation")
+                            .accessibilityLabel("Protected from replacement")
+                    }
                     // A new message came in while you were in another tile.
                     if store.tilesWithNews.contains(conversation.id) {
                         Circle().fill(Palette.accent).frame(width: 7, height: 7)
@@ -117,13 +122,16 @@ struct ConversationTile: View {
             menuItems: headerMenu))
         .help(onDragChanged == nil ? "" : "Drag to move this tile")
         .accessibilityElement(children: .contain)
-        .accessibilityLabel(conversation.name)
+        .accessibilityLabel(conversation.name + (store.isProtected(conversation.id) ? ", protected from replacement" : ""))
     }
 
     /// The header's menu (right-click): this tile's actions.
     private var headerMenu: [TileHeaderHandle.MenuItem] {
         let id = conversation.id
+        let protected = store.isProtected(id)
         return [
+            // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
+            .init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }),
             .init(title: conversation.isComposeDraft ? "Discard New Message" : "Discard Draft",
                   isEnabled: { [store] in store.composeDrafts[id] != nil || store.hasDraft(id) }) { [store] in store.discardDraft(id) },
             .init(title: "Close Tile", action: { [store] in store.close(id) }, separatedAbove: true),

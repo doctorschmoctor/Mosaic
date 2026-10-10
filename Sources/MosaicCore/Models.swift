@@ -346,7 +346,8 @@ public struct Recipient: Identifiable, Equatable, Hashable, Sendable {
     }
 }
 
-/// Only layout, seen IDs, drafts and hidden conversations are persisted; message history stays in memory.
+/// Only layout, seen IDs, drafts, hidden and pinned conversations and protected tiles are
+/// persisted; message history stays in memory.
 public struct Workspace: Codable, Equatable, Sendable {
     public static let maximumTiles = 4
     public var openIDs: [String] = []
@@ -359,6 +360,12 @@ public struct Workspace: Codable, Equatable, Sendable {
     public var hidden: [String: String] = [:]
     /// The conversation-content scale every tile shares (fonts, bubbles, media), 1 = 100%.
     public var zoom: Double = 1
+    /// Conversations pinned to the top of Mosaic's sidebar, in the order they were pinned. Local
+    /// to Mosaic: Messages' own pins are never read or changed.
+    public var pinnedIDs: [String] = []
+    /// Open tiles that are never replaced to make room for another conversation. Protection
+    /// belongs to the open tile: it ends when the tile closes.
+    public var protectedIDs: Set<String> = []
 
     /// The zoom steps Mosaic offers.
     public static let zoomRange: ClosedRange<Double> = 0.8...1.6
@@ -373,7 +380,7 @@ public struct Workspace: Codable, Equatable, Sendable {
         self.openIDs = Array(openIDs.filter { seen.insert($0).inserted }.prefix(Self.maximumTiles))
         self.focusedID = self.openIDs.first
     }
-    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden, zoom }
+    private enum CodingKeys: String, CodingKey { case openIDs, focusedID, layout, drafts, seenMessageIDs, hidden, zoom, pinnedIDs, protectedIDs }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         openIDs = try container.decodeIfPresent([String].self, forKey: .openIDs) ?? []
@@ -383,6 +390,9 @@ public struct Workspace: Codable, Equatable, Sendable {
         seenMessageIDs = try container.decodeIfPresent([String: String].self, forKey: .seenMessageIDs) ?? [:]
         hidden = try container.decodeIfPresent([String: String].self, forKey: .hidden) ?? [:]
         zoom = Self.clampZoom(try container.decodeIfPresent(Double.self, forKey: .zoom) ?? 1)
+        pinnedIDs = try container.decodeIfPresent([String].self, forKey: .pinnedIDs) ?? []
+        protectedIDs = try container.decodeIfPresent(Set<String>.self, forKey: .protectedIDs) ?? []
+        protectedIDs.formIntersection(openIDs)
     }
     @discardableResult public mutating func open(_ id: String) -> Bool {
         if openIDs.contains(id) { focusedID = id; return true }
@@ -392,12 +402,14 @@ public struct Workspace: Codable, Equatable, Sendable {
     }
     public mutating func close(_ id: String) {
         openIDs.removeAll { $0 == id }
+        protectedIDs.remove(id)
         if focusedID == id { focusedID = openIDs.first }
     }
     /// Puts `id` where `victim` was, focused; the layout keeps its shape.
     public mutating func replace(_ victim: String, with id: String) {
         guard let index = openIDs.firstIndex(of: victim), !openIDs.contains(id) else { return }
         openIDs[index] = id
+        protectedIDs.remove(victim)
         focusedID = id
     }
     public mutating func reorder(_ source: String, before destination: String) {
@@ -408,6 +420,7 @@ public struct Workspace: Codable, Equatable, Sendable {
     public mutating func reconcile(availableIDs: Set<String>) {
         var seen = Set<String>()
         openIDs = Array(openIDs.filter { availableIDs.contains($0) && seen.insert($0).inserted }.prefix(Self.maximumTiles))
+        protectedIDs.formIntersection(openIDs)
         if !openIDs.contains(focusedID ?? "") { focusedID = openIDs.first }
     }
 }

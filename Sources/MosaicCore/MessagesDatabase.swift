@@ -65,10 +65,14 @@ public struct LoadRequest: Equatable, Sendable {
     /// ones outside the list — no histories, and group photos only where already looked up.
     /// What Mosaic shows first at launch, while the full load reads the open tiles' histories.
     public var listOnly: Bool
+    /// Conversations listed even when they are older than the `limit` most recent (the sidebar's
+    /// pinned ones), with their preview and unread count; a history only when they are open.
+    public var keptIDs: Set<String>
     public init(openIDs: Set<String>, limit: Int = 500, historyLimits: [String: Int] = [:], defaultHistoryLimit: Int = 100,
-                seenBoundaries: [String: Int64] = [:], earlierRows: [String: EarlierRows] = [:], listOnly: Bool = false) {
+                seenBoundaries: [String: Int64] = [:], earlierRows: [String: EarlierRows] = [:], listOnly: Bool = false,
+                keptIDs: Set<String> = []) {
         self.openIDs = openIDs; self.limit = limit; self.historyLimits = historyLimits; self.defaultHistoryLimit = defaultHistoryLimit
-        self.seenBoundaries = seenBoundaries; self.earlierRows = earlierRows; self.listOnly = listOnly
+        self.seenBoundaries = seenBoundaries; self.earlierRows = earlierRows; self.listOnly = listOnly; self.keptIDs = keptIDs
     }
     public func historyLimit(for id: String) -> Int { historyLimits[id] ?? defaultHistoryLimit }
     /// Two requests load the same content when they cover the same conversations to the same
@@ -78,7 +82,7 @@ public struct LoadRequest: Equatable, Sendable {
     /// that runs anyway (the database changed) looks up.
     public static func == (lhs: LoadRequest, rhs: LoadRequest) -> Bool {
         lhs.openIDs == rhs.openIDs && lhs.limit == rhs.limit && lhs.historyLimits == rhs.historyLimits
-            && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit && lhs.listOnly == rhs.listOnly
+            && lhs.defaultHistoryLimit == rhs.defaultHistoryLimit && lhs.listOnly == rhs.listOnly && lhs.keptIDs == rhs.keptIDs
     }
 }
 
@@ -340,6 +344,21 @@ public final class MessagesReader: @unchecked Sendable {
                 status = sqlite3_step(statement)
             }
             guard status == SQLITE_DONE else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+        }
+        // Kept conversations (pinned in the sidebar) outside the limit are listed after the rest,
+        // read the same way, one by one by their exact identity; the open ones among them get
+        // their history below like any listed chat.
+        let listed = Set(summaries.map(\.guid))
+        for id in request.keptIDs.subtracting(listed).sorted() {
+            let statement = try cached(db, sql.replacingOccurrences(of: "ORDER BY COALESCE(m.date, 0) DESC LIMIT ?", with: "WHERE c.guid = ?"))
+            defer { recycle(statement) }
+            bind(statement, 1, id)
+            guard sqlite3_step(statement) == SQLITE_ROW else { continue }
+            let wasUnsent = sqlite3_column_int64(statement, 9) != 0
+            summaries.append(Summary(rowID: sqlite3_column_int64(statement, 0), guid: string(statement, 1) ?? id,
+                displayName: string(statement, 2) ?? "", identifier: string(statement, 3), service: string(statement, 4),
+                preview: wasUnsent ? "Unsent message" : BodyDecoder.decode(text: string(statement, 5), attributedBody: blob(statement, 6)),
+                date: sqlite3_column_int64(statement, 7), lastID: sqlite3_column_int64(statement, 8)))
         }
         // Open tiles outside the recent-conversation limit stay available.
         struct Pinned { let rowID: Int64; let guid: String; let displayName: String; let identifier: String?; let service: String? }

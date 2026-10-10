@@ -42,6 +42,13 @@ import MosaicCore
     var hidden: [String: String] = [:] { didSet { if hidden != oldValue { persist() } } }
     /// The conversation-content scale every tile shares (⌘+ / ⌘− / ⌘0); persisted with the workspace.
     var zoom: Double = 1 { didSet { if zoom != oldValue { persist() } } }
+    /// Conversations pinned to the top of the sidebar, in the order pinned (Mosaic's own; Messages'
+    /// pins are untouched). Listed even when older than the 500 most recent.
+    var pinnedIDs: [String] = [] { didSet { if pinnedIDs != oldValue { persist() } } }
+    /// Open tiles never replaced to make room for another conversation.
+    var protectedIDs: Set<String> = [] { didSet { if protectedIDs != oldValue { persist() } } }
+    /// Every open tile is protected and another conversation needs one: the reader chooses which closes.
+    private(set) var replacementChoice: ReplacementChoice?
     /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
     var animateMessages: Bool { didSet { if animateMessages != oldValue { defaults.set(animateMessages, forKey: "Mosaic.animateMessages") } } }
     /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
@@ -338,7 +345,7 @@ import MosaicCore
             var state = Workspace()
             state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
             state.drafts = drafts; state.seenMessageIDs = seenMessageIDs; state.hidden = hidden
-            state.zoom = zoom
+            state.zoom = zoom; state.pinnedIDs = pinnedIDs; state.protectedIDs = protectedIDs
             return state
         }
         set {
@@ -349,6 +356,8 @@ import MosaicCore
             if seenMessageIDs != newValue.seenMessageIDs { seenMessageIDs = newValue.seenMessageIDs }
             if hidden != newValue.hidden { hidden = newValue.hidden }
             if zoom != newValue.zoom { zoom = newValue.zoom }
+            if pinnedIDs != newValue.pinnedIDs { pinnedIDs = newValue.pinnedIDs }
+            if protectedIDs != newValue.protectedIDs { protectedIDs = newValue.protectedIDs }
         }
     }
     /// Applies a `Workspace` mutation, writing back only the fields it changed.
@@ -365,7 +374,7 @@ import MosaicCore
     var filteredConversations: [Conversation] {
         let rows: [Conversation]
         switch sidebarFilter {
-        case .all: rows = visibleConversations
+        case .all: rows = pinnedFirst(visibleConversations)
         case .drafts: rows = draftRows
         }
         guard !search.isEmpty else { return rows }
@@ -376,6 +385,35 @@ import MosaicCore
             return draft.text.localizedCaseInsensitiveContains(search) || draft.recipients.contains { $0.localizedCaseInsensitiveContains(search) }
         }
     }
+    /// The pinned conversations first, in the order they were pinned, then the rest as they were.
+    private func pinnedFirst(_ rows: [Conversation]) -> [Conversation] {
+        guard !pinnedIDs.isEmpty else { return rows }
+        let pinned = Set(pinnedIDs)
+        let byID = Dictionary(rows.filter { pinned.contains($0.id) }.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return pinnedIDs.compactMap { byID[$0] } + rows.filter { !pinned.contains($0.id) }
+    }
+    /// How many of the sidebar's rows, from the top, are pinned ones.
+    var pinnedRowCount: Int {
+        guard sidebarFilter == .all, !pinnedIDs.isEmpty else { return 0 }
+        let pinned = Set(pinnedIDs)
+        return filteredConversations.prefix { pinned.contains($0.id) }.count
+    }
+    func isPinned(_ id: String) -> Bool { pinnedIDs.contains(id) }
+    /// Pins a conversation to the top of the sidebar, or unpins it. Only Mosaic's sidebar changes.
+    func togglePin(_ id: String) {
+        instantly {
+            if let index = pinnedIDs.firstIndex(of: id) { pinnedIDs.remove(at: index) } else { pinnedIDs.append(id) }
+        }
+        // A conversation older than the most recent ones needs a load to be listed.
+        if isLive { lastLoad = nil; Task { await refresh() } }
+    }
+    func isProtected(_ id: String) -> Bool { protectedIDs.contains(id) }
+    /// Protects an open tile from being replaced when another conversation opens, or lifts that.
+    func toggleProtection(_ id: String) {
+        guard openIDs.contains(id) else { return }
+        instantly { if protectedIDs.contains(id) { protectedIDs.remove(id) } else { protectedIDs.insert(id) } }
+    }
+
     /// The Drafts list: unsent New Messages (open or closed, the newest first), then
     /// conversations with a draft, most recent first.
     var draftRows: [Conversation] {
@@ -406,7 +444,10 @@ import MosaicCore
         return order
     }
 
-    func open(_ id: String) {
+    /// Opens a conversation (or a New Message draft) in a tile: in free space, else in place of
+    /// the tile used longest ago that is not protected. When every tile is protected, nothing
+    /// closes by itself: the reader is asked which tile makes room (`replacementChoice`).
+    func open(_ id: String, thenType: Bool = false) {
         var opened = false
         instantly {
             mutate { opened = $0.open(id) }
@@ -417,7 +458,12 @@ import MosaicCore
                 opened = true
             }
         }
-        guard opened else { return }
+        guard opened else {
+            if openIDs.count >= Workspace.maximumTiles {
+                replacementChoice = ReplacementChoice(incoming: id, incomingName: tile(for: id)?.name ?? "this conversation", thenType: thenType)
+            }
+            return
+        }
         // Not marked read here: the thread reports when its newest message is actually in view.
         noteUse(id)
         guard isLive else { return }
@@ -550,8 +596,9 @@ import MosaicCore
     /// Which open tile a new conversation replaces when every tile is taken: the one used longest
     /// ago (the first on screen among equals). An unsent New Message is kept unless nothing else is open.
     func tileToReplace() -> String? {
-        let candidates = openIDs.filter { composeDrafts[$0] == nil }
-        let pool = candidates.isEmpty ? openIDs : candidates
+        let replaceable = openIDs.filter { !protectedIDs.contains($0) }
+        let candidates = replaceable.filter { composeDrafts[$0] == nil }
+        let pool = candidates.isEmpty ? replaceable : candidates
         return pool.min { (lastUsed[$0] ?? 0, openIDs.firstIndex(of: $0) ?? 0) < (lastUsed[$1] ?? 0, openIDs.firstIndex(of: $1) ?? 0) }
     }
     /// Lets go of a tile's transient state ahead of its replacement (its draft text is kept, as on close).
@@ -673,7 +720,9 @@ import MosaicCore
 
     private func rememberClosed(_ id: String) {
         recentlyClosed.removeAll { $0 == id }
-        recentlyClosed.append(id)
+        // A tile replaced to make room for a reopened one goes to the bottom of the list, so
+        // pressing ⌘⇧T again keeps walking back instead of bouncing between two tiles.
+        if reopening { recentlyClosed.insert(id, at: 0) } else { recentlyClosed.append(id) }
         if recentlyClosed.count > Self.recentlyClosedLimit { recentlyClosed.removeFirst(recentlyClosed.count - Self.recentlyClosedLimit) }
     }
     /// Whether a closed tile could come back: its conversation is listed (or its New Message
@@ -687,12 +736,15 @@ import MosaicCore
     /// Opens the tile closed most recently (⌘⇧T) with its draft as it was, in free space or in
     /// place of the tile used longest ago; the cursor goes to its message field.
     func reopenLastClosedTile() {
+        reopening = true
+        defer { reopening = false }
         while let id = recentlyClosed.popLast() {
             guard canReopen(id) else { continue }
             openAndType(id)
             return
         }
     }
+    @ObservationIgnored private var reopening = false
     /// A hidden conversation with activity newer than its removal is shown again.
     private func unhideChanged(in loaded: [Conversation]) {
         guard !hidden.isEmpty else { return }
@@ -736,6 +788,27 @@ import MosaicCore
         composerFocus.request(id, token: focusToken)
     }
     func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
+
+    /// The tiles the reader can choose from when every one is protected: name, and whether it
+    /// holds a draft (which is kept either way).
+    var replacementCandidates: [(id: String, name: String, hasDraft: Bool)] {
+        openIDs.compactMap { id in tile(for: id).map { (id, $0.name, hasDraft(id)) } }
+    }
+    /// The reader chose `victim` to make room: it closes (its draft is kept) and what was waiting opens there.
+    func chooseReplacement(_ victim: String) {
+        guard let choice = replacementChoice else { return }
+        replacementChoice = nil
+        guard openIDs.contains(victim) else { return }
+        // Chosen to close: its protection gives way, which makes it the one replaced.
+        instantly { protectedIDs.remove(victim) }
+        if let id = choice.incoming {
+            if choice.thenType { openAndType(id) } else { open(id) }
+        } else {
+            beginNewChat()
+        }
+    }
+    /// Nothing closes; what was waiting does not open.
+    func cancelReplacement() { replacementChoice = nil }
 
     // MARK: Sidebar keyboard
 
@@ -795,7 +868,9 @@ import MosaicCore
     /// gets a tile — free space, or the place of the tile used longest ago — or its tile is
     /// found, and the cursor goes into that tile's message field, ready to type.
     func openAndType(_ id: String) {
-        if !openIDs.contains(id) { open(id) }
+        if !openIDs.contains(id) { open(id, thenType: true) }
+        // Every tile is protected: the reader chooses which closes first (`chooseReplacement`).
+        guard openIDs.contains(id) else { return }
         // A New Message with no one to send to yet starts in its To field, which takes the keyboard itself.
         if let draft = composeDrafts[id], !draft.hasRecipients { focus(id); return }
         requestComposerFocus(id)
@@ -931,7 +1006,7 @@ import MosaicCore
         guard live != isLive, submissionsInFlight == 0 else { return }
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
-        focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false
+        focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false; replacementChoice = nil
         composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
@@ -994,7 +1069,8 @@ import MosaicCore
         // only the reactions on them. The reader skips the load when nothing was committed since
         // the last one and the request is the same.
         let request = LoadRequest(openIDs: Set(openIDs), historyLimits: [:], defaultHistoryLimit: Self.pageSize,
-                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, earlierRows: earlierRowsShown())
+                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, earlierRows: earlierRowsShown(),
+                                  keptIDs: Set(pinnedIDs))
         do {
             let snapshot = try await reader.load(request, unlessUnchangedFrom: lastLoad, background: background)
             guard generation == requestGeneration, isLive else { return }
@@ -1097,7 +1173,7 @@ import MosaicCore
     private func showListFirst(background: Bool) async {
         let requestGeneration = generation
         let request = LoadRequest(openIDs: Set(openIDs), defaultHistoryLimit: Self.pageSize,
-                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, listOnly: true)
+                                  seenBoundaries: seenMessageIDs.compactMapValues { Int64($0) }, listOnly: true, keptIDs: Set(pinnedIDs))
         guard let snapshot = try? await reader.load(request, unlessUnchangedFrom: nil, background: background),
               generation == requestGeneration, isLive, conversations.isEmpty else { return }
         listShownFirstCount += 1
@@ -1639,6 +1715,11 @@ import MosaicCore
     /// found or created when the first message is sent. With every tile taken, the tile used
     /// longest ago gives up its place.
     @discardableResult func beginNewChat() -> String? {
+        // Every tile is protected: the reader chooses which closes to make room.
+        if openIDs.count >= Workspace.maximumTiles, tileToReplace() == nil {
+            replacementChoice = ReplacementChoice(incoming: nil, incomingName: "a new message", thenType: false)
+            return nil
+        }
         let id = "new-\(UUID().uuidString)"
         instantly {
             composeDrafts[id] = ComposeDraft()
@@ -2026,6 +2107,14 @@ enum SidebarFilter: String, CaseIterable, Identifiable {
         case .drafts: return "Drafts"
         }
     }
+}
+
+/// A conversation (or a new message, `incoming` nil) waiting for a tile while every open tile is protected.
+struct ReplacementChoice: Equatable {
+    let incoming: String?
+    let incomingName: String
+    /// Whether the cursor goes to its message field once it opens.
+    let thenType: Bool
 }
 
 /// A change that can still be taken back, as the sidebar announces it.
