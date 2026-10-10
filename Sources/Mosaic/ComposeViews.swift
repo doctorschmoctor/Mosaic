@@ -24,21 +24,29 @@ struct RecipientField: View {
 
     var body: some View {
         let suggestions = suggestions
+        // Once a message went to someone new from here, the tile is theirs: the To field is fixed.
+        let fixed = draft.routedTo != nil
         VStack(spacing: 0) {
             HStack(alignment: .top, spacing: 8) {
                 Text("To:").font(.system(size: 13)).foregroundStyle(.secondary).frame(height: Self.lineHeight)
                 WrapLayout(spacing: 6, lineHeight: Self.lineHeight) {
-                    ForEach(draft.recipients) { recipient in chip(recipient) }
-                    RecipientTextField(text: $query, takesFocus: true) { command in handle(command, suggestions) }
-                        .accessibilityLabel("Recipients")
+                    ForEach(draft.recipients) { recipient in chip(recipient, removable: !fixed) }
+                    if !fixed {
+                        RecipientTextField(text: $query, takesFocus: true) { command in handle(command, suggestions) }
+                            .accessibilityLabel("Recipients")
+                    }
                 }
-                Button { showsAll.toggle() } label: {
-                    Image(systemName: "plus.circle").font(.system(size: 15)).foregroundStyle(.primary)
-                        .frame(height: Self.lineHeight)
-                }.buttonStyle(.plain).help("Choose from your conversations")
+                if !fixed {
+                    Button { showsAll.toggle() } label: {
+                        Image(systemName: "plus.circle").font(.system(size: 15)).foregroundStyle(.primary)
+                            .frame(height: Self.lineHeight)
+                    }.buttonStyle(.plain).help("Choose from your conversations")
+                }
             }
             .padding(.horizontal, 14).padding(.vertical, 8)
             .background(Color.primary.opacity(0.035))
+            // Where a send would go, before anything is sent.
+            ComposeRouteNote(draftID: draftID)
             Divider().opacity(0.6)
             if !suggestions.isEmpty {
                 ScrollViewReader { scroller in
@@ -61,12 +69,14 @@ struct RecipientField: View {
         .onChange(of: draft.recipients.count) { _, _ in showsAll = false; selection = 0 }
     }
 
-    private func chip(_ recipient: Recipient) -> some View {
+    private func chip(_ recipient: Recipient, removable: Bool) -> some View {
         HStack(spacing: 5) {
             Text(recipient.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-            Button { store.removeRecipient(recipient, from: draftID) } label: {
-                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
-            }.buttonStyle(.plain).accessibilityLabel("Remove \(recipient.name)")
+            if removable {
+                Button { store.removeRecipient(recipient, from: draftID) } label: {
+                    Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                }.buttonStyle(.plain).accessibilityLabel("Remove \(recipient.name)")
+            }
         }
         .padding(.horizontal, 9)
         .frame(height: Self.lineHeight)
@@ -90,7 +100,9 @@ struct RecipientField: View {
                     Avatar(conversation: conversation, size: 28)
                     VStack(alignment: .leading, spacing: 2) {
                         highlighted(conversation.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        Text(conversation.participants.map { Recipient.display(store.name(for: $0)) }.joined(separator: ", "))
+                        // The service tells apart conversations with the same people (an iMessage and an SMS one).
+                        Text(([ComposeRouteNote.serviceName(conversation.service)] + conversation.participants.map { Recipient.display(store.name(for: $0)) })
+                                .joined(separator: " · "))
                             .font(.system(size: 11)).foregroundStyle(selected ? .primary : .secondary).lineLimit(1)
                     }
                     Spacer(minLength: 4)
@@ -367,3 +379,81 @@ struct StripButton: NSViewRepresentable {
         }
     }
 }
+
+/// One line under a New Message's To field saying where Return would send it: which existing
+/// conversation (with its service and addresses), a new iMessage conversation with which handle,
+/// or why it cannot go yet — with a choice when these people have more than one conversation. A
+/// view of its own, so typing in the To field does not rebuild it.
+struct ComposeRouteNote: View {
+    @Environment(WorkspaceStore.self) private var store
+    let draftID: String
+
+    var body: some View {
+        let route = store.composeRoute(draftID)
+        Group {
+            switch route {
+            case .empty:
+                EmptyView()
+            case .existing(let id, let chosen):
+                if let conversation = store.conversations.first(where: { $0.id == id }) {
+                    line("arrow.turn.down.right", (chosen ? "Goes to the conversation you chose: " : "Goes to your conversation: ") + describe(conversation))
+                }
+            case .choose(let ids):
+                VStack(alignment: .leading, spacing: 4) {
+                    line("exclamationmark.circle", "These people have \(ids.count) conversations. Choose where this goes:", warning: true)
+                    ForEach(ids, id: \.self) { id in
+                        if let conversation = store.conversations.first(where: { $0.id == id }) {
+                            Button { store.addressDraft(draftID, to: conversation) } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "circle").font(.system(size: 9))
+                                    Text(describe(conversation)).lineLimit(1).truncationMode(.middle)
+                                    Text("· last \(MessageText.day(conversation.lastActivity))").foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                .font(.system(size: 11)).contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Send in " + describe(conversation))
+                        }
+                    }
+                    .padding(.leading, 18)
+                }
+            case .newPerson(_, let handle):
+                line("plus.bubble", "Starts a new iMessage conversation with \(Recipient.display(handle)). Mosaic can't start SMS or RCS conversations.")
+            case .newGroup:
+                line("exclamationmark.triangle", ComposeRoute.newGroupExplanation, warning: true)
+            case .chosenGone:
+                line("exclamationmark.triangle", "The conversation you chose is no longer on this Mac. Choose the people again.", warning: true)
+            case .sentTo(_, let handle):
+                line("checkmark.circle", "Sent to \(Recipient.display(handle)) — the conversation appears here once Messages has it.")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.bottom, route == .empty ? 0 : 7)
+        .background(Color.primary.opacity(0.035))
+    }
+
+    private func line(_ symbol: String, _ text: String, warning: Bool = false) -> some View {
+        Label { Text(text).fixedSize(horizontal: false, vertical: true) } icon: { Image(systemName: symbol) }
+            .font(.system(size: 11))
+            .foregroundStyle(warning ? AnyShapeStyle(Color.orange) : AnyShapeStyle(.secondary))
+            .accessibilityElement(children: .combine)
+    }
+    /// "Weekend crew · SMS · +1 (415) 555-0123, alex@example.test".
+    private func describe(_ conversation: Conversation) -> String {
+        let addresses = conversation.participants.map(Recipient.display).joined(separator: ", ")
+        return [conversation.isGroup ? "“\(conversation.name)”" : conversation.name, Self.serviceName(conversation.service), addresses]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+    /// The service as Messages names it. What a conversation was received over says nothing about
+    /// what a new one could be started with.
+    static func serviceName(_ service: String) -> String {
+        switch service.lowercased() {
+        case "imessage": return "iMessage"
+        case "sms": return "SMS"
+        case "rcs": return "RCS"
+        default: return service
+        }
+    }
+}
+

@@ -1,6 +1,8 @@
 import Foundation
 
-/// Resolves only unambiguous addresses. National-number aliases use the Mac's region.
+/// Resolves only unambiguous addresses. Numbers are read with the Mac's region by the same rules
+/// that route a send (`HandleForm`): a national number matches its international form, and a
+/// number whose country is not certain matches only the same digits.
 public struct ContactNames: Sendable {
     public struct Entry: Sendable {
         public let id: String
@@ -16,7 +18,7 @@ public struct ContactNames: Sendable {
     private let region: String
     public let contactCount: Int
 
-    public init(entries: [Entry] = [], region: String = Locale.current.region?.identifier ?? "US") {
+    public init(entries: [Entry] = [], region: String = HandleForm.systemRegion) {
         self.region = region.uppercased()
         contactCount = entries.count
         for entry in entries where !entry.name.isEmpty {
@@ -45,29 +47,11 @@ public struct ContactNames: Sendable {
         return conversation.participants.map { name(for: $0) ?? $0 }.joined(separator: ", ")
     }
     private func keys(for address: String) -> [String] {
-        var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        for prefix in ["mailto:", "tel:", "imessage:"] where value.hasPrefix(prefix) { value.removeFirst(prefix.count) }
-        if value.contains("@") { return ["email:" + value] }
-        guard !value.contains(where: \.isLetter) else { return [] }
-        var digits = String(value.compactMap { character -> Character? in
-            guard let number = character.wholeNumberValue, (0...9).contains(number) else { return nil }
-            return Character(String(number))
-        })
-        guard !digits.isEmpty else { return [] }
-        let international = value.hasPrefix("+") || value.hasPrefix("00")
-        if value.hasPrefix("00") { digits.removeFirst(2) }
-        var result = ["phone:" + digits]
-        if ["US", "CA"].contains(region) {
-            if digits.count == 10, !international { result.append("phone:1" + digits) }
-            else if digits.count == 11, digits.hasPrefix("1") { result.append("phone:" + digits.dropFirst()) }
-        } else {
-            // National trunk prefixes differ by country; never match arbitrary suffixes.
-            let dialingCodes = ["GB": "44", "AU": "61", "NZ": "64", "FR": "33", "DE": "49", "IE": "353"]
-            if let code = dialingCodes[region] {
-                if !international, digits.hasPrefix("0") { result.append("phone:" + code + digits.dropFirst()) }
-                else if international, digits.hasPrefix(code) { result.append("phone:0" + digits.dropFirst(code.count)) }
-            }
+        switch HandleForm(address, region: region) {
+        case .email(let value): return ["email:" + value]
+        case .phone(let digits): return ["phone:+" + digits]
+        case .local(let digits): return ["local:" + digits]
+        case .other: return []
         }
-        return result
     }
 }

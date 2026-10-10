@@ -311,25 +311,16 @@ public struct Recipient: Identifiable, Equatable, Hashable, Sendable {
         self.name = name?.isEmpty == false ? name! : Recipient.display(address)
     }
 
-    /// A comparable form of a handle: emails lowercased, phone numbers reduced to digits without a
-    /// leading country code 1, so "(917) 831-0374" and "+19178310374" are the same person.
-    public static func key(for address: String) -> String {
-        var value = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        for prefix in ["mailto:", "tel:", "imessage:", "sms:"] where value.hasPrefix(prefix) { value.removeFirst(prefix.count) }
-        if value.contains("@") { return value }
-        var digits = value.filter(\.isNumber)
-        if digits.count == 11, digits.hasPrefix("1") { digits.removeFirst() }
-        return digits.isEmpty ? value : digits
+    /// A comparable form of a handle (`HandleForm.key`): emails lowercased, phone numbers in
+    /// international form when that is certain in the Mac's region — so in the US "(917) 831-0374"
+    /// and "+19178310374" are the same person — and otherwise their digits as written.
+    public static func key(for address: String, region: String = HandleForm.systemRegion) -> String {
+        HandleForm(address, region: region).key
     }
-    /// The handle in the form Messages accepts for a new recipient.
-    public static func handle(for address: String) -> String {
-        let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.contains("@") { return value.lowercased() }
-        let digits = value.filter(\.isNumber)
-        guard !digits.isEmpty else { return value }
-        if digits.count == 10 { return "+1" + digits }
-        if digits.count == 11, digits.hasPrefix("1") { return "+" + digits }
-        return value.hasPrefix("+") ? "+" + digits : digits
+    /// The handle in the form Messages is given for a new recipient (`HandleForm.messagesHandle`):
+    /// international when that is certain, otherwise as written, never in another country.
+    public static func handle(for address: String, region: String = HandleForm.systemRegion) -> String {
+        HandleForm(address, region: region).messagesHandle
     }
     /// A phone number formatted for display; other addresses unchanged.
     public static func display(_ address: String) -> String {

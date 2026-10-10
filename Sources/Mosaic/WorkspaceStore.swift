@@ -1756,8 +1756,9 @@ import MosaicCore
         guard let message = localMessage(presentationID, in: threadID), message.sendState?.isFailed == true, canSend else { return }
         let target: SendTarget
         if conversations.contains(where: { $0.id == threadID }) { target = .chat(threadID) }
-        else if let draft = composeDrafts[threadID], draft.recipients.count == 1, let recipient = draft.recipients.first {
-            target = .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage")
+        else if let person = composeDrafts[threadID]?.routedTo {
+            // The person it was first sent to.
+            target = .participant(handle: Recipient.handle(for: person.address), service: "iMessage")
         } else { return }
         let item: Outbound.Item
         if let path = message.attachments.first?.path { item = .file(URL(fileURLWithPath: path)) } else { item = .text(message.text) }
@@ -2121,20 +2122,20 @@ import MosaicCore
         return id
     }
     func addRecipient(_ recipient: Recipient, to draftID: String) {
-        guard var draft = composeDrafts[draftID], !draft.recipients.contains(where: { $0.id == recipient.id }) else { return }
+        guard var draft = composeDrafts[draftID], draft.routedTo == nil, !draft.recipients.contains(where: { $0.id == recipient.id }) else { return }
         draft.recipients.append(recipient)
         draft.boundConversationID = nil
         instantly { composeDrafts[draftID] = draft }
     }
     func removeRecipient(_ recipient: Recipient, from draftID: String) {
-        guard var draft = composeDrafts[draftID] else { return }
+        guard var draft = composeDrafts[draftID], draft.routedTo == nil else { return }
         draft.recipients.removeAll { $0.id == recipient.id }
         draft.boundConversationID = nil
         instantly { composeDrafts[draftID] = draft }
     }
     /// Addresses the new message to an existing conversation (all of its people).
     func addressDraft(_ draftID: String, to conversation: Conversation) {
-        guard var draft = composeDrafts[draftID] else { return }
+        guard var draft = composeDrafts[draftID], draft.routedTo == nil else { return }
         draft.recipients = conversation.participants.map { Recipient(address: $0, name: contactNames.name(for: $0)) }
         draft.boundConversationID = conversation.id
         instantly { composeDrafts[draftID] = draft }
@@ -2169,36 +2170,84 @@ import MosaicCore
         }
         return Array(results.prefix(16))
     }
-    /// The existing conversation with exactly these people, if there is one.
-    func conversation(with recipients: [Recipient]) -> Conversation? {
-        guard !recipients.isEmpty else { return nil }
+    /// Every existing conversation with exactly these people, most recent first. Messages can
+    /// keep more than one — an iMessage and an SMS conversation, or one per address — and each is
+    /// its own chat.
+    func conversations(with recipients: [Recipient]) -> [Conversation] {
+        guard !recipients.isEmpty else { return [] }
         let keys = Set(recipients.map(\.id))
-        return conversations.first { !$0.isComposeDraft && $0.participantKeys == keys }
+        return conversations.filter { !$0.isComposeDraft && $0.participantKeys == keys }.sorted { $0.lastActivity > $1.lastActivity }
+    }
+    /// The existing conversation with exactly these people, when there is exactly one: with more
+    /// than one, none is picked for the reader.
+    func conversation(with recipients: [Recipient]) -> Conversation? {
+        let matches = conversations(with: recipients)
+        return matches.count == 1 ? matches[0] : nil
+    }
+    /// Where a New Message goes if it is sent now, shown under its To field before anything is
+    /// sent: the conversation chosen (exactly that chat), the only one these people have, a choice
+    /// when they have several, a new iMessage conversation for one new person — or why it cannot
+    /// go (a new group, a chosen conversation that has gone).
+    func composeRoute(_ draftID: String) -> ComposeRoute {
+        guard let draft = composeDrafts[draftID] else { return .empty }
+        if let person = draft.routedTo { return .sentTo(person, handle: Recipient.handle(for: person.address)) }
+        if let chosen = draft.boundConversationID {
+            return conversations.contains { $0.id == chosen } ? .existing(chosen, chosen: true) : .chosenGone
+        }
+        guard !draft.recipients.isEmpty else { return .empty }
+        let matches = conversations(with: draft.recipients)
+        if matches.count > 1 { return .choose(matches.map(\.id)) }
+        if let only = matches.first { return .existing(only.id, chosen: false) }
+        if draft.recipients.count == 1, let person = draft.recipients.first {
+            return .newPerson(person, handle: Recipient.handle(for: person.address))
+        }
+        return .newGroup
     }
 
-    /// Sends a new message: to the conversation that has these people, or, for one new person, by
-    /// asking Messages to start the conversation. Messages cannot start a new group from another
-    /// app, so a new group is handed to Messages itself.
+    /// Sends a new message where `composeRoute` says: an existing conversation by its exact chat
+    /// identifier, or one new person, whom Messages starts an iMessage conversation with. Where it
+    /// goes is settled before waiting for photos still arriving, so changing the To field in the
+    /// meantime cannot change it. Nothing is accepted (the composer keeps its text and files) when
+    /// it has nowhere certain to go.
     private func sendCompose(_ draftID: String) async {
-        guard let draft = composeDrafts[draftID] else { return }
-        guard !draft.recipients.isEmpty else { sendErrors[draftID] = "Add at least one recipient."; return }
-        guard await readyToSend(draftID), let current = composeDrafts[draftID] else { return }
-        // The conversation these people already have, else a new one Messages creates for one person.
-        if let target = current.boundConversationID.flatMap({ id in conversations.first { $0.id == id } }) ?? conversation(with: current.recipients) {
-            guard let batch = acceptSend(from: draftID, to: .chat(target.id), into: target.id) else { return }
+        guard composeDrafts[draftID] != nil else { return }
+        let target: SendTarget
+        let threadID: String
+        var newPerson: Recipient?
+        switch composeRoute(draftID) {
+        case .empty:
+            sendErrors[draftID] = "Add at least one recipient."; return
+        case .existing(let id, _):
+            target = .chat(id); threadID = id
+        case .choose(let ids):
+            sendErrors[draftID] = "These people have \(ids.count) conversations. Choose one under To, so the message goes where you mean."; return
+        case .chosenGone:
+            sendErrors[draftID] = "The conversation you chose is no longer on this Mac. Choose the people again."; return
+        case .newGroup:
+            sendErrors[draftID] = ComposeRoute.newGroupExplanation; return
+        case .newPerson(let person, let handle), .sentTo(let person, let handle):
+            // The conversation appears in the database once Messages has created it; the tile
+            // adopts it then (adoptConversations). Until then what was sent shows in this tile.
+            target = .participant(handle: handle, service: "iMessage"); threadID = draftID; newPerson = person
+        }
+        guard await readyToSend(draftID), composeDrafts[draftID] != nil else { return }
+        // A chosen conversation that went away while photos arrived sends nowhere else.
+        if case .chat(let id) = target, !conversations.contains(where: { $0.id == id }) {
+            sendErrors[draftID] = "The conversation this was going to is no longer on this Mac."; return
+        }
+        guard let batch = acceptSend(from: draftID, to: target, into: threadID) else { return }
+        if threadID != draftID {
             // The tile becomes the conversation now; the sending bubbles are already in it.
-            instantly { replaceTile(draftID, with: target.id) }
-            await submit(batch)
-            return
+            instantly { replaceTile(draftID, with: threadID) }
+        } else if let newPerson {
+            // From now on this tile is that person's: its To field shows them and no longer changes.
+            if var draft = composeDrafts[draftID] {
+                draft.routedTo = newPerson
+                draft.recipients = [newPerson]
+                draft.boundConversationID = nil
+                instantly { composeDrafts[draftID] = draft }
+            }
         }
-        guard current.recipients.count == 1, let recipient = current.recipients.first else {
-            sendErrors[draftID] = "Messages can't start a new group from another app. Start it in Messages — it will appear here once it exists."
-            openMessages(addresses: current.recipients.map(\.address))
-            return
-        }
-        // The conversation appears in the database once Messages has created it; the tile adopts
-        // it then (adoptConversations). Until then what was sent is shown in the draft tile.
-        guard let batch = acceptSend(from: draftID, to: .participant(handle: Recipient.handle(for: recipient.address), service: "iMessage"), into: draftID) else { return }
         await submit(batch)
     }
     /// Swaps a new-message tile for the conversation it turned out to be.
@@ -2218,18 +2267,13 @@ import MosaicCore
     /// New-message tiles whose conversation now exists in the database adopt it.
     private func adoptConversations(for loaded: [Conversation]) {
         for (draftID, draft) in composeDrafts where draft.awaitingConversationSince != nil {
-            let keys = Set(draft.recipients.map(\.id))
-            guard let match = loaded.first(where: { $0.participantKeys == keys }) else { continue }
+            // The person it was sent to, not whoever the To field may have shown since.
+            let keys = Set((draft.routedTo.map { [$0] } ?? draft.recipients).map(\.id))
+            guard let match = loaded.filter({ $0.participantKeys == keys }).max(by: { $0.lastActivity < $1.lastActivity }) else { continue }
             instantly { replaceTile(draftID, with: match.id) }
             markSeen(match.id)
             refreshRequestedWhileBusy = true
         }
-    }
-    /// Opens Messages addressed to these people, for what automation cannot do (new groups).
-    func openMessages(addresses: [String]) {
-        let handles = addresses.map(Recipient.handle(for:)).joined(separator: ",")
-        if let url = URL(string: "imessage:" + handles.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)!), NSWorkspace.shared.open(url) { return }
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/Messages.app"))
     }
 
     // MARK: Contacts
@@ -2456,11 +2500,41 @@ struct ComposeDraft: Equatable {
     /// Messages sent to a new person before Messages has created the conversation.
     var sent: [Message] = []
     var awaitingConversationSince: Date?
+    /// The new person a message from this tile went to: later ones (and Try Again) go to them too,
+    /// and the To field no longer changes.
+    var routedTo: Recipient?
     var created = Date()
     var hasRecipients: Bool { !recipients.isEmpty }
 
     init(recipients: [Recipient] = [], boundConversationID: String? = nil, created: Date = Date()) {
         self.recipients = recipients; self.boundConversationID = boundConversationID; self.created = created
+    }
+}
+
+/// Where a New Message would go (`WorkspaceStore.composeRoute`).
+enum ComposeRoute: Equatable {
+    /// Nobody chosen yet.
+    case empty
+    /// An existing conversation, by its chat identifier: the one chosen, or the only one these people have.
+    case existing(String, chosen: Bool)
+    /// These people have several conversations (most recent first); the reader chooses.
+    case choose([String])
+    /// One person with no conversation yet, and the handle Messages is given.
+    case newPerson(Recipient, handle: String)
+    /// Several people with no conversation.
+    case newGroup
+    /// The conversation chosen is no longer on this Mac.
+    case chosenGone
+    /// Already sent from this tile to someone new; later messages go to them too.
+    case sentTo(Recipient, handle: String)
+
+    static let newGroupExplanation = "Mosaic can't start a new group: Messages doesn't let other apps create one. Choose an existing group, or send to one person."
+    /// Whether a send would go now.
+    var canSend: Bool {
+        switch self {
+        case .existing, .newPerson, .sentTo: return true
+        default: return false
+        }
     }
 }
 
