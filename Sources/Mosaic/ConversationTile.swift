@@ -20,6 +20,9 @@ struct ConversationTile: View {
     @State private var findQuery = ""
     @State private var findCurrent: String?
     @State private var findFocusToken = 0
+    /// The details panel (⌘I) in place of the thread, and a message just shown from it.
+    @State private var showingDetails = false
+    @State private var revealedID: String?
     private var isFocused: Bool { store.focusedID == conversation.id }
 
     var body: some View {
@@ -59,6 +62,10 @@ struct ConversationTile: View {
                         .equatable()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            } else if showingDetails {
+                ConversationDetailsPanel(conversation: conversation, hasOlderHistory: hasOlderHistory,
+                                         onShowMessage: { id in reveal(id) }, onClose: { showingDetails = false })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let context = store.contextWindows[conversation.id] {
                 // Older messages around a search result. Nothing here counts as read (it is not
                 // the newest messages); the conversation keeps updating behind it.
@@ -76,7 +83,9 @@ struct ConversationTile: View {
                             isLoadingMore: store.loadingMore.contains(conversation.id),
                             senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
                             seenBoundary: store.seenBoundary(conversation.id),
-                            findQuery: finding ? findQuery : "", findCurrent: finding ? findCurrent : nil,
+                            findQuery: finding ? findQuery : "", findCurrent: finding ? findCurrent : revealedID,
+                            historyCeiling: store.isLive && conversation.messages.count >= WorkspaceStore.maximumHistory,
+                            onSearchOlder: { openFind() },
                             onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
                             onTailSeen: { [store, id = conversation.id] in store.tailSeen(id) },
                             onTailLeft: { [store, id = conversation.id] in store.tailLeft(id) })
@@ -106,6 +115,10 @@ struct ConversationTile: View {
             guard note.object as? String == conversation.id, !conversation.isComposeDraft else { return }
             if finding { findFocusToken += 1 } else { finding = true }
             store.findOpened(conversation.id)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showConversationDetails)) { note in
+            guard note.object as? String == conversation.id, !conversation.isComposeDraft else { return }
+            showingDetails.toggle()
         }
         .onReceive(NotificationCenter.default.publisher(for: .findNextInConversation)) { note in
             guard finding, let info = note.object as? FindStep, info.conversationID == conversation.id else { return }
@@ -145,6 +158,22 @@ struct ConversationTile: View {
         guard !matches.isEmpty else { return }
         guard let current = findCurrent, let index = matches.firstIndex(of: current) else { findCurrent = matches.last; return }
         findCurrent = matches[(index + (older ? matches.count - 1 : 1)) % matches.count]
+    }
+    /// Whether there is history before the loaded messages (more to scroll back to, or past the ceiling).
+    private var hasOlderHistory: Bool {
+        store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? WorkspaceStore.pageSize)
+    }
+    /// Closes the details and shows a message where it was sent, outlined for a moment.
+    private func reveal(_ id: String) {
+        showingDetails = false
+        store.leaveContext(conversation.id)
+        revealedID = id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { if revealedID == id { revealedID = nil } }
+    }
+    /// Opens the find bar (the ceiling note's Search Older Messages).
+    private func openFind() {
+        if finding { findFocusToken += 1 } else { finding = true }
+        store.findOpened(conversation.id)
     }
     /// The conversation as the window around a search result shows it.
     private func contextConversation(_ context: HistoryContext) -> Conversation {
@@ -226,7 +255,11 @@ struct ConversationTile: View {
     private var headerMenu: [TileHeaderHandle.MenuItem] {
         let id = conversation.id
         let protected = store.isProtected(id)
-        return [
+        var items: [TileHeaderHandle.MenuItem] = []
+        if !conversation.isComposeDraft {
+            items.append(.init(title: "Conversation Details", action: { NotificationCenter.default.post(name: .showConversationDetails, object: id) }))
+        }
+        return items + [
             // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
             .init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }),
             .init(title: store.needsReply(id) ? "Clear Needs Reply" : "Mark as Needs Reply",
@@ -326,6 +359,9 @@ struct MessageList: View, Equatable {
     var findCurrent: String? = nil
     /// The "Latest" button while reading above the newest message (not in a window into older history).
     var showsLatestButton = true
+    /// The tile shows as many messages as it can (1,000): a note at the top says older ones exist.
+    var historyCeiling = false
+    var onSearchOlder: () -> Void = {}
     let onLoadMore: () -> Void
     /// The newest message is in view (the store marks it seen once the reader can see the tile),
     /// and when it no longer is.
@@ -350,6 +386,7 @@ struct MessageList: View, Equatable {
             && lhs.isLoadingMore == rhs.isLoadingMore
             && lhs.senderNames == rhs.senderNames && lhs.zoom == rhs.zoom && lhs.animateNew == rhs.animateNew
             && lhs.seenBoundary == rhs.seenBoundary && lhs.findQuery == rhs.findQuery && lhs.findCurrent == rhs.findCurrent
+            && lhs.historyCeiling == rhs.historyCeiling
     }
 
     /// A person in this thread, as the thread names them.
@@ -390,6 +427,15 @@ struct MessageList: View, Equatable {
             VStack(alignment: .leading, spacing: 10 * zoom) {
                 // Earlier messages load by themselves as the reader nears the top; a small spinner
                 // shows while they come.
+                if historyCeiling {
+                    // Not the start of the conversation: the most a tile shows.
+                    VStack(spacing: 4) {
+                        Text("Showing the newest \(WorkspaceStore.maximumHistory.formatted()) messages. Older ones are still on this Mac.")
+                            .font(.system(size: 10 * zoom)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        Button("Search Older Messages", action: onSearchOlder).buttonStyle(.borderless).font(.system(size: 10 * zoom, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity).padding(.vertical, 6)
+                }
                 if canLoadMore && isLoadingMore {
                     ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, 4)
                         .accessibilityLabel("Loading earlier messages")

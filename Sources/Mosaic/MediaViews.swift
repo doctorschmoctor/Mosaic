@@ -264,19 +264,33 @@ struct AttachmentView: View {
         .onTapGesture { open() }
         .contextMenu { menu }
     }
-    @ViewBuilder private var menu: some View {
+    @ViewBuilder private var menu: some View { AttachmentMenuItems(attachment: attachment, siblings: siblings) }
+    /// A click previews the file in Quick Look, like Space in the Finder; Open With hands it to its app.
+    private func open() { AttachmentActions.quickLook(attachment, among: siblings) }
+    static func defaultAppName(for path: String) -> String? { AttachmentActions.defaultAppName(for: path) }
+}
+
+/// What can be done with a received file, wherever it is shown (a bubble, the details' media
+/// and files): Quick Look, open it in its app, copy, save, show it in the Finder.
+struct AttachmentMenuItems: View {
+    let attachment: Attachment
+    var siblings: [URL] = []
+    var body: some View {
         if let path = attachment.path {
-            Button("Quick Look") { open() }
-            Button("Open With \(Self.defaultAppName(for: path) ?? "Default App")") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
-            Button(attachment.kind == .image ? "Copy Image" : "Copy") { copy() }
-            Button("Save to Downloads") { saveToDownloads() }
-            Button("Save As…") { saveAs() }
+            Button("Quick Look") { AttachmentActions.quickLook(attachment, among: siblings) }
+            Button("Open With \(AttachmentActions.defaultAppName(for: path) ?? "Default App")") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+            Button(attachment.kind == .image ? "Copy Image" : "Copy") { AttachmentActions.copy(attachment) }
+            Button("Save to Downloads") { AttachmentActions.saveToDownloads(attachment) }
+            Button("Save As…") { AttachmentActions.saveAs(attachment) }
             Divider()
             Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)]) }
         }
     }
-    /// A click previews the file in Quick Look, like Space in the Finder; Open With hands it to its app.
-    private func open() {
+}
+
+@MainActor enum AttachmentActions {
+    /// Previews the file in Quick Look, with the conversation's other files a key press away.
+    static func quickLook(_ attachment: Attachment, among siblings: [URL]) {
         guard let path = attachment.path else { return }
         QuickLook.shared.show(URL(fileURLWithPath: path), among: siblings)
     }
@@ -286,7 +300,7 @@ struct AttachmentView: View {
     }
     /// Puts the file on the pasteboard — as a file, and for a picture as image data too, so it
     /// pastes into another Mosaic composer, Messages, Mail or an image editor alike.
-    private func copy() {
+    static func copy(_ attachment: Attachment) {
         guard let path = attachment.path else { return }
         let url = URL(fileURLWithPath: path)
         let isImage = attachment.kind == .image
@@ -300,7 +314,7 @@ struct AttachmentView: View {
             pasteboard.writeObjects(items)
         }
     }
-    private func saveToDownloads() {
+    static func saveToDownloads(_ attachment: Attachment) {
         guard let path = attachment.path, let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first else { return }
         let destination = SavedFiles.freeName(for: attachment.name, in: downloads)
         Task {
@@ -310,7 +324,7 @@ struct AttachmentView: View {
             } catch { NSSound.beep() }
         }
     }
-    private func saveAs() {
+    static func saveAs(_ attachment: Attachment) {
         guard let path = attachment.path else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = attachment.name

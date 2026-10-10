@@ -1046,6 +1046,11 @@ import MosaicCore
         composerFocus.cancel("the find bar was opened")
         NotificationCenter.default.post(name: .findInConversation, object: id)
     }
+    /// Opens (or closes) the focused tile's details: people, photos and videos, files and links (⌘I).
+    func showDetails() {
+        guard let id = focused?.id, !(focused?.isComposeDraft ?? true) else { return }
+        NotificationCenter.default.post(name: .showConversationDetails, object: id)
+    }
     func findOpened(_ id: String) { activeFindTile = id }
     func findClosed(_ id: String) { if activeFindTile == id { activeFindTile = nil } }
     /// ⌘G (older) or ⇧⌘G (newer) in the open find bar. False when no bar is open.

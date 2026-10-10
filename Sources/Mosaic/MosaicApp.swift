@@ -28,6 +28,7 @@ import Quartz
                     .keyboardShortcut("l", modifiers: .command)
                 // Searches the focused tile's loaded messages (⌘F finds a conversation).
                 Button("Find in Conversation") { store.beginFind() }.keyboardShortcut("f", modifiers: [.command, .option])
+                Button("Conversation Details") { store.showDetails() }.keyboardShortcut("i", modifiers: .command)
                 Divider()
                 // The same single action path as the keys (KeyboardRouter consumes ⌘+/⌘−/⌘0 in the
                 // workspace window, so a key press never triggers both the monitor and the menu).
