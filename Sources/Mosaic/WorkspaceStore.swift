@@ -79,6 +79,11 @@ import MosaicCore
     /// A line under a composer about its send: waiting for photos, or why a send stopped.
     var sendNotes: [String: String] = [:]
     var showSetup = false
+    /// The list of conversations hidden from Mosaic, with Restore for each.
+    var showHiddenConversations = false
+    /// Tiles closed or replaced, the most recent last, for Reopen Closed Tile (⌘⇧T).
+    private(set) var recentlyClosed: [String] = []
+    static let recentlyClosedLimit = 20
     /// How many messages each open tile asked to show (100, then 100 more each time it scrolls
     /// back, up to 1,000). Loads read only each tile's newest 100; the earlier ones a tile paged
     /// in are kept above them (see `keepingEarlier`).
@@ -551,6 +556,7 @@ import MosaicCore
     }
     /// Lets go of a tile's transient state ahead of its replacement (its draft text is kept, as on close).
     private func evict(_ victim: String) {
+        rememberClosed(victim)
         if tileDrag?.id == victim { tileDrag = nil }
         if focusTarget == victim { focusTarget = nil }
         composerFocus.cancel(for: victim)
@@ -612,6 +618,7 @@ import MosaicCore
         lastUsed[id] = useCount
     }
     func close(_ id: String) {
+        if openIDs.contains(id) { rememberClosed(id) }
         instantly {
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
@@ -622,13 +629,68 @@ import MosaicCore
         composerFocus.cancel(for: id)
         updateDraftSummaries()
     }
-    /// Removes a conversation from Mosaic: its tile closes and it leaves the sidebar. It stays in
-    /// Messages, and a message newer than the moment it was removed brings it back.
+    /// Hides a conversation from Mosaic: its tile closes (its draft is kept) and it leaves the
+    /// sidebar. Nothing changes in Messages — the conversation and its history stay there — and a
+    /// message newer than the moment it was hidden brings it back. It can be taken back at once
+    /// (Undo), or later from Hidden Conversations.
     func hide(_ id: String) {
         guard let conversation = conversations.first(where: { $0.id == id }) else { return }
+        let wasOpen = openIDs.contains(id)
         instantly {
             close(id)
             hidden[id] = String(max(conversation.lastActivity, Date()).timeIntervalSinceReferenceDate)
+        }
+        // A hidden conversation is not one to reopen by ⌘⇧T.
+        recentlyClosed.removeAll { $0 == id }
+        if sidebarSelection == id { sidebarSelection = nil }
+        offerUndo("\(conversation.name) hidden from Mosaic", undo: { [weak self] in
+            guard let self else { return }
+            self.unhide(id)
+            if wasOpen { self.openAndType(id) }
+        })
+    }
+    /// Shows a hidden conversation in the sidebar again.
+    func unhide(_ id: String) {
+        guard hidden[id] != nil else { return }
+        instantly { hidden[id] = nil }
+    }
+    /// Shows every hidden conversation again.
+    func unhideAll() {
+        guard !hidden.isEmpty else { return }
+        instantly { hidden = [:] }
+    }
+    /// The hidden conversations for the recovery list, the most recently hidden first: by name
+    /// when Mosaic has the conversation, else by its address (one older than the 500 most recent).
+    var hiddenConversations: [(id: String, name: String, conversation: Conversation?)] {
+        hidden.sorted { (Double($0.value) ?? 0, $0.key) > (Double($1.value) ?? 0, $1.key) }.map { id, _ in
+            let conversation = conversations.first { $0.id == id }
+            let address = id.split(separator: ";").last.map(String.init) ?? id
+            return (id, conversation?.name ?? contactNames.name(for: address) ?? Recipient.display(address), conversation)
+        }
+    }
+
+    // MARK: Reopening closed tiles
+
+    private func rememberClosed(_ id: String) {
+        recentlyClosed.removeAll { $0 == id }
+        recentlyClosed.append(id)
+        if recentlyClosed.count > Self.recentlyClosedLimit { recentlyClosed.removeFirst(recentlyClosed.count - Self.recentlyClosedLimit) }
+    }
+    /// Whether a closed tile could come back: its conversation is listed (or its New Message
+    /// draft kept) and it is not open.
+    private func canReopen(_ id: String) -> Bool {
+        guard !openIDs.contains(id) else { return false }
+        if composeDrafts[id] != nil { return true }
+        return hidden[id] == nil && conversations.contains { $0.id == id }
+    }
+    var canReopenClosedTile: Bool { recentlyClosed.contains(where: canReopen) }
+    /// Opens the tile closed most recently (⌘⇧T) with its draft as it was, in free space or in
+    /// place of the tile used longest ago; the cursor goes to its message field.
+    func reopenLastClosedTile() {
+        while let id = recentlyClosed.popLast() {
+            guard canReopen(id) else { continue }
+            openAndType(id)
+            return
         }
     }
     /// A hidden conversation with activity newer than its removal is shown again.
@@ -869,7 +931,7 @@ import MosaicCore
         guard live != isLive, submissionsInFlight == 0 else { return }
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
-        focusTarget = nil; composeDrafts = [:]
+        focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false
         composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
@@ -1508,6 +1570,7 @@ import MosaicCore
         if compose != nil {
             if focusTarget == id { focusTarget = nil }
             composerFocus.cancel(for: id)
+            recentlyClosed.removeAll { $0 == id }
         }
         updateDraftSummaries()
         // Files still arriving are let go now (one that lands later is removed); the rest can come back.

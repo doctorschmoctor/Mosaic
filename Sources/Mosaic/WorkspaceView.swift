@@ -88,6 +88,7 @@ struct WorkspaceView: View {
             store.composerFocus.attach(window: window)
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
+        .sheet(isPresented: $store.showHiddenConversations) { HiddenConversationsView().environment(store) }
         .alert(item: $store.alert) { alert in Alert(title: Text(alert.title), message: Text(alert.message)) }
         // ⌘F and ⌘L are the reader choosing where the keyboard goes: a request still pending gives way.
         .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
@@ -138,8 +139,9 @@ struct WorkspaceView: View {
                                     Button(role: .destructive) { store.discardDraft(conversation.id) } label: { Image(systemName: "trash") }
                                         .tint(.red).accessibilityLabel("Discard draft")
                                 } else {
-                                    Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
-                                        .tint(.red)
+                                    // Hiding leaves Messages untouched; Undo or Hidden Conversations bring it back.
+                                    Button { store.hide(conversation.id) } label: { Label("Hide", systemImage: "eye.slash") }
+                                        .tint(.gray).accessibilityLabel("Hide from Mosaic")
                                 }
                             }
                     }
@@ -423,7 +425,8 @@ struct ConversationRow: View {
                 }
                 if !conversation.isComposeDraft {
                     Divider()
-                    Button("Delete", role: .destructive) { store.hide(conversation.id) }
+                    Button("Hide from Mosaic") { store.hide(conversation.id) }
+                        .help("Hides it here only; it stays in Messages and comes back with its next message")
                 }
             }
             .onDrag { NSItemProvider(object: conversation.id as NSString) }
@@ -475,8 +478,61 @@ struct SidebarFilterBar: View {
                 .help(filter == .drafts ? "Unsent messages, including New Messages you closed" : "All conversations")
             }
             Spacer(minLength: 0)
+            if !store.hidden.isEmpty {
+                Button { store.showHiddenConversations = true } label: {
+                    Image(systemName: "eye.slash").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                        .frame(width: 24, height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Hidden conversations (\(store.hidden.count))")
+                .accessibilityLabel("Hidden conversations, \(store.hidden.count)")
+            }
         }
         .padding(.horizontal, 12).padding(.top, 8)
+    }
+}
+
+/// The conversations hidden from Mosaic, each with Restore. Hiding only takes a conversation out of
+/// Mosaic's sidebar: it stays in Messages with all its history, and its next message brings it
+/// back. (Closing a tile is different: the conversation stays in the sidebar.)
+struct HiddenConversationsView: View {
+    @Environment(WorkspaceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Hidden Conversations").font(.system(size: 17, weight: .semibold))
+            Text("These are hidden from Mosaic's sidebar only. They stay in Messages with all their history, and a new message brings one back by itself. Closing a tile is different: its conversation stays in the sidebar.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            let hidden = store.hiddenConversations
+            if hidden.isEmpty {
+                Text("Nothing is hidden.").font(.callout).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                ScrollView {
+                    VStack(spacing: 2) {
+                        ForEach(hidden, id: \.id) { entry in
+                            HStack(spacing: 10) {
+                                if let conversation = entry.conversation { Avatar(conversation: conversation, size: 28) }
+                                else { Circle().fill(Palette.avatar.gradient).frame(width: 28, height: 28).accessibilityHidden(true) }
+                                Text(entry.name).font(.system(size: 13)).lineLimit(1)
+                                Spacer(minLength: 8)
+                                Button("Restore") { store.unhide(entry.id) }
+                                    .accessibilityLabel("Restore \(entry.name)")
+                            }
+                            .padding(.horizontal, 8).padding(.vertical, 6)
+                        }
+                    }
+                }
+                .frame(minHeight: 120, maxHeight: 320)
+            }
+            HStack {
+                if hidden.count > 1 { Button("Restore All") { store.unhideAll() } }
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24).frame(width: 440)
     }
 }
 

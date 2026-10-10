@@ -189,7 +189,7 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.drafts[all[0]], "draft survives churn")
     }
 
-    @MainActor func testDeletingAConversationClosesItsTileAndHidesItUntilNewActivity() {
+    @MainActor func testHidingAConversationClosesItsTileAndHidesItUntilNewActivity() {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         let id = store.workspace.openIDs[1]
         store.hide(id)

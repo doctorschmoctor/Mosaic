@@ -73,6 +73,8 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **⌘+ / ⌘− / ⌘0** | Zoom the conversations in · out · back to 100% (all tiles together) |
 | **⌘⌥1 · ⌘⌥2 · ⌘⌥3** | Grid · Columns · Focus |
 | **⌘⇧W** | Close the focused tile |
+| **⌘⇧T** | Reopen the tile closed last, with its draft |
+| **⌘Z** | Undo hiding a conversation or discarding a draft (while the sidebar offers it) |
 | **⌘R** | Refresh |
 | **⌘,** | Settings |
 
@@ -81,7 +83,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 ## Mouse and trackpad
 
 - Click a conversation to open it or focus its tile; double-click an open one to close the tile. With four tiles open, the one you used longest ago — opened, focused, typed in or sent from — makes room, in its own place. A grid icon marks open conversations. Rows are highlighted only while the keyboard is on the list (⌘L); the pointer highlights nothing.
-- Swipe a row left (or right-click it) to delete the conversation from Mosaic. It stays in Messages and returns with its next message.
+- Swipe a row left (or right-click it) and choose **Hide** to take the conversation out of Mosaic's sidebar. Nothing changes in Messages; **Undo** brings it back at once, **Workspace › Hidden Conversations…** (or the eye button at the top of the sidebar) restores it later, and its next message brings it back by itself. Closing a tile is different: the conversation stays in the sidebar, and **⌘⇧T** reopens it.
 - Drag a tile's header to move it; neighbors show the new order as you drag. Drag the gaps between tiles to resize them.
 - Click anywhere in a tile to type in its composer. The smiley button opens Emoji & Symbols.
 - The **+** button at the left of the composer opens a grid of your Photos library (newest first; click to choose, **Add** to attach) or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text, with a remove badge, and go out with the next Return — each file as its own message, before the text.

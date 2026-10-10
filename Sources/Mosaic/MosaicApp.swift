@@ -38,6 +38,9 @@ import Quartz
                 Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])
                 Divider()
                 Button("Close Focused Tile") { if let id = store.focused?.id { store.close(id) } }.keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Reopen Closed Tile") { store.reopenLastClosedTile() }.keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(!store.canReopenClosedTile)
+                Button("Hidden Conversations…") { store.showHiddenConversations = true }
                 Button("Refresh Messages") { Task { await store.refresh() } }.keyboardShortcut("r", modifiers: .command)
                 Button("Connect Messages…") { store.showSetup = true }
             }

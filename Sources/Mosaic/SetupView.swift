@@ -49,6 +49,13 @@ struct SetupView: View {
                 }
             }
             if let error = store.connectionError { Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true) }
+            if !store.hidden.isEmpty {
+                HStack {
+                    Text(store.hidden.count == 1 ? "1 conversation is hidden from Mosaic." : "\(store.hidden.count) conversations are hidden from Mosaic.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Show Hidden Conversations…") { dismiss(); store.showHiddenConversations = true }.controlSize(.small)
+                }
+            }
             Divider()
             Toggle("Animate new messages", isOn: Binding(get: { store.animateMessages }, set: { store.animateMessages = $0 }))
                 .toggleStyle(.switch).controlSize(.small)

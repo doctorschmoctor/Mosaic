@@ -43,7 +43,7 @@ final class DraftTests: XCTestCase {
         XCTAssertFalse(store.openIDs.contains(id), "the tile closed")
         XCTAssertEqual(store.composeDrafts[id]?.recipients.map(\.address), ["sam@example.test"])
         XCTAssertEqual(store.drafts[id], "Hi Sam")
-        XCTAssertEqual(store.outgoing[id]?.map(\.url), chosen, "the files, in the order they were added")
+        XCTAssertEqual(store.outgoing[id]?.compactMap(\.url), chosen, "the files, in the order they were added")
         let summary = try XCTUnwrap(store.draftSummaries[id])
         XCTAssertEqual(summary.line, "To: Sam · Hi Sam")
         XCTAssertFalse(store.filteredConversations.contains { $0.id == id }, "All lists conversations only")
@@ -58,7 +58,7 @@ final class DraftTests: XCTestCase {
         XCTAssertEqual(store.composeDrafts.count, drafts, "no copy was made")
         XCTAssertEqual(store.composeDrafts[id]?.recipients.map(\.name), ["Sam"])
         XCTAssertEqual(store.drafts[id], "Hi Sam")
-        XCTAssertEqual(store.outgoing[id]?.map(\.url), chosen)
+        XCTAssertEqual(store.outgoing[id]?.compactMap(\.url), chosen)
         XCTAssertEqual(store.focusTarget, id, "with someone to send to, the cursor goes to the message")
     }
 
@@ -198,7 +198,7 @@ final class DraftTests: XCTestCase {
         XCTAssertFalse(second.openIDs.contains(id), "a closed draft comes back closed")
         XCTAssertEqual(second.composeDrafts[id]?.recipients.map(\.name), ["Sam"])
         XCTAssertEqual(second.drafts[id], "See you at 6")
-        XCTAssertEqual(second.outgoing[id]?.map(\.url), chosen)
+        XCTAssertEqual(second.outgoing[id]?.compactMap(\.url), chosen)
         XCTAssertEqual(second.drafts[conversation], "Unsent")
         second.sidebarFilter = .drafts
         XCTAssertTrue(second.filteredConversations.contains { $0.id == id })
