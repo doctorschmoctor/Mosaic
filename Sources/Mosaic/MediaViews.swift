@@ -95,6 +95,11 @@ import MosaicCore
     let limiter = AsyncLimiter(limit: 3, order: .newestFirst)
     /// Decodes that ran, whether or not they produced a picture (tests).
     private(set) var decodeCount = 0
+    /// Lets go of every decoded thumbnail and remembered failure (Settings › Clear Media Cache).
+    func removeAll() {
+        images.removeAllObjects()
+        failures.removeAll()
+    }
 
     /// The key for a picture, with its file version read off the main thread: a stat can be slow
     /// for a file still arriving from iCloud or on a busy disk, and every bubble asks, cache hit
@@ -382,6 +387,14 @@ struct LinkPreview: @unchecked Sendable {
     /// Fetches that ran to the end, successful or not (tests).
     private(set) var fetchCount = 0
     var cachedCount: Int { cache.count }
+    /// Whether previews may be fetched at all (Settings › Link Previews). Off, nothing is fetched —
+    /// not even a request already waiting its turn.
+    var allowsFetching = true
+    /// Lets go of every preview and remembered failure (Settings › Clear Media Cache).
+    func removeAll() {
+        cache.removeAll()
+        failures.removeAll()
+    }
 
     init(capacity: Int = 200, concurrency: Int = 4, now: @escaping () -> Date = Date.init,
          fetch: Fetch? = nil) {
@@ -391,15 +404,23 @@ struct LinkPreview: @unchecked Sendable {
         self.now = now
     }
 
+    /// A preview already fetched, without fetching.
+    func cachedPreview(for url: URL) -> LinkPreview? { cache.peek(url) }
+
     func preview(for url: URL) async -> LinkPreview {
         if let hit = cache.value(for: url) { return hit }
         let fallback = LinkPreview(title: nil, host: Self.host(url), image: nil, icon: nil)
         if let failed = failures.peek(url), now().timeIntervalSince(failed) < Self.failureTTL { return fallback }
+        guard allowsFetching else { return fallback }
         let limiter = self.limiter, fetcher = self.fetcher
         let result = await requests.value(for: url) {
             Task {
                 do {
-                    let preview = try await limiter.run { try await fetcher(url) }
+                    let preview = try await limiter.run {
+                        // Turned off while this one waited its turn: it is not fetched.
+                        guard await MainActor.run(body: { self.allowsFetching }) else { throw CancellationError() }
+                        return try await fetcher(url)
+                    }
                     self.fetchCount += 1
                     self.cache.insert(preview, for: url)
                     self.failures.removeValue(for: url)
@@ -466,13 +487,78 @@ struct LinkPreview: @unchecked Sendable {
     }
 }
 
-/// A fixed-height card, so the conversation never jumps when metadata arrives.
+/// Whether link previews are fetched: always (the default), only when asked for on a card, or never.
+enum LinkPreviewPolicy: String, CaseIterable, Identifiable {
+    case automatic, onClick, off
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .onClick: return "On Click"
+        case .off: return "Off"
+        }
+    }
+}
+private struct LinkPreviewPolicyKey: EnvironmentKey { static let defaultValue = LinkPreviewPolicy.automatic }
+extension EnvironmentValues {
+    var linkPreviewPolicy: LinkPreviewPolicy {
+        get { self[LinkPreviewPolicyKey.self] }
+        set { self[LinkPreviewPolicyKey.self] = newValue }
+    }
+}
+
+/// A link's card. Automatic: a fixed-height card, so the conversation never jumps when metadata
+/// arrives. On Click: the same card, fetched only once its Show Preview is pressed. Off: a
+/// compact link with its address, and nothing is fetched. The link opens on a click either way.
 struct LinkPreviewCard: View {
     let url: URL
     @State private var preview: LinkPreview?
+    @State private var requested = false
     @Environment(\.zoomScale) private var zoom
+    @Environment(\.linkPreviewPolicy) private var policy
 
     var body: some View {
+        if policy == .off || (policy == .onClick && !requested && LinkPreviewLoader.shared.cachedPreview(for: url) == nil) {
+            plainLink
+        } else {
+            card
+        }
+    }
+
+    /// The link alone: where it goes, no picture, no fetch.
+    private var plainLink: some View {
+        HStack(spacing: 8 * zoom) {
+            Image(systemName: "link").font(.system(size: 12 * zoom)).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(LinkPreviewLoader.host(url)).font(.system(size: 12 * zoom, weight: .semibold)).lineLimit(1)
+                Text(url.absoluteString).font(.system(size: 10 * zoom)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            if policy == .onClick {
+                Button("Show Preview") { requested = true }.buttonStyle(.borderless).font(.system(size: 10 * zoom, weight: .medium))
+                    .help("Fetches this page's title and picture from the site")
+            }
+        }
+        .padding(.horizontal, 11).padding(.vertical, 8)
+        .frame(maxWidth: 250 * zoom, alignment: .leading)
+        .background(Palette.incoming, in: RoundedRectangle(cornerRadius: 14 * zoom, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 14 * zoom, style: .continuous))
+        .onTapGesture { NSWorkspace.shared.open(url) }
+        .hoverCursor(.pointingHand)
+        .help(url.absoluteString)
+        .contextMenu { linkMenu }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isLink)
+    }
+    @ViewBuilder private var linkMenu: some View {
+        Button("Open Link") { NSWorkspace.shared.open(url) }
+        Button("Copy Link") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        }
+    }
+
+    private var card: some View {
         VStack(spacing: 0) {
             Rectangle().fill(Color.primary.opacity(0.06))
                 .frame(height: 128 * zoom)
@@ -504,16 +590,13 @@ struct LinkPreviewCard: View {
         .onTapGesture { NSWorkspace.shared.open(url) }
         .hoverCursor(.pointingHand)
         .help(url.absoluteString)
-        .contextMenu {
-            Button("Open Link") { NSWorkspace.shared.open(url) }
-            Button("Copy Link") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url.absoluteString, forType: .string)
-            }
-        }
+        .contextMenu { linkMenu }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isLink)
-        .task(id: url) { preview = await LinkPreviewLoader.shared.preview(for: url) }
+        .task(id: url) {
+            guard policy != .off else { return }
+            preview = await LinkPreviewLoader.shared.preview(for: url)
+        }
     }
 }
 

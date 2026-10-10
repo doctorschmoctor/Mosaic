@@ -78,8 +78,9 @@ struct WorkspaceView: View {
         .ignoresSafeArea(.container, edges: .top)
         .coordinateSpace(name: "workspace")
         .tint(Palette.accent)
-        // Every tile reads the same conversation scale (⌘+ / ⌘− / ⌘0).
+        // Every tile reads the same conversation scale (⌘+ / ⌘− / ⌘0), and the link-preview setting.
         .environment(\.zoomScale, CGFloat(store.zoom))
+        .environment(\.linkPreviewPolicy, store.linkPreviews)
         // Workspace changes — tiles opening, closing, moving, resizing, layouts switching — land
         // on the next frame: every store mutation runs in a transaction without animation
         // (`instantly`), and nothing in the chrome declares one. The only motion is the scoped
@@ -733,6 +734,7 @@ struct Avatar: View {
 @MainActor final class AvatarImages {
     static let shared = AvatarImages()
     private let images: NSCache<NSString, NSImage> = { let cache = NSCache<NSString, NSImage>(); cache.countLimit = 300; return cache }()
+    func removeAll() { images.removeAllObjects() }
 
     func image(at path: String) async -> NSImage? {
         if let hit = images.object(forKey: path as NSString) { return hit }

@@ -51,6 +51,14 @@ import MosaicCore
     var needsReplyIDs: Set<String> = [] { didSet { if needsReplyIDs != oldValue { persist() } } }
     /// Every open tile is protected and another conversation needs one: the reader chooses which closes.
     private(set) var replacementChoice: ReplacementChoice?
+    /// Whether link previews are fetched (Settings › Privacy & Data): automatically, on a click, or never.
+    var linkPreviews: LinkPreviewPolicy = .automatic {
+        didSet {
+            guard linkPreviews != oldValue else { return }
+            defaults.set(linkPreviews.rawValue, forKey: "Mosaic.linkPreviews")
+            LinkPreviewLoader.shared.allowsFetching = linkPreviews != .off
+        }
+    }
     /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
     var animateMessages: Bool { didSet { if animateMessages != oldValue { defaults.set(animateMessages, forKey: "Mosaic.animateMessages") } } }
     /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
@@ -232,6 +240,8 @@ import MosaicCore
         self.defaults = defaults; self.database = database; self.services = services
         liveTransport = transport ?? (isolated ? UnavailableTransport() : AppleScriptTransport())
         animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
+        linkPreviews = defaults.string(forKey: "Mosaic.linkPreviews").flatMap(LinkPreviewPolicy.init(rawValue:)) ?? .automatic
+        LinkPreviewLoader.shared.allowsFetching = linkPreviews != .off
         reader = MessagesReader(database: database)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
         // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
@@ -1930,8 +1940,32 @@ import MosaicCore
     /// New Message (its tile closes). It can be taken back for a few seconds (`undoLast`); after
     /// that, pictures Mosaic wrote for it are removed. A file you chose is never touched.
     func discardDraft(_ id: String) {
+        guard let discarded = removeDraft(id) else { return }
+        offerUndo(discarded.compose != nil ? "New Message discarded" : "Draft discarded", undo: { [weak self] in
+            self?.restoreDiscardedDraft(discarded)
+        }, expire: { discarded.removeOwnedFiles() })
+    }
+    /// Throws away several drafts at once (Settings › Review Drafts), with one Undo for all of them.
+    func discardDrafts(_ ids: [String]) {
+        let discarded = ids.compactMap(removeDraft)
+        guard !discarded.isEmpty else { return }
+        offerUndo(discarded.count == 1 ? "1 draft cleared" : "\(discarded.count) drafts cleared", undo: { [weak self] in
+            for draft in discarded { self?.restoreDiscardedDraft(draft) }
+        }, expire: { for draft in discarded { draft.removeOwnedFiles() } })
+    }
+    /// What a discarded draft held, to bring it back or to remove Mosaic's own files once it cannot.
+    private struct DiscardedDraft {
+        let id: String
+        let text: String
+        let files: [OutgoingAttachment]
+        let compose: ComposeDraft?
+        let wasOpen: Bool
+        let ownedFiles: [URL]
+        func removeOwnedFiles() { for url in ownedFiles { try? FileManager.default.removeItem(at: url) } }
+    }
+    private func removeDraft(_ id: String) -> DiscardedDraft? {
         let text = drafts[id] ?? "", files = outgoing[id] ?? [], compose = composeDrafts[id]
-        guard compose != nil || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else { return }
+        guard compose != nil || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else { return nil }
         let wasOpen = openIDs.contains(id)
         instantly {
             if compose != nil {
@@ -1957,12 +1991,11 @@ import MosaicCore
         updateDraftSummaries()
         // Files still arriving are let go now (one that lands later is removed); the rest can come back.
         let kept = files.filter { $0.state != .importing }
-        let owned = kept.filter(ownsFile).compactMap(\.url)
-        offerUndo(compose != nil ? "New Message discarded" : "Draft discarded", undo: { [weak self] in
-            self?.restoreDiscardedDraft(id, text: text, files: kept, compose: compose, reopen: wasOpen)
-        }, expire: {
-            for url in owned { try? FileManager.default.removeItem(at: url) }
-        })
+        return DiscardedDraft(id: id, text: text, files: kept, compose: compose, wasOpen: wasOpen,
+                              ownedFiles: kept.filter(ownsFile).compactMap(\.url))
+    }
+    private func restoreDiscardedDraft(_ draft: DiscardedDraft) {
+        restoreDiscardedDraft(draft.id, text: draft.text, files: draft.files, compose: draft.compose, reopen: draft.wasOpen)
     }
     private func restoreDiscardedDraft(_ id: String, text: String, files: [OutgoingAttachment], compose: ComposeDraft?, reopen: Bool) {
         // A conversation that is gone (hidden, or no longer listed) has nowhere to take it back to.
@@ -1976,6 +2009,18 @@ import MosaicCore
         }
         if compose != nil, reopen { open(id) }
         updateDraftSummaries()
+    }
+
+    // MARK: Caches
+
+    /// Lets go of the pictures, link previews and contact photos kept in memory; drafts, files
+    /// waiting in composers and histories are untouched. Everything shown is fetched again as needed.
+    func clearMediaCaches() {
+        ThumbnailCache.shared.removeAll()
+        LinkPreviewLoader.shared.removeAll()
+        ContactPhotos.shared.reset()
+        AvatarImages.shared.removeAll()
+        contactPhotoGeneration += 1
     }
 
     // MARK: Undo

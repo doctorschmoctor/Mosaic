@@ -55,7 +55,7 @@ import Quartz
                 Button("Connect Messages…") { store.showSetup = true }
             }
         }
-        Settings { SetupView().environment(store) }
+        Settings { SettingsView().environment(store) }
     }
 }
 
