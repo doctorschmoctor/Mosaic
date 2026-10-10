@@ -83,11 +83,19 @@ struct WorkspaceView: View {
         .background(WindowReader { window in
             WindowChrome.apply(to: window)
             keyboard.attach(window: window, store: store, sidebar: sidebarKeyboard)
+            store.composerFocus.attach(window: window)
         })
         .sheet(isPresented: $store.showSetup) { SetupView().environment(store) }
         .alert(item: $store.alert) { alert in Alert(title: Text(alert.title), message: Text(alert.message)) }
-        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in searchFocused = true }
-        .onReceive(NotificationCenter.default.publisher(for: .focusConversationList)) { _ in sidebarKeyboard.focusList() }
+        // ⌘F and ⌘L are the reader choosing where the keyboard goes: a request still pending gives way.
+        .onReceive(NotificationCenter.default.publisher(for: .focusSearch)) { _ in
+            store.composerFocus.cancel("the search field was chosen")
+            searchFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .focusConversationList)) { _ in
+            store.composerFocus.cancel("the list was chosen")
+            sidebarKeyboard.focusList()
+        }
         .onChange(of: searchFocused) { _, focused in keyboard.searchFieldHasFocus = focused }
     }
 
@@ -345,8 +353,6 @@ struct WindowDragRegion: NSViewRepresentable {
 struct ConversationRow: View {
     @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
-    /// Whether the tile was already open when a click sequence began; a double-click then closes it.
-    @State private var wasOpenAtFirstClick = false
     private var isOpen: Bool { store.openIDs.contains(conversation.id) }
     /// The keyboard is on this row (the list has keyboard focus: ⌘L or ↓ from the search field).
     private var isSelected: Bool { store.sidebarSelection == conversation.id }
@@ -396,15 +402,7 @@ struct ConversationRow: View {
     private func activate() {
         var clicks = 1
         if let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseUp].contains(event.type) { clicks = event.clickCount }
-        guard clicks < 2 else {
-            // The first click of the pair only focused the tile; the second closes it.
-            if clicks == 2, wasOpenAtFirstClick, isOpen { store.close(conversation.id) }
-            return
-        }
-        wasOpenAtFirstClick = isOpen
-        // While the list has the keyboard, a click also moves the keyboard's row here.
-        if store.sidebarSelection != nil { store.selectSidebarRow(conversation.id) }
-        store.openAndType(conversation.id)
+        store.pressRow(conversation.id, clickCount: clicks)
     }
 }
 
@@ -601,7 +599,8 @@ struct TileWorkspace: View {
     private func canvas(_ plan: TilePlan, chipRow: Bool) -> some View {
         TileCanvas {
             if chipRow {
-                FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.focus(id) }
+                // Choosing a chip shows that tile and puts the keyboard in its message field.
+                FocusChipBar(chips: FocusChip.chips(for: store.tiles, focusedID: store.focused?.id)) { id in store.requestComposerFocus(id) }
                     .zIndex(3)
                     .tileFrame(CGRect(x: 0, y: 0, width: plan.size.width, height: FocusChipBar.height))
             }

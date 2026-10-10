@@ -26,8 +26,8 @@ struct ComposerEditor: NSViewRepresentable {
     var placeholder = ""
     var conversationID = ""
     let accessibilityLabel: String
-    /// A changed non-zero value asks this editor to become first responder (keyboard traversal).
-    var focusRequest: Int
+    /// Hands this field the keyboard when the workspace asks for it (see `ComposerFocus`).
+    var focus: ComposerFocus? = nil
     /// The shared conversation zoom; the font and margins follow it, in place.
     var zoom: CGFloat = 1
     var height: Binding<CGFloat>? = nil
@@ -87,8 +87,6 @@ struct ComposerEditor: NSViewRepresentable {
         ThinScroller.install(in: scroll)
         if let layoutManager = editor.layoutManager, let container = editor.textContainer { layoutManager.ensureLayout(for: container) }
         apply(to: editor, coordinator: context.coordinator)
-        context.coordinator.focusRequest = focusRequest
-        if focusRequest != 0 { context.coordinator.requestFocusSoon(editor) }
         return scroll
     }
 
@@ -111,12 +109,9 @@ struct ComposerEditor: NSViewRepresentable {
             editor.fitToClip(scroll.contentSize)
             editor.reportHeight()
         }
-        if focusRequest != context.coordinator.focusRequest {
-            context.coordinator.focusRequest = focusRequest
-            // Never move first responder inside a SwiftUI update: becoming first responder reports
-            // focus back to the store, and changing state mid-update re-runs the update.
-            if focusRequest != 0 { context.coordinator.requestFocusSoon(editor) }
-        }
+        // The keyboard is never moved here, inside a SwiftUI update: becoming first responder
+        // reports focus back to the store, and changing state mid-update re-runs the update.
+        // `ComposerFocus` hands it over at the next moment of rest.
     }
 
     private func apply(to editor: DraftTextView, coordinator: Coordinator) {
@@ -138,6 +133,7 @@ struct ComposerEditor: NSViewRepresentable {
         editor.onAttachFiles = onAttachFiles
         editor.onAttachPicture = onAttachPicture
         editor.conversationID = conversationID
+        editor.focusController = focus
         DraftTextView.register(editor, for: conversationID)
         if editor.placeholder != placeholder { editor.placeholder = placeholder; editor.needsDisplay = true }
         editor.onHeightChange = { [weak coordinator] value in coordinator?.report(value) }
@@ -147,14 +143,10 @@ struct ComposerEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposerEditor
-        var focusRequest = 0
         init(_ parent: ComposerEditor) { self.parent = parent }
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
             parent.text = editor.string
-        }
-        func requestFocusSoon(_ editor: DraftTextView) {
-            DispatchQueue.main.async { [weak editor] in editor?.requestFocus() }
         }
         func report(_ value: CGFloat) {
             let clamped = min(max(value.rounded(.up), ComposerEditor.minimumHeight(zoom: parent.zoom)), ComposerEditor.maximumHeight(zoom: parent.zoom))
@@ -204,23 +196,40 @@ final class DraftTextView: NSTextView {
     var onHeightChange: ((CGFloat) -> Void)?
     var conversationID = ""
     var placeholder = ""
-    private var pendingFocus = false
+    /// Hands this field the keyboard when asked; told when the field joins a window.
+    weak var focusController: ComposerFocus?
     private var lastReportedWidth: CGFloat = 0
 
-    // Each tile's editor by conversation, so the emoji button next to a field can reach that field.
+    // The tiles' editors by conversation, so the emoji button next to a field — and a focus
+    // request — can reach the field that is live now. Weak: a field that went away drops out.
     private final class WeakEditor { weak var view: DraftTextView?; init(_ view: DraftTextView) { self.view = view } }
-    @MainActor private static var registry: [String: WeakEditor] = [:]
+    @MainActor private static var registry: [String: [WeakEditor]] = [:]
     @MainActor static func register(_ editor: DraftTextView, for conversationID: String) {
         guard !conversationID.isEmpty else { return }
-        registry = registry.filter { $0.value.view != nil }
-        registry[conversationID] = WeakEditor(editor)
+        var editors = (registry[conversationID] ?? []).filter { $0.view != nil && $0.view !== editor }
+        editors.append(WeakEditor(editor))
+        registry[conversationID] = editors
+        if registry.count > 32 { registry = registry.filter { $0.value.contains { $0.view != nil } } }
     }
-    @MainActor static func editor(for conversationID: String) -> DraftTextView? { registry[conversationID]?.view }
+    /// The fields registered for a conversation, the most recently registered last.
+    @MainActor static func editors(for conversationID: String) -> [DraftTextView] {
+        registry[conversationID]?.compactMap(\.view).filter { $0.conversationID == conversationID } ?? []
+    }
+    /// The conversation's field that is in a window, else the most recent one.
+    @MainActor static func editor(for conversationID: String) -> DraftTextView? {
+        let editors = editors(for: conversationID)
+        return editors.last { $0.window != nil } ?? editors.last
+    }
 
     /// Opens the system Emoji & Symbols palette; a chosen emoji is inserted at this field's caret.
     func showEmojiPicker() {
-        requestFocus()
+        if let window, window.firstResponder !== self, window.makeFirstResponder(self) { placeCaretAtEnd() }
         NSApp.orderFrontCharacterPalette(nil)
+    }
+    /// The caret at the end of the draft, in view.
+    func placeCaretAtEnd() {
+        setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
+        scrollRangeToVisible(selectedRange())
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -315,8 +324,8 @@ final class DraftTextView: NSTextView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         if let scroll = enclosingScrollView { fitToClip(scroll.contentSize) }
-        guard pendingFocus, window != nil else { return }
-        DispatchQueue.main.async { [weak self] in self?.requestFocus() }
+        // A request may be waiting for this field (a tile that just opened).
+        if window != nil { focusController?.editorDidMoveToWindow(self) }
     }
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -342,43 +351,6 @@ final class DraftTextView: NSTextView {
     override func viewWillDraw() {
         syncContainerWidth()
         super.viewWillDraw()
-    }
-    /// Puts the keyboard here (opening a conversation, Tab, a click in the thread). Something the
-    /// request came through — the list row that was clicked, the table under it, the list's
-    /// keyboard — can take the keyboard back a moment later, so for a short while it is claimed
-    /// again from those (never from another message field or text field the reader chose).
-    func requestFocus() {
-        guard let window else { pendingFocus = true; return }
-        pendingFocus = false
-        Self.focusRequests &+= 1
-        let request = Self.focusRequests
-        claimKeyboard(in: window)
-        for delay in Self.reclaimDelays {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self, let window = self.window, Self.focusRequests == request,
-                      window.firstResponder !== self, Self.mayReclaim(from: window.firstResponder) else { return }
-                self.claimKeyboard(in: window)
-            }
-        }
-    }
-    @MainActor private static var focusRequests = 0
-    static let reclaimDelays: [Double] = [0.05, 0.15, 0.3, 0.6]
-    private func claimKeyboard(in window: NSWindow) {
-        // Already typing here: leave the caret where it is.
-        guard window.firstResponder !== self else { return }
-        guard window.makeFirstResponder(self) else { return }
-        setSelectedRange(NSRange(location: (string as NSString).length, length: 0))
-        scrollRangeToVisible(selectedRange())
-    }
-    /// Whether the keyboard may be taken back from `responder`: nothing, the window, the
-    /// conversation list (its table, a row, its keyboard catcher). Not from a field.
-    static func mayReclaim(from responder: NSResponder?) -> Bool {
-        guard let responder else { return true }
-        if responder is NSWindow { return true }
-        if responder is NSTextView || responder is NSTextField { return false }
-        guard let view = responder as? NSView else { return false }
-        if view is NSTableView || view.enclosingScrollView?.documentView is NSTableView { return true }
-        return view is SidebarKeyFocus.CatcherView
     }
     override func scrollRangeToVisible(_ range: NSRange) {
         // Nothing to bring into view while the whole draft fits; scrolling would only shift the text.

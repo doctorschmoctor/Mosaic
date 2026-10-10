@@ -332,19 +332,6 @@ final class ChromeAndHandleTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(30))
         XCTAssertGreaterThan(asked, 0, "near the top")
     }
-
-    /// A focus request takes the keyboard back only from the window itself or the conversation
-    /// list, never from a field the reader chose.
-    @MainActor func testTheComposerReclaimsTheKeyboardOnlyFromTheList() {
-        XCTAssertTrue(DraftTextView.mayReclaim(from: nil))
-        XCTAssertTrue(DraftTextView.mayReclaim(from: NSWindow()))
-        XCTAssertTrue(DraftTextView.mayReclaim(from: NSTableView()))
-        XCTAssertTrue(DraftTextView.mayReclaim(from: SidebarKeyFocus.CatcherView()))
-        XCTAssertFalse(DraftTextView.mayReclaim(from: NSTextView()))
-        XCTAssertFalse(DraftTextView.mayReclaim(from: NSTextField()))
-        XCTAssertFalse(DraftTextView.mayReclaim(from: DraftTextView()))
-        XCTAssertFalse(DraftTextView.mayReclaim(from: NSView()))
-    }
 }
 
 private final class FlippedView: NSView { override var isFlipped: Bool { true } }

@@ -106,9 +106,13 @@ import MosaicCore
     var sidebarSwiping = false
     /// The one highlighted sidebar row: the keyboard's, except during a swipe.
     var highlightedSidebarRow: String? { sidebarSwiping ? nil : sidebarSelection }
-    /// Keyboard traversal: the tile whose composer should take focus, and a token that changes per request.
+    /// The tile whose message field was last asked for the keyboard, and a number that increases
+    /// with every request. A request is not proof that the field has the keyboard:
+    /// `composerFocus` carries it out and confirms it.
     private(set) var focusTarget: String?
     private(set) var focusToken = 0
+    /// Hands the keyboard to the message field asked for, outside view updates, and confirms it.
+    @ObservationIgnored let composerFocus = ComposerFocus()
 
     /// Recently shown histories, so a tile opens on its messages at once instead of waiting for
     /// a load: kept in memory only (never written anywhere), at most `historyCacheLimit`
@@ -264,6 +268,7 @@ import MosaicCore
                 await self.refresh()
             }
         }
+        composerFocus.isOpen = { [weak self] id in self?.openIDs.contains(id) ?? false }
         startPolling()
     }
 
@@ -516,6 +521,7 @@ import MosaicCore
     private func evict(_ victim: String) {
         if tileDrag?.id == victim { tileDrag = nil }
         if focusTarget == victim { focusTarget = nil }
+        composerFocus.cancel(for: victim)
         let isNewMessage = composeDrafts[victim] != nil
         if isNewMessage { composeDrafts[victim] = nil; drafts[victim] = nil }
         releaseComposer(victim, keepingFiles: !isNewMessage)
@@ -566,6 +572,7 @@ import MosaicCore
             releaseTileState(id)
         }
         if focusTarget == id { focusTarget = nil }
+        composerFocus.cancel(for: id)
     }
     /// Removes a conversation from Mosaic: its tile closes and it leaves the sidebar. It stays in
     /// Messages, and a message newer than the moment it was removed brings it back.
@@ -609,12 +616,14 @@ import MosaicCore
         requestComposerFocus(target)
         return true
     }
-    /// Focuses a tile and puts the keyboard in its composer in one step.
+    /// Focuses a tile and asks for the keyboard in its message field (`composerFocus` hands it
+    /// over and confirms it). The newest request replaces any earlier one.
     func requestComposerFocus(_ id: String) {
         guard openIDs.contains(id) else { return }
         focus(id)
         focusTarget = id
         focusToken += 1
+        composerFocus.request(id, token: focusToken)
     }
     func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
 
@@ -655,6 +664,23 @@ import MosaicCore
         guard let id = sidebarSelection ?? (search.isEmpty ? nil : filteredConversations.first?.id) else { return }
         openAndType(id)
     }
+    /// A click on a conversation's row (its button's action). The first click opens the
+    /// conversation and puts the cursor in its field (`openAndType`); the second click of a double
+    /// click closes a tile that was already open when the clicks began, and otherwise puts the
+    /// keyboard back in the field (the second press gave it to the list).
+    func pressRow(_ id: String, clickCount: Int = 1) {
+        if clickCount >= 2, let start = rowClickStart, start.id == id {
+            if clickCount == 2, start.wasOpen, openIDs.contains(id) { close(id) }
+            else if openIDs.contains(id) { requestComposerFocus(id) }
+            return
+        }
+        rowClickStart = (id, openIDs.contains(id))
+        // While the list has the keyboard, a click also moves the keyboard's row here.
+        if sidebarSelection != nil { selectSidebarRow(id) }
+        openAndType(id)
+    }
+    /// The row a click sequence began on, and whether its tile was open then.
+    @ObservationIgnored private var rowClickStart: (id: String, wasOpen: Bool)?
     /// Opening a conversation from the list (a click, Return, a drag onto a tile, the menu): it
     /// gets a tile — free space, or the place of the tile used longest ago — or its tile is
     /// found, and the cursor goes into that tile's message field, ready to type.
@@ -794,6 +820,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]
+        composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
         defaults.set(live, forKey: "Mosaic.live")

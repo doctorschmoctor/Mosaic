@@ -144,7 +144,7 @@ struct ConversationTile: View {
                     }
                     ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
                         accessibilityLabel: "Message to \(conversation.name)",
-                        focusRequest: store.focusTarget == conversation.id ? store.focusToken : 0,
+                        focus: store.composerFocus,
                         zoom: zoom,
                         height: $composerHeight,
                         onFocus: { store.focus(conversation.id) },

@@ -1,5 +1,7 @@
 # Fix intermittent composer focus when opening a conversation
 
+> Implemented (UX-12): `ComposerFocus` carries out the pending request described below; `FocusHandoffTests` hosts the workspace in a real window and checks the first responder. See docs/ARCHITECTURE.md. The investigation is kept for reference.
+
 ## Desired behavior
 
 A single click on a conversation row, Return from the search field or keyboard-controlled list, and opening an already visible conversation must leave the insertion cursor in that conversation's composer. This also applies when a new conversation replaces the least recently used tile. A deliberate later click in search, the list, or another editor must keep the user's new focus.

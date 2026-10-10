@@ -31,9 +31,11 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertEqual(store.workspace.drafts[ids[0]], "Keep this draft")
     }
 
-    /// Opening a conversation from the list puts the cursor in its tile's message field, whether
-    /// it opens into free space, takes the place of the tile used longest ago, or is already open.
-    @MainActor func testOpeningFromTheListPutsTheCursorInTheTile() {
+    /// Request routing only: opening a conversation from the list asks for the keyboard in its
+    /// tile's message field, whether it opens into free space, takes the place of the tile used
+    /// longest ago, or is already open. A request is not cursor placement — `FocusHandoffTests`
+    /// checks the window's first responder in a real window.
+    @MainActor func testOpeningFromTheListRoutesAComposerFocusRequest() {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
         let all = store.conversations.map(\.id)
         let open = store.workspace.openIDs
@@ -50,6 +52,10 @@ final class WorkspaceInteractionTests: XCTestCase {
         store.openAndType(open[1])
         XCTAssertEqual(store.focusTarget, open[1], "an open tile is found")
         XCTAssertGreaterThan(store.focusToken, token)
+        XCTAssertEqual(store.composerFocus.pending, ComposerFocus.Request(conversationID: open[1], token: store.focusToken),
+                       "the newest request is the one pending")
+        store.close(open[1])
+        XCTAssertNil(store.composerFocus.pending, "closing the tile cancels its request")
     }
 
     /// The list stays at the top when a message moves a conversation there: it was at the top
