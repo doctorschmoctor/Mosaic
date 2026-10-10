@@ -336,7 +336,23 @@ enum PhotoLibraryExport {
         }
     }
 
-    static func file(for asset: PHAsset, in directory: URL = OutgoingFiles.pendingDirectory) async -> URL? {
+    /// The Photos item with this library identifier written to a file (see `file(for:)`); nil
+    /// when it is no longer in the library or could not be written.
+    static func file(forIdentifier identifier: String, in directory: URL = OutgoingFiles.pendingDirectory,
+                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> URL? {
+        guard let asset = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).firstObject else { return nil }
+        return await file(for: asset, in: directory, progress: progress)
+    }
+    /// Whether the library still has the item (so adding it again can work).
+    static func exists(_ identifier: String) -> Bool {
+        PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil).count > 0
+    }
+
+    /// Writes an item's original to a file. Photos may download it from iCloud first, reporting
+    /// how much has arrived through `progress`; cancelling the task stops the request, and its
+    /// partial file is removed.
+    static func file(for asset: PHAsset, in directory: URL = OutgoingFiles.pendingDirectory,
+                     progress: @escaping @Sendable (Double) -> Void = { _ in }) async -> URL? {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred: [PHAssetResourceType] = asset.mediaType == .video ? [.fullSizeVideo, .video] : [.fullSizePhoto, .photo]
         guard let resource = preferred.lazy.compactMap({ type in resources.first { $0.type == type } }).first ?? resources.first else { return nil }
@@ -346,17 +362,43 @@ enum PhotoLibraryExport {
         // takes its real name only once complete: a failed write removes only its own partial
         // file, never another photo's (two edited photos are both "FullSizeRender.heic").
         let partial = directory.appending(path: ".\(UUID().uuidString).partial")
+        guard FileManager.default.createFile(atPath: partial.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: partial) else { return nil }
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
-        return await withCheckedContinuation { continuation in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: partial, options: options) { error in
-                guard error == nil, let kept = OutgoingFiles.moveIntoPlace(partial, named: "\(OutgoingFiles.stamp()) \(name)", in: directory) else {
-                    try? FileManager.default.removeItem(at: partial)
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: kept)
+        options.progressHandler = { value in progress(value) }
+        let request = ExportRequest()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let id = PHAssetResourceManager.default().requestData(for: resource, options: options, dataReceivedHandler: { data in
+                    try? handle.write(contentsOf: data)
+                }, completionHandler: { error in
+                    try? handle.close()
+                    guard error == nil, let kept = OutgoingFiles.moveIntoPlace(partial, named: "\(OutgoingFiles.stamp()) \(name)", in: directory) else {
+                        try? FileManager.default.removeItem(at: partial)
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    continuation.resume(returning: kept)
+                })
+                request.started(id)
             }
+        } onCancel: {
+            request.cancel()
+        }
+    }
+    /// A Photos data request that may be cancelled before or after it starts.
+    private final class ExportRequest: @unchecked Sendable {
+        private let lock = NSLock()
+        private var id: PHAssetResourceDataRequestID?
+        private var cancelled = false
+        func started(_ id: PHAssetResourceDataRequestID) {
+            lock.lock(); self.id = id; let cancelNow = cancelled; lock.unlock()
+            if cancelNow { PHAssetResourceManager.default().cancelDataRequest(id) }
+        }
+        func cancel() {
+            lock.lock(); cancelled = true; let id = self.id; lock.unlock()
+            if let id { PHAssetResourceManager.default().cancelDataRequest(id) }
         }
     }
 }

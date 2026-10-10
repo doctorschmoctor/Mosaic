@@ -281,14 +281,15 @@ struct ConversationTile: View {
                 // Photos and files, as in Messages.
                 AttachmentMenuButton(conversationName: conversation.name,
                     onFiles: { urls in store.attach(urls, to: conversation.id) },
-                    onBeginAdding: { count in store.beginImports(count, to: conversation.id) },
-                    onAdded: { slot, url in store.completeImport(slot, url: url, in: conversation.id) },
+                    onPickPhotos: { identifiers in store.importPhotos(identifiers, to: conversation.id) },
                     onFinish: { store.requestComposerFocus(conversation.id) })
                     .frame(width: 31, height: 31).padding(.bottom, (ComposerEditor.barHeight - 31) / 2)
                 VStack(spacing: 0) {
                     if let files = store.outgoing[conversation.id], !files.isEmpty {
                         // Pictures and files going out with the next message, above the text.
-                        AttachmentStrip(files: files) { store.removeAttachment($0, from: conversation.id) }
+                        AttachmentStrip(files: files, onRemove: { store.removeAttachment($0, from: conversation.id) },
+                                        onRetry: { store.retryImport($0, in: conversation.id) },
+                                        onPreview: { store.previewOutgoing($0, in: conversation.id) })
                     }
                     ComposerEditor(text: store.draft(conversation.id), placeholder: placeholder, conversationID: conversation.id,
                         accessibilityLabel: "Message to \(conversation.name)",

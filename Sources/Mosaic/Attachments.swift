@@ -20,18 +20,30 @@ struct OutgoingAttachment: Identifiable, Equatable {
         case failed(String)
         var isFailed: Bool { if case .failed = self { return true } else { return false } }
     }
+    /// Where a file on its way in comes from, when it can be asked for again: a Photos item, by
+    /// its library identifier (a pasted picture's data is not kept, so it cannot be retried).
+    enum Source: Equatable { case photo(String) }
     let id: String
     /// The file to send, once it is here. Pasted pictures and picked photos live in Mosaic's
     /// outgoing folder; a chosen file stays where it is.
     var url: URL?
     var state: State
+    var source: Source?
+    /// How much of a file on its way in has arrived (0…1), when Photos says (an iCloud download).
+    var progress: Double?
+    /// Whether adding it again could work: it failed, and its source can be asked again.
+    var canRetry: Bool { state.isFailed && url == nil && source != nil }
 
     init(url: URL) {
         id = "outgoing-\(UUID().uuidString)"
         self.url = url
         state = .ready
     }
-    static func importing() -> OutgoingAttachment { OutgoingAttachment(importing: ()) }
+    static func importing(from source: Source? = nil) -> OutgoingAttachment {
+        var slot = OutgoingAttachment(importing: ())
+        slot.source = source
+        return slot
+    }
     private init(importing: Void) {
         id = "outgoing-\(UUID().uuidString)"
         url = nil
@@ -226,6 +238,10 @@ enum OutgoingFiles {
 struct AttachmentStrip: View {
     let files: [OutgoingAttachment]
     let onRemove: (String) -> Void
+    /// Adds a file that could not be added again (a Photos item).
+    var onRetry: (String) -> Void = { _ in }
+    /// Shows a ready file in Quick Look, with the others in the composer's order.
+    var onPreview: (String) -> Void = { _ in }
     @State private var width: CGFloat = 0
 
     static let slot: CGFloat = 60
@@ -262,7 +278,14 @@ struct AttachmentStrip: View {
                                     .symbolRenderingMode(.palette).foregroundStyle(.white, Color.black.opacity(0.65))
                             }
                             .buttonStyle(.plain).offset(x: 6, y: -6)
-                            .accessibilityLabel("Remove \(file.name)")
+                            .accessibilityLabel(file.state == .importing ? "Stop adding this photo" : "Remove \(file.name)")
+                            .help(file.state == .importing ? "Stop adding this photo" : "Remove")
+                        }
+                        .contextMenu {
+                            if file.state == .ready { Button("Quick Look") { onPreview(file.id) } }
+                            if file.canRetry { Button("Try Again") { onRetry(file.id) } }
+                            if case .failed(let reason) = file.state { Text(reason) }
+                            Button(file.state == .importing ? "Stop Adding" : "Remove", role: .destructive) { onRemove(file.id) }
                         }
                 }
             }
@@ -277,17 +300,38 @@ struct AttachmentStrip: View {
     @ViewBuilder private func slot(_ file: OutgoingAttachment) -> some View {
         switch file.state {
         case .ready:
+            // A click previews it in Quick Look, the composer's other files a key press away.
             OutgoingThumbnail(file: file)
+                .onTapGesture { onPreview(file.id) }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { onPreview(file.id) }
         case .importing:
             RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
                 .frame(width: 60, height: 60)
-                .overlay { ProgressView().controlSize(.small) }
-                .accessibilityLabel("Adding a photo")
+                .overlay {
+                    // How much has arrived, when Photos says (an iCloud download); otherwise only that it is coming.
+                    if let progress = file.progress {
+                        ProgressView(value: progress).progressViewStyle(.circular).controlSize(.small)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                }
+                .help(file.progress == nil ? "Adding…" : "Downloading from iCloud…")
+                .accessibilityLabel(file.progress.map { "Adding a photo, \(Int($0 * 100)) percent" } ?? "Adding a photo")
         case .failed(let reason):
             RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Palette.incoming)
                 .frame(width: 60, height: 60)
-                .overlay { Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange) }
+                .overlay {
+                    VStack(spacing: 3) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        if file.canRetry {
+                            Button("Retry") { onRetry(file.id) }.buttonStyle(.plain).font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Palette.accent)
+                        }
+                    }
+                }
                 .help(reason)
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel("Could not add this file: \(reason)")
         }
     }
@@ -366,11 +410,9 @@ struct AttachmentMenuButton: NSViewRepresentable {
     let conversationName: String
     /// Files ready to attach now (chosen in the file panel).
     let onFiles: ([URL]) -> Void
-    /// This many photos are on their way from the Photos picker, in the order chosen; the places
-    /// reserved for them come back, and each photo then arrives at its place through `onAdded`
-    /// (nil when one could not be read), whichever finishes first.
-    let onBeginAdding: (Int) -> [String]
-    let onAdded: (String, URL?) -> Void
+    /// Photos chosen in the picker, by library identifier, in the order chosen; the store reserves
+    /// their places and writes them out (with progress, Stop and Retry).
+    let onPickPhotos: ([String]) -> Void
     /// The Photos card or the file chooser was dismissed with Esc, Cancel or Add: the keyboard
     /// goes back to this tile's message field. (Clicking somewhere else leaves it where it went.)
     var onFinish: () -> Void = {}
@@ -379,8 +421,7 @@ struct AttachmentMenuButton: NSViewRepresentable {
     func updateNSView(_ view: PlusButtonView, context: Context) { configure(view) }
     private func configure(_ view: PlusButtonView) {
         view.onFiles = onFiles
-        view.onBeginAdding = onBeginAdding
-        view.onAdded = onAdded
+        view.onPickPhotos = onPickPhotos
         view.onFinish = onFinish
         view.setAccessibilityLabel("Add a photo or file to the message to \(conversationName)")
         view.toolTip = "Photos and files"
@@ -389,8 +430,7 @@ struct AttachmentMenuButton: NSViewRepresentable {
 
     final class PlusButtonView: NSView, NSPopoverDelegate {
         var onFiles: (([URL]) -> Void)?
-        var onBeginAdding: ((Int) -> [String])?
-        var onAdded: ((String, URL?) -> Void)?
+        var onPickPhotos: (([String]) -> Void)?
         var onFinish: (() -> Void)?
         private var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
         private var pressed = false { didSet { if pressed != oldValue { needsDisplay = true } } }
@@ -463,13 +503,9 @@ struct AttachmentMenuButton: NSViewRepresentable {
                 onAdd: { [weak self, weak popover] assets in
                     popover?.close()
                     self?.onFinish?()
-                    guard let self, !assets.isEmpty, let slots = self.onBeginAdding?(assets.count), slots.count == assets.count else { return }
+                    guard let self, !assets.isEmpty else { return }
                     // A few at a time, in the order chosen; each lands at its place as it finishes.
-                    Task { @MainActor in
-                        await PhotoLibraryExport.export(assets, slots: slots, write: { asset in await PhotoLibraryExport.file(for: asset) }) { slot, url in
-                            self.onAdded?(slot, url)
-                        }
-                    }
+                    self.onPickPhotos?(assets.map(\.localIdentifier))
                 })
             popover.contentViewController = NSHostingController(rootView: view)
             popover.show(relativeTo: bounds, of: self, preferredEdge: .maxY)

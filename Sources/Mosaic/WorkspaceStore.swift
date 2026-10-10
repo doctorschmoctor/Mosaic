@@ -698,6 +698,8 @@ import MosaicCore
         let files = outgoing[id] ?? []
         let kept = keepingFiles ? files.filter { $0.state == .ready || $0.isMissing } : []
         let keptIDs = Set(kept.map(\.id))
+        // Exports for places that are let go stop.
+        for file in files where !keptIDs.contains(file.id) { importTasks.removeValue(forKey: file.id)?.cancel() }
         for file in files where !keptIDs.contains(file.id) && ownsFile(file) {
             if let url = file.url { try? FileManager.default.removeItem(at: url) }
         }
@@ -1768,11 +1770,85 @@ import MosaicCore
             await MainActor.run { self.completeImport(slot, url: url, in: id, failure: "The pasted picture couldn't be kept.") }
         }
     }
+    /// Writes a Photos item (by its library identifier) to a file, reporting how much has arrived
+    /// when Photos says; nil when it could not. Tests put their own here.
+    typealias PhotoExporter = @Sendable (String, @escaping @Sendable (Double) -> Void) async -> URL?
+    @ObservationIgnored var exportPhoto: PhotoExporter = { identifier, progress in
+        await PhotoLibraryExport.file(forIdentifier: identifier, progress: progress)
+    }
+    /// Whether the library still has an item, for Retry. Tests put their own here.
+    @ObservationIgnored var photoExists: (String) -> Bool = { PhotoLibraryExport.exists($0) }
+    /// Photos being written out, by their place in a composer; stopped when the place goes.
+    @ObservationIgnored private var importTasks: [String: Task<Void, Never>] = [:]
+    /// A few Photos items are written at once, the first chosen first.
+    @ObservationIgnored private let photoExports = AsyncLimiter(limit: PhotoLibraryExport.concurrentExports)
+
+    /// Photos chosen in the picker, in the order chosen, into a tile's composer: each gets its
+    /// place at once and is written out a few at a time, showing how much has arrived when Photos
+    /// says; one that could not be added can be tried again, and removing a place stops its export.
+    func importPhotos(_ identifiers: [String], to id: String) {
+        let slots = beginImports(identifiers.count, to: id, sources: identifiers.map { .photo($0) })
+        guard slots.count == identifiers.count else { return }
+        for (slot, identifier) in zip(slots, identifiers) { startPhotoExport(identifier, slot: slot, in: id) }
+    }
+    private func startPhotoExport(_ identifier: String, slot: String, in id: String) {
+        let exporter = exportPhoto, limiter = photoExports
+        importTasks[slot] = Task { [weak self] in
+            let url = try? await limiter.run {
+                await exporter(identifier) { fraction in
+                    Task { @MainActor [weak self] in self?.setImportProgress(slot, fraction, in: id) }
+                }
+            }
+            guard let self else { return }
+            self.importTasks[slot] = nil
+            // Stopped (the place was removed, the tile closed): a file that was written anyway goes.
+            if Task.isCancelled {
+                if let url, self.services.outgoing.owns(url) { try? FileManager.default.removeItem(at: url) }
+                return
+            }
+            self.completeImport(slot, url: url, in: id,
+                                failure: "Photos couldn't provide this item. If it is in iCloud, check the connection and try again.")
+        }
+    }
+    private func setImportProgress(_ slot: String, _ fraction: Double, in id: String) {
+        guard let index = outgoing[id]?.firstIndex(where: { $0.id == slot }), outgoing[id]?[index].state == .importing else { return }
+        let value = min(1, max(0, fraction))
+        // Small steps are not worth a redraw.
+        if let current = outgoing[id]?[index].progress, abs(current - value) < 0.02, value < 1 { return }
+        instantly { outgoing[id]?[index].progress = value }
+    }
+    /// Adds a file that could not be added again, in its place (a Photos item still in the library).
+    func retryImport(_ slot: String, in id: String) {
+        guard let index = outgoing[id]?.firstIndex(where: { $0.id == slot }), let file = outgoing[id]?[index], file.canRetry,
+              case .photo(let identifier)? = file.source else { return }
+        guard photoExists(identifier) else {
+            instantly {
+                outgoing[id]?[index].state = .failed("This item is no longer in your Photos library.")
+                outgoing[id]?[index].source = nil
+            }
+            return
+        }
+        instantly {
+            outgoing[id]?[index].state = .importing
+            outgoing[id]?[index].progress = nil
+        }
+        if let error = sendErrors[id], error.contains("couldn't be added") { sendErrors[id] = nil }
+        startPhotoExport(identifier, slot: slot, in: id)
+    }
+    /// Shows a file waiting in a composer in Quick Look, with the composer's other ready files in
+    /// their order (nothing is staged or sent).
+    func previewOutgoing(_ attachmentID: String, in id: String) {
+        guard let file = outgoing[id]?.first(where: { $0.id == attachmentID }), file.state == .ready, let url = file.url else { return }
+        QuickLook.shared.show(url, among: readyOutgoingURLs(id))
+    }
+    /// The ready files in a composer, in the order they were added.
+    func readyOutgoingURLs(_ id: String) -> [URL] { (outgoing[id] ?? []).filter { $0.state == .ready }.compactMap(\.url) }
+
     /// Reserves places in a tile's composer for this many files on their way in, in the order
     /// chosen; each then arrives through `completeImport`. Returns the places' identities.
-    func beginImports(_ count: Int, to id: String) -> [String] {
+    func beginImports(_ count: Int, to id: String, sources: [OutgoingAttachment.Source]? = nil) -> [String] {
         guard count > 0, openIDs.contains(id) else { return [] }
-        let slots = (0..<count).map { _ in OutgoingAttachment.importing() }
+        let slots = (0..<count).map { index in OutgoingAttachment.importing(from: sources.flatMap { $0.indices.contains(index) ? $0[index] : nil }) }
         instantly { outgoing[id, default: []] += slots }
         return slots.map(\.id)
     }
@@ -1786,6 +1862,7 @@ import MosaicCore
         instantly {
             if let url { outgoing[id]?[index].url = url; outgoing[id]?[index].state = .ready }
             else { outgoing[id]?[index].state = .failed(failure) }
+            outgoing[id]?[index].progress = nil
         }
         if outgoing[id]?.contains(where: { $0.state == .importing }) != true { resumeImportWaiters(for: id) }
     }
@@ -1800,6 +1877,8 @@ import MosaicCore
     }
     func removeAttachment(_ attachmentID: String, from id: String) {
         guard let file = outgoing[id]?.first(where: { $0.id == attachmentID }) else { return }
+        // A photo still being written out stops.
+        importTasks.removeValue(forKey: attachmentID)?.cancel()
         instantly {
             outgoing[id]?.removeAll { $0.id == attachmentID }
             if outgoing[id]?.isEmpty == true { outgoing[id] = nil }
@@ -1869,6 +1948,7 @@ import MosaicCore
             sendNotes[id] = nil
         }
         resumeImportWaiters(for: id)
+        for file in files where file.state == .importing { importTasks.removeValue(forKey: file.id)?.cancel() }
         if compose != nil {
             if focusTarget == id { focusTarget = nil }
             composerFocus.cancel(for: id)
