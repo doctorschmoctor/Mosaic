@@ -17,6 +17,8 @@ enum Palette {
             ? NSColor(red: 58 / 255, green: 58 / 255, blue: 60 / 255, alpha: 1)
             : NSColor(red: 233 / 255, green: 233 / 255, blue: 235 / 255, alpha: 1)
     })
+    /// The "Draft" mark on a sidebar row.
+    static let draft = Color(nsColor: .systemOrange)
     /// #218AFF — outgoing iMessage bubbles.
     static let bubbleBlue = Color(red: 0x21 / 255, green: 0x8A / 255, blue: 0xFF / 255)
     static func outgoing(service: String) -> Color {
@@ -115,6 +117,7 @@ struct WorkspaceView: View {
                 if !store.search.isEmpty { Button { store.search = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).foregroundStyle(.secondary) }
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 10).padding(.top, Self.titleBarHeight + 4)
+            SidebarFilterBar()
             // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
             ScrollViewReader { scroller in
                 List {
@@ -131,8 +134,13 @@ struct WorkspaceView: View {
                                 onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
                                 onScrollView: { [listPin] in listPin.attach($0) }))
                             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
-                                    .tint(.red)
+                                if conversation.isComposeDraft {
+                                    Button(role: .destructive) { store.discardDraft(conversation.id) } label: { Image(systemName: "trash") }
+                                        .tint(.red).accessibilityLabel("Discard draft")
+                                } else {
+                                    Button(role: .destructive) { store.hide(conversation.id) } label: { Image(systemName: "trash") }
+                                        .tint(.red)
+                                }
                             }
                     }
                     if store.filteredConversations.isEmpty && store.isLoadingConversations && store.search.isEmpty {
@@ -143,7 +151,8 @@ struct WorkspaceView: View {
                                 .listRowSeparator(.hidden).listRowBackground(Color.clear)
                         }
                     } else if store.filteredConversations.isEmpty {
-                        Text(store.search.isEmpty ? "Conversations will appear here." : "No conversations found.")
+                        Text(!store.search.isEmpty ? "No conversations found."
+                             : store.sidebarFilter == .drafts ? "No drafts. Unsent messages you close are kept here." : "Conversations will appear here.")
                             .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
                             .listRowSeparator(.hidden).listRowBackground(Color.clear)
                     }
@@ -167,6 +176,10 @@ struct WorkspaceView: View {
             }
         }
         .background(.regularMaterial)
+        // A change that can still be taken back (a discarded draft), for a few seconds.
+        .overlay(alignment: .bottom) {
+            if let note = store.undoNote { UndoBanner(note: note).id(note.id) }
+        }
         // Holds the keyboard for the list (⌘L); draws nothing and takes no clicks.
         .background(alignment: .topLeading) { SidebarKeyFocus(keyboard: sidebarKeyboard, store: store).frame(width: 1, height: 1) }
     }
@@ -360,9 +373,10 @@ struct ConversationRow: View {
     private var isHighlighted: Bool { store.highlightedSidebarRow == conversation.id }
 
     var body: some View {
+        let draft = store.draftSummaries[conversation.id]
         Button(action: activate) {
             HStack(spacing: 10) {
-                Avatar(conversation: conversation, size: 36)
+                if conversation.isComposeDraft { NewMessageAvatar(size: 36) } else { Avatar(conversation: conversation, size: 36) }
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 4) {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
@@ -370,7 +384,14 @@ struct ConversationRow: View {
                         if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
                         else if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
                     }
-                    Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    if let draft {
+                        // Something unsent waits in this conversation's composer (or this New Message).
+                        (Text("Draft").foregroundColor(Palette.draft).fontWeight(.medium)
+                            + Text(draft.line.isEmpty ? "" : "  " + draft.line).foregroundColor(.secondary))
+                            .font(.system(size: 11)).lineLimit(1)
+                    } else {
+                        Text(conversation.preview).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }.padding(.leading, 10).padding(.trailing, 14).padding(.vertical, 12)
                 // An open conversation is marked by the grid icon alone. The keyboard's row gets a
@@ -382,7 +403,8 @@ struct ConversationRow: View {
                         .padding(.trailing, -4)
                 }
                 .contentShape(Rectangle())
-        }.buttonStyle(TileControlStyle()).accessibilityLabel(isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
+        }.buttonStyle(TileControlStyle())
+            .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)") + (draft.map { ", draft: \($0.line)" } ?? ""))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             // No highlight under the pointer. Resting on a row fetches its history ahead (after a
             // short pause, so a sweep down the list fetches nothing) and the tile opens on its messages.
@@ -391,10 +413,18 @@ struct ConversationRow: View {
             }
             .help(isOpen ? "Double-click to close this tile" : "Open in a tile")
             .contextMenu {
-                Button(isOpen ? "Close tile" : "Open in workspace") { if isOpen { store.close(conversation.id) } else { store.openAndType(conversation.id) } }
-                if store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
-                Divider()
-                Button("Delete", role: .destructive) { store.hide(conversation.id) }
+                Button(isOpen ? "Close tile" : conversation.isComposeDraft ? "Open New Message" : "Open in workspace") {
+                    if isOpen { store.close(conversation.id) } else { store.openAndType(conversation.id) }
+                }
+                if !conversation.isComposeDraft, store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
+                if draft != nil || conversation.isComposeDraft {
+                    Divider()
+                    Button("Discard Draft", role: .destructive) { store.discardDraft(conversation.id) }
+                }
+                if !conversation.isComposeDraft {
+                    Divider()
+                    Button("Delete", role: .destructive) { store.hide(conversation.id) }
+                }
             }
             .onDrag { NSItemProvider(object: conversation.id as NSString) }
     }
@@ -403,6 +433,77 @@ struct ConversationRow: View {
         var clicks = 1
         if let event = NSApp.currentEvent, [.leftMouseDown, .leftMouseUp].contains(event.type) { clicks = event.clickCount }
         store.pressRow(conversation.id, clickCount: clicks)
+    }
+}
+
+/// The picture of a New Message (a tile still choosing recipients, or one kept as a draft).
+struct NewMessageAvatar: View {
+    let size: CGFloat
+    var body: some View {
+        ZStack {
+            Circle().fill(Palette.accent.opacity(0.15))
+            Image(systemName: "square.and.pencil").font(.system(size: size * 0.43, weight: .medium)).foregroundStyle(Palette.accent)
+        }.frame(width: size, height: size).accessibilityHidden(true)
+    }
+}
+
+/// The sidebar's filters: every conversation, or only drafts (with how many there are).
+struct SidebarFilterBar: View {
+    @Environment(WorkspaceStore.self) private var store
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(SidebarFilter.allCases) { filter in
+                let selected = store.sidebarFilter == filter
+                let count = filter == .drafts ? store.draftCount : 0
+                Button {
+                    if store.sidebarFilter != filter { instantly { store.sidebarFilter = filter; store.sidebarSelection = nil } }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(filter.title)
+                        if count > 0 { Text("\(count)").monospacedDigit().foregroundStyle(selected ? Palette.accent.opacity(0.8) : .secondary) }
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .padding(.horizontal, 9).padding(.vertical, 4)
+                    .foregroundStyle(selected ? Palette.accent : Color.primary)
+                    .background(selected ? Palette.accent.opacity(0.15) : Color.primary.opacity(0.05), in: Capsule())
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(count > 0 ? "\(filter.title), \(count)" : filter.title)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+                .help(filter == .drafts ? "Unsent messages, including New Messages you closed" : "All conversations")
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.top, 8)
+    }
+}
+
+/// A change that can still be taken back, at the bottom of the sidebar.
+struct UndoBanner: View {
+    @Environment(WorkspaceStore.self) private var store
+    let note: UndoNote
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(note.message).font(.system(size: 12)).lineLimit(2)
+            Spacer(minLength: 4)
+            Button("Undo") { store.undoLast() }.buttonStyle(.borderless).font(.system(size: 12, weight: .semibold))
+                .help("Take this back (⌘Z)")
+            Button { store.finishUndoWindow() } label: { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                .buttonStyle(.borderless).foregroundStyle(.secondary).accessibilityLabel("Dismiss")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(.thickMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 2)
+        .padding(10)
+        .accessibilityElement(children: .contain)
+        .onAppear {
+            NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested,
+                                 userInfo: [.announcement: note.message + ". Undo is available.", .priority: NSAccessibilityPriorityLevel.medium.rawValue])
+        }
     }
 }
 
@@ -754,6 +855,12 @@ struct DividerHandle: View {
                 case .zoomOut: store.zoomOut()
                 case .reset: store.resetZoom()
                 }
+                return true
+            }
+            // ⌘Z takes back the change the sidebar offers to undo, unless a text field has the
+            // keyboard (there ⌘Z undoes typing).
+            if modifiers == .command, key == "z", store.undoNote != nil, !(window.firstResponder is NSTextView) {
+                store.undoLast()
                 return true
             }
             if modifiers == .command { return false }

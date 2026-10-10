@@ -275,7 +275,7 @@ final class AttachmentTests: XCTestCase {
     }
 
     /// A conversation that is closed or replaced keeps the files waiting in its composer, as it
-    /// keeps its text; a New Message tile's files go with it.
+    /// keeps its text; so does a New Message, until it is discarded.
     @MainActor func testClosedOrReplacedConversationKeepsItsComposerFiles() throws {
         let directory = try temporaryDirectory()
         let plan = directory.appending(path: "plan.pdf"), note = directory.appending(path: "note.txt")
@@ -297,11 +297,16 @@ final class AttachmentTests: XCTestCase {
         XCTAssertEqual(store.outgoing[id]?.map(\.url?.path), [plan.path])
         store.open(id)
         XCTAssertEqual(store.outgoing[id]?.map(\.state), [.ready])
-        // A New Message tile's files are let go with it (a chosen file itself stays where it is).
+        // A New Message keeps its files when its tile closes (it is a draft now); discarding it
+        // lets them go — and a chosen file itself stays where it is.
         let newID = try XCTUnwrap(store.beginNewChat())
         store.attach([note], to: newID)
         store.close(newID)
+        XCTAssertEqual(store.outgoing[newID]?.map(\.url?.path), [note.path])
+        store.discardDraft(newID)
+        store.finishUndoWindow()
         XCTAssertNil(store.outgoing[newID])
+        XCTAssertNil(store.composeDrafts[newID])
         XCTAssertTrue(FileManager.default.fileExists(atPath: note.path))
     }
 

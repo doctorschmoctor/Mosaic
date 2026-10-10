@@ -8,7 +8,8 @@ Mosaic reads the conversations already on your Mac and lets you keep up to four 
 
 ## Features
 
-- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft and attached files are kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts — including an unsent New Message with its recipients and files — are restored on relaunch; nothing is sent at launch.
+- **Tiles** — Open up to four conversations in Grid, Columns or Focus layout. Opening a fifth takes the place of the tile you used longest ago (its draft and attached files are kept for next time). Drag a header to rearrange, drag the gaps to resize, close with ×. Open tiles, layout and drafts are restored on relaunch; nothing is sent at launch.
+- **Drafts** — A conversation with something unsent says **Draft** in the sidebar, with its first line. Closing a tile (×, Esc or ⌘⇧W) never throws work away: a New Message you close keeps its recipients, text and files and waits under **Drafts** at the top of the sidebar, along with every conversation that has a draft; open it from there to carry on. **Discard Draft** (right-click a row or a tile's header) throws one draft away, and **Undo** (or ⌘Z) brings it back for a few seconds. A file you chose is never deleted.
 - **New messages** — Address a new message to one person or several, from your contacts or any existing conversation. Mosaic finds the matching conversation or hands the new one to Messages.
 - **Pictures and files** — Paste or drop a picture into a composer, pick from your Photos library, or choose a file. They go out through Messages like anything else, and received pictures can be copied or saved with a right-click.
 - **Live** — New messages appear within a moment of arriving; your replies show at once and keep their place when Messages confirms them. Tiles open on their messages at once: recent conversations are fetched ahead, and recently shown histories stay cached in memory.
@@ -68,7 +69,7 @@ Messages must already be signed in. SMS/RCS availability follows your Messages s
 | **⌘L** | Conversation list — **↑ ↓** move the highlight, **Return** opens or focuses, **⌫** closes the row's tile, **Esc** back to the composer |
 | **Tab / ⇧Tab** | Next / previous tile |
 | **Return** | Send · **⇧Return** inserts a line break |
-| **Esc** | Close a New Message tile |
+| **Esc** | Close a New Message tile (it is kept in Drafts) |
 | **⌘+ / ⌘− / ⌘0** | Zoom the conversations in · out · back to 100% (all tiles together) |
 | **⌘⌥1 · ⌘⌥2 · ⌘⌥3** | Grid · Columns · Focus |
 | **⌘⇧W** | Close the focused tile |
@@ -86,7 +87,7 @@ In the New Message To field, **↑ ↓** move through suggestions, **Return** ad
 - The **+** button at the left of the composer opens a grid of your Photos library (newest first; click to choose, **Add** to attach) or a file chooser; you can also paste a picture (⌘V) or drop pictures and files on the field. They appear above the text, with a remove badge, and go out with the next Return — each file as its own message, before the text.
 - Click a photo, video or file to preview it in Quick Look (arrow keys step through the conversation's attachments; Esc closes); right-click to open it in its app, copy it, save it to Downloads or elsewhere, or show it in Finder. Right-click a bubble to copy its text or open its links.
 - Click a reply's quote line to jump to the original; click a reaction badge to see who reacted. While you read older messages, new ones are counted on the **N new** button and marked with a New Messages line.
-- **Load earlier messages** at the top of a tile extends its history, up to 1,000 messages.
+- Scrolling near the top of a tile loads earlier messages by themselves, up to 1,000.
 
 ## Scope
 

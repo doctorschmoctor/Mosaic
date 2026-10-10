@@ -36,7 +36,7 @@ import MosaicCore
     /// Conversations whose earlier messages are being loaded (scrolling near the top of a thread).
     private(set) var loadingMore: Set<String> = []
     var layout: WorkspaceLayout = .grid { didSet { if layout != oldValue { persist() } } }
-    var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist() } } }
+    var drafts: [String: String] = [:] { didSet { if drafts != oldValue { persist(); scheduleDraftSummaries() } } }
     var seenMessageIDs: [String: String] = [:] { didSet { if seenMessageIDs != oldValue { persist() } } }
     /// Conversations removed from Mosaic (they stay in Messages), with their newest message id then.
     var hidden: [String: String] = [:] { didSet { if hidden != oldValue { persist() } } }
@@ -45,7 +45,8 @@ import MosaicCore
     /// Whether a new message settles in with a short animation (Settings); Reduce Motion trims it further.
     var animateMessages: Bool { didSet { if animateMessages != oldValue { defaults.set(animateMessages, forKey: "Mosaic.animateMessages") } } }
     /// New messages being addressed, by tile id ("new-…"), before they have a conversation.
-    var composeDrafts: [String: ComposeDraft] = [:] { didSet { if composeDrafts != oldValue { persist() } } }
+    /// Open New Message tiles, and closed ones kept as drafts (recipients, text, files); see `close`.
+    var composeDrafts: [String: ComposeDraft] = [:] { didSet { if composeDrafts != oldValue { persist(); scheduleDraftSummaries() } } }
     /// Every contact with its handles, for addressing new messages.
     var contactEntries: [ContactNames.Entry] = []
     var search = ""
@@ -65,7 +66,16 @@ import MosaicCore
     /// Files in each tile's composer, in the order they were added, to go out with the next
     /// message — including the ones still on their way in (a photo being fetched from the
     /// library, a pasted picture being written) and the ones that could not be added.
-    var outgoing: [String: [OutgoingAttachment]] = [:] { didSet { if outgoing != oldValue { persist() } } }
+    var outgoing: [String: [OutgoingAttachment]] = [:] { didSet { if outgoing != oldValue { persist(); scheduleDraftSummaries() } } }
+    /// What the sidebar shows of each unsent draft (see `DraftSummary`). Rebuilt a moment after
+    /// typing stops, and at once when a tile closes or a draft is discarded or restored, so a
+    /// keystroke never re-renders the list.
+    private(set) var draftSummaries: [String: DraftSummary] = [:]
+    /// What the sidebar lists: every conversation, or only the drafts.
+    var sidebarFilter: SidebarFilter = .all
+    /// A change that can still be taken back (a discarded draft, a hidden conversation), shown at
+    /// the bottom of the sidebar for a few seconds.
+    private(set) var undoNote: UndoNote?
     /// A line under a composer about its send: waiting for photos, or why a send stopped.
     var sendNotes: [String: String] = [:]
     var showSetup = false
@@ -225,6 +235,7 @@ import MosaicCore
             restore(defaultIDs: Array(conversations.prefix(4).map(\.id)))
         }
         loadingState = false
+        updateDraftSummaries()
         // Leftovers from earlier runs go, off the main thread — never a file a saved draft (this
         // workspace's or the other one's) still points at.
         OutgoingFiles.purgeStaleInBackground(in: services.outgoing, keeping: SavedDrafts.referencedPaths(in: defaults)
@@ -255,7 +266,11 @@ import MosaicCore
             }
         })
         observers.append(center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.persistNow() }
+            MainActor.assumeIsolated {
+                // An undo that can no longer happen: what it was holding on to goes now.
+                self?.finishUndoWindow()
+                self?.persistNow()
+            }
         })
         observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.setAppActive(false) }
@@ -338,15 +353,32 @@ import MosaicCore
         workspace = state
     }
 
-    /// The sidebar's conversations: not hidden, and matching the search when there is one.
+    /// Conversations that are not hidden from Mosaic.
+    var visibleConversations: [Conversation] { hidden.isEmpty ? conversations : conversations.filter { hidden[$0.id] == nil } }
+    /// What the sidebar lists, in order: the chosen filter's rows, matching the search when there
+    /// is one (names, people, the last message, and a draft's own words).
     var filteredConversations: [Conversation] {
-        let visible = hidden.isEmpty ? conversations : conversations.filter { hidden[$0.id] == nil }
-        guard !search.isEmpty else { return visible }
-        return visible.filter {
-            $0.name.localizedCaseInsensitiveContains(search) || $0.preview.localizedCaseInsensitiveContains(search) ||
-            $0.participants.contains { $0.localizedCaseInsensitiveContains(search) }
+        let rows: [Conversation]
+        switch sidebarFilter {
+        case .all: rows = visibleConversations
+        case .drafts: rows = draftRows
+        }
+        guard !search.isEmpty else { return rows }
+        return rows.filter { conversation in
+            if conversation.name.localizedCaseInsensitiveContains(search) || conversation.preview.localizedCaseInsensitiveContains(search) ||
+                conversation.participants.contains(where: { $0.localizedCaseInsensitiveContains(search) }) { return true }
+            guard let draft = draftSummaries[conversation.id] else { return false }
+            return draft.text.localizedCaseInsensitiveContains(search) || draft.recipients.contains { $0.localizedCaseInsensitiveContains(search) }
         }
     }
+    /// The Drafts list: unsent New Messages (open or closed, the newest first), then
+    /// conversations with a draft, most recent first.
+    var draftRows: [Conversation] {
+        let newMessages = composeDrafts.keys.filter { draftSummaries[$0] != nil }.compactMap(tile(for:))
+            .sorted { ($0.lastActivity, $0.id) > ($1.lastActivity, $1.id) }
+        return newMessages + visibleConversations.filter { draftSummaries[$0.id] != nil }
+    }
+    var draftCount: Int { draftRows.count }
     var tiles: [Conversation] { openIDs.compactMap(tile(for:)) }
     /// A tile's content: a conversation, or the placeholder for a new message being addressed.
     func tile(for id: String) -> Conversation? {
@@ -522,10 +554,27 @@ import MosaicCore
         if tileDrag?.id == victim { tileDrag = nil }
         if focusTarget == victim { focusTarget = nil }
         composerFocus.cancel(for: victim)
-        let isNewMessage = composeDrafts[victim] != nil
-        if isNewMessage { composeDrafts[victim] = nil; drafts[victim] = nil }
-        releaseComposer(victim, keepingFiles: !isNewMessage)
+        keepDraftOfClosingTile(victim)
         releaseTileState(victim)
+    }
+    /// A tile is closing or being replaced: its draft stays — a conversation's text and files, a
+    /// New Message's recipients, text and files — to come back when it opens again (a closed New
+    /// Message is found in Drafts). A New Message nobody touched has nothing to keep and goes.
+    /// Files still on their way in are let go either way (one that arrives later is removed).
+    private func keepDraftOfClosingTile(_ id: String) {
+        if composeDrafts[id] != nil, isUntouchedNewMessage(id) {
+            composeDrafts[id] = nil
+            drafts[id] = nil
+            releaseComposer(id, keepingFiles: false)
+        } else {
+            releaseComposer(id, keepingFiles: true)
+        }
+    }
+    /// A New Message with no recipients, no text, no files and nothing sent.
+    func isUntouchedNewMessage(_ id: String) -> Bool {
+        guard let draft = composeDrafts[id] else { return false }
+        return draft.recipients.isEmpty && draft.sent.isEmpty && (drafts[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (outgoing[id] ?? []).isEmpty
     }
     /// A closed tile's history goes back to the standard depth (the next load releases the rest).
     private func releaseTileState(_ id: String) {
@@ -566,13 +615,12 @@ import MosaicCore
         instantly {
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
-            let isNewMessage = composeDrafts[id] != nil
-            if isNewMessage { composeDrafts[id] = nil; drafts[id] = nil }
-            releaseComposer(id, keepingFiles: !isNewMessage)
+            keepDraftOfClosingTile(id)
             releaseTileState(id)
         }
         if focusTarget == id { focusTarget = nil }
         composerFocus.cancel(for: id)
+        updateDraftSummaries()
     }
     /// Removes a conversation from Mosaic: its tile closes and it leaves the sidebar. It stays in
     /// Messages, and a message newer than the moment it was removed brings it back.
@@ -686,6 +734,8 @@ import MosaicCore
     /// found, and the cursor goes into that tile's message field, ready to type.
     func openAndType(_ id: String) {
         if !openIDs.contains(id) { open(id) }
+        // A New Message with no one to send to yet starts in its To field, which takes the keyboard itself.
+        if let draft = composeDrafts[id], !draft.hasRecipients { focus(id); return }
         requestComposerFocus(id)
     }
     /// Delete on the keyboard's row: closes that conversation's tile, if it has one. The
@@ -1397,6 +1447,129 @@ import MosaicCore
         if outgoing[id]?.contains(where: { $0.state == .importing }) != true { resumeImportWaiters(for: id) }
     }
 
+    // MARK: Drafts
+
+    /// Whether a tile's composer holds anything unsent: text, files (even ones still arriving), or
+    /// — for a New Message — recipients.
+    func hasDraft(_ id: String) -> Bool { draftSummaries[id] != nil || Self.summary(of: id, in: self) != nil }
+    @ObservationIgnored private var summaryTask: Task<Void, Never>?
+    private func scheduleDraftSummaries() {
+        guard !loadingState else { return }
+        summaryTask?.cancel()
+        summaryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.updateDraftSummaries()
+        }
+    }
+    /// Rebuilds what the sidebar shows of the drafts now.
+    func updateDraftSummaries() {
+        summaryTask?.cancel(); summaryTask = nil
+        var next: [String: DraftSummary] = [:]
+        for id in Set(drafts.keys).union(outgoing.keys).union(composeDrafts.keys) {
+            if let summary = Self.summary(of: id, in: self) { next[id] = summary }
+        }
+        if next != draftSummaries { draftSummaries = next }
+    }
+    private static func summary(of id: String, in store: WorkspaceStore) -> DraftSummary? {
+        let text = (store.drafts[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = store.outgoing[id]?.count ?? 0
+        if let compose = store.composeDrafts[id] {
+            // One that has already handed messages over is becoming its conversation, not a draft.
+            guard !text.isEmpty || files > 0 || (compose.sent.isEmpty && compose.hasRecipients) else { return nil }
+            return DraftSummary(text: text, files: files, recipients: compose.recipients.map(\.name), isNewMessage: true)
+        }
+        guard !text.isEmpty || files > 0 else { return nil }
+        return DraftSummary(text: text, files: files, recipients: [], isNewMessage: false)
+    }
+
+    /// Throws a draft away: a conversation's unsent text and files (its tile stays), or a whole
+    /// New Message (its tile closes). It can be taken back for a few seconds (`undoLast`); after
+    /// that, pictures Mosaic wrote for it are removed. A file you chose is never touched.
+    func discardDraft(_ id: String) {
+        let text = drafts[id] ?? "", files = outgoing[id] ?? [], compose = composeDrafts[id]
+        guard compose != nil || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else { return }
+        let wasOpen = openIDs.contains(id)
+        instantly {
+            if compose != nil {
+                if tileDrag?.id == id { tileDrag = nil }
+                if wasOpen { mutate { $0.close(id) } }
+                composeDrafts[id] = nil
+                releaseTileState(id)
+                sendErrors[id] = nil
+            } else if let error = sendErrors[id], error.contains("couldn't be added") || error.contains("no longer on this Mac") {
+                sendErrors[id] = nil
+            }
+            drafts[id] = nil
+            outgoing[id] = nil
+            sendNotes[id] = nil
+        }
+        resumeImportWaiters(for: id)
+        if compose != nil {
+            if focusTarget == id { focusTarget = nil }
+            composerFocus.cancel(for: id)
+        }
+        updateDraftSummaries()
+        // Files still arriving are let go now (one that lands later is removed); the rest can come back.
+        let kept = files.filter { $0.state != .importing }
+        let owned = kept.filter(ownsFile).compactMap(\.url)
+        offerUndo(compose != nil ? "New Message discarded" : "Draft discarded", undo: { [weak self] in
+            self?.restoreDiscardedDraft(id, text: text, files: kept, compose: compose, reopen: wasOpen)
+        }, expire: {
+            for url in owned { try? FileManager.default.removeItem(at: url) }
+        })
+    }
+    private func restoreDiscardedDraft(_ id: String, text: String, files: [OutgoingAttachment], compose: ComposeDraft?, reopen: Bool) {
+        // A conversation that is gone (hidden, or no longer listed) has nowhere to take it back to.
+        guard compose != nil || conversations.contains(where: { $0.id == id }) else { return }
+        instantly {
+            if let compose { composeDrafts[id] = compose }
+            // Whatever was typed since stays; the discarded text comes back after it.
+            let current = drafts[id] ?? ""
+            if !text.isEmpty { drafts[id] = current.isEmpty ? text : current + "\n" + text }
+            if !files.isEmpty { outgoing[id] = (outgoing[id] ?? []) + files }
+        }
+        if compose != nil, reopen { open(id) }
+        updateDraftSummaries()
+    }
+
+    // MARK: Undo
+
+    @ObservationIgnored private var undoActions: (undo: () -> Void, expire: () -> Void)?
+    @ObservationIgnored private var undoTask: Task<Void, Never>?
+    @ObservationIgnored private var undoCounter = 0
+    /// How long a change can be taken back.
+    static let undoWindow: Duration = .seconds(8)
+    /// Shows `message` with an Undo button for `undoWindow`. `expire` runs when the chance has
+    /// passed (or another change took its place, or Mosaic quits).
+    func offerUndo(_ message: String, undo: @escaping () -> Void, expire: @escaping () -> Void = {}) {
+        finishUndoWindow()
+        undoCounter += 1
+        undoNote = UndoNote(id: undoCounter, message: message)
+        undoActions = (undo, expire)
+        undoTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: WorkspaceStore.undoWindow)
+            guard !Task.isCancelled else { return }
+            self?.finishUndoWindow()
+        }
+    }
+    /// Takes the last change back.
+    func undoLast() {
+        guard let actions = undoActions else { return }
+        undoTask?.cancel(); undoTask = nil
+        undoActions = nil
+        undoNote = nil
+        actions.undo()
+    }
+    /// Closes the note; the change stands.
+    func finishUndoWindow() {
+        undoTask?.cancel(); undoTask = nil
+        let actions = undoActions
+        undoActions = nil
+        if undoNote != nil { undoNote = nil }
+        actions?.expire()
+    }
+
     // MARK: New messages
 
     /// Opens a tile for a new message. Recipients are chosen in the tile; the conversation is
@@ -1444,7 +1617,7 @@ import MosaicCore
         var seen = Set<String>()
         func add(_ suggestion: RecipientSuggestion) { if seen.insert(suggestion.id).inserted { results.append(suggestion) } }
         if text.isEmpty {
-            for conversation in filteredConversations.prefix(8) where !conversation.isComposeDraft { add(.conversation(conversation)) }
+            for conversation in visibleConversations.prefix(8) { add(.conversation(conversation)) }
             return results
         }
         let digits = text.filter(\.isNumber)
@@ -1454,7 +1627,7 @@ import MosaicCore
             }
             if results.count >= 12 { break }
         }
-        for conversation in filteredConversations where !conversation.isComposeDraft &&
+        for conversation in visibleConversations where
             (conversation.name.localizedCaseInsensitiveContains(text) || conversation.participants.contains { $0.localizedCaseInsensitiveContains(text) || (!digits.isEmpty && Recipient.key(for: $0).contains(digits)) }) {
             add(.conversation(conversation))
             if results.count >= 16 { break }
@@ -1631,10 +1804,11 @@ import MosaicCore
         if !forcedDemo, let data = defaults.data(forKey: stateKey), let saved = try? JSONDecoder().decode(Workspace.self, from: data) { state = saved }
         else { state = Workspace(openIDs: defaultIDs) }
         let saved = forcedDemo ? nil : SavedDrafts.load(from: defaults, live: isLive)
-        // New Message tiles that were open come back with their recipients.
-        let newMessageIDs = Set((saved?.newMessages.keys).map(Array.init) ?? []).intersection(state.openIDs)
+        // Unsent New Messages come back with their recipients — the ones that were open as tiles
+        // and the ones closed as drafts.
+        let newMessageIDs = Set((saved?.newMessages.keys).map(Array.init) ?? [])
         if !isLive { state.reconcile(availableIDs: Set(conversations.map(\.id)).union(newMessageIDs)) }
-        // Text kept for a New Message tile that is not coming back has nowhere to go.
+        // Text kept for a New Message that is not coming back has nowhere to go.
         for id in state.drafts.keys where id.hasPrefix("new-") && !newMessageIDs.contains(id) { state.drafts[id] = nil }
         workspace = state
         if let saved { restoreDrafts(saved, newMessages: newMessageIDs) }
@@ -1650,7 +1824,7 @@ import MosaicCore
         }
         for (id, draft) in composeDrafts where draft.sent.isEmpty {
             saved.newMessages[id] = SavedDrafts.NewMessage(recipients: draft.recipients.map { SavedDrafts.SavedRecipient(address: $0.address, name: $0.name) },
-                                                          conversationID: draft.boundConversationID)
+                                                          conversationID: draft.boundConversationID, created: draft.created)
         }
         return saved
     }
@@ -1660,7 +1834,7 @@ import MosaicCore
         for id in ids {
             guard let draft = saved.newMessages[id] else { continue }
             composeDrafts[id] = ComposeDraft(recipients: draft.recipients.map { Recipient(address: $0.address, name: $0.name) },
-                                             boundConversationID: draft.conversationID)
+                                             boundConversationID: draft.conversationID, created: draft.created ?? Date())
         }
         for (id, paths) in saved.files where !id.hasPrefix("new-") || ids.contains(id) {
             let files = paths.map { path -> OutgoingAttachment in
@@ -1712,6 +1886,8 @@ struct SavedDrafts: Codable, Equatable {
     struct NewMessage: Codable, Equatable {
         var recipients: [SavedRecipient]
         var conversationID: String?
+        /// When it was begun, for the order of Drafts (absent in records from before 0.4).
+        var created: Date? = nil
     }
     struct SavedRecipient: Codable, Equatable { var address: String; var name: String }
 
@@ -1741,7 +1917,7 @@ struct HeldTile: Equatable {
     var origin: CGPoint = .zero
 }
 
-/// A message being addressed in a new-message tile.
+/// A message being addressed in a new-message tile — open, or closed and kept as a draft.
 struct ComposeDraft: Equatable {
     var recipients: [Recipient] = []
     /// Set when the reader picked an existing conversation in the To field.
@@ -1749,8 +1925,50 @@ struct ComposeDraft: Equatable {
     /// Messages sent to a new person before Messages has created the conversation.
     var sent: [Message] = []
     var awaitingConversationSince: Date?
-    let created = Date()
+    var created = Date()
     var hasRecipients: Bool { !recipients.isEmpty }
+
+    init(recipients: [Recipient] = [], boundConversationID: String? = nil, created: Date = Date()) {
+        self.recipients = recipients; self.boundConversationID = boundConversationID; self.created = created
+    }
+}
+
+/// What the sidebar shows of an unsent draft.
+struct DraftSummary: Equatable {
+    /// The text, trimmed (empty when there is none).
+    let text: String
+    /// Files in the composer, including ones still arriving and ones that could not be added.
+    let files: Int
+    /// Who a New Message is addressed to, by name.
+    let recipients: [String]
+    let isNewMessage: Bool
+    /// One line for the row: who a New Message is to, then the text's first line or the files.
+    var line: String {
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+        let content = !firstLine.isEmpty ? (firstLine.count > 80 ? String(firstLine.prefix(79)) + "…" : firstLine)
+            : files > 0 ? (files == 1 ? "1 attachment" : "\(files) attachments") : ""
+        guard isNewMessage else { return content }
+        let to = recipients.isEmpty ? "No recipients yet" : "To: " + recipients.joined(separator: ", ")
+        return content.isEmpty ? to : to + " · " + content
+    }
+}
+
+/// What the sidebar lists.
+enum SidebarFilter: String, CaseIterable, Identifiable {
+    case all, drafts
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .all: return "All"
+        case .drafts: return "Drafts"
+        }
+    }
+}
+
+/// A change that can still be taken back, as the sidebar announces it.
+struct UndoNote: Identifiable, Equatable {
+    let id: Int
+    let message: String
 }
 
 /// A row in the To field's suggestions: a person (one handle) or an existing conversation.

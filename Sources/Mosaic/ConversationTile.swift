@@ -80,10 +80,7 @@ struct ConversationTile: View {
     private var header: some View {
         HStack(spacing: 9) {
             if conversation.isComposeDraft {
-                ZStack {
-                    Circle().fill(Palette.accent.opacity(0.15))
-                    Image(systemName: "square.and.pencil").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.accent)
-                }.frame(width: 30, height: 30).accessibilityHidden(true)
+                NewMessageAvatar(size: 30)
             } else {
                 Avatar(conversation: conversation, size: 30)
             }
@@ -116,10 +113,21 @@ struct ConversationTile: View {
         .overlay(TileHeaderHandle(draggable: onDragChanged != nil, closeLabel: "Close \(conversation.name) tile",
             onDragChanged: { onDragChanged?($0) }, onDragEnded: { onDragEnded?() },
             onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) },
-            onCloseHover: { hovered in if closeHovered != hovered { closeHovered = hovered } }))
+            onCloseHover: { hovered in if closeHovered != hovered { closeHovered = hovered } },
+            menuItems: headerMenu))
         .help(onDragChanged == nil ? "" : "Drag to move this tile")
         .accessibilityElement(children: .contain)
         .accessibilityLabel(conversation.name)
+    }
+
+    /// The header's menu (right-click): this tile's actions.
+    private var headerMenu: [TileHeaderHandle.MenuItem] {
+        let id = conversation.id
+        return [
+            .init(title: conversation.isComposeDraft ? "Discard New Message" : "Discard Draft",
+                  isEnabled: { [store] in store.composeDrafts[id] != nil || store.hasDraft(id) }) { [store] in store.discardDraft(id) },
+            .init(title: "Close Tile", action: { [store] in store.close(id) }, separatedAbove: true),
+        ]
     }
 
     private var composer: some View {

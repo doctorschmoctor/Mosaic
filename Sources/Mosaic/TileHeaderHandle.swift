@@ -19,6 +19,18 @@ struct TileHeaderHandle: NSViewRepresentable {
     let onClick: () -> Void
     let onClose: () -> Void
     var onCloseHover: (Bool) -> Void = { _ in }
+    /// The header's menu (right-click or Control-click): actions on this tile.
+    var menuItems: [MenuItem] = []
+
+    /// One entry in the header's menu.
+    struct MenuItem {
+        var title: String
+        /// Asked when the menu opens (so the header need not re-render as it changes).
+        var isEnabled: () -> Bool = { true }
+        var action: () -> Void
+        /// A line between this item and the one before it.
+        var separatedAbove = false
+    }
 
     func makeNSView(context: Context) -> HandleView { let view = HandleView(); apply(view); return view }
     func updateNSView(_ view: HandleView, context: Context) { apply(view) }
@@ -30,6 +42,7 @@ struct TileHeaderHandle: NSViewRepresentable {
     private func apply(_ view: HandleView) {
         view.onDragChanged = onDragChanged; view.onDragEnded = onDragEnded; view.onClick = onClick; view.onClose = onClose
         view.onCloseHover = onCloseHover
+        view.menuItems = menuItems
         view.closeLabel = closeLabel
         if view.draggable != draggable {
             view.draggable = draggable
@@ -49,6 +62,7 @@ struct TileHeaderHandle: NSViewRepresentable {
         var onClick: (() -> Void)?
         var onClose: (() -> Void)?
         var onCloseHover: ((Bool) -> Void)?
+        var menuItems: [MenuItem] = []
         var closeLabel = "Close tile" { didSet { closeElement.setAccessibilityLabel(closeLabel) } }
         private var pressOrigin: NSPoint?
         private var pressedClose = false
@@ -110,7 +124,28 @@ struct TileHeaderHandle: NSViewRepresentable {
         private weak var pressWindow: NSWindow?
         private weak var handledEvent: NSEvent?
 
+        /// The tile's actions, for a right-click or Control-click on the header.
+        override func menu(for event: NSEvent) -> NSMenu? { actionsMenu() }
+        private func actionsMenu() -> NSMenu? {
+            guard !menuItems.isEmpty else { return nil }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+            for item in menuItems {
+                if item.separatedAbove, !menu.items.isEmpty { menu.addItem(.separator()) }
+                menu.addItem(ActionMenuItem(item.title, enabled: item.isEnabled(), action: item.action))
+            }
+            return menu
+        }
+        override func accessibilityPerformShowMenu() -> Bool {
+            guard let menu = actionsMenu() else { return false }
+            menu.popUp(positioning: nil, at: NSPoint(x: bounds.midX, y: bounds.midY), in: self)
+            return true
+        }
         override func mouseDown(with event: NSEvent) {
+            if event.modifierFlags.contains(.control), let menu = actionsMenu() {
+                NSMenu.popUpContextMenu(menu, with: event, for: self)
+                return
+            }
             if dragging { dragging = false; NSCursor.pop(); onDragEnded?() } // a release that never arrived
             endTracking()
             pressOrigin = event.locationInWindow
@@ -165,6 +200,19 @@ struct TileHeaderHandle: NSViewRepresentable {
         }
         override func accessibilityPerformPress() -> Bool { onClick?(); return true }
     }
+}
+
+/// A menu item that runs a closure.
+final class ActionMenuItem: NSMenuItem {
+    private let handler: () -> Void
+    init(_ title: String, enabled: Bool = true, action: @escaping () -> Void) {
+        handler = action
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+        isEnabled = enabled
+    }
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    @objc private func run() { handler() }
 }
 
 /// An accessibility-only element (a child with no view of its own) that can be pressed by VoiceOver.
