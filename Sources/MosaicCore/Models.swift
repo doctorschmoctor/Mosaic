@@ -190,7 +190,7 @@ public struct Conversation: Identifiable, Equatable, Sendable {
     }
 
     /// The participants as comparable keys, so a chosen set of people can be matched to a chat.
-    public var participantKeys: Set<String> { Set(participants.map(Recipient.key(for:))) }
+    public var participantKeys: Set<String> { Set(participants.map { Recipient.key(for: $0) }) }
 
     public var initials: String {
         let parts = name.split(separator: " ")
