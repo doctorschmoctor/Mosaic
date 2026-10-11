@@ -152,6 +152,21 @@ public struct SharedHistory: Equatable, Sendable {
     }
 }
 
+/// The newest ordinary message someone else sent in a conversation (not a reaction, an activity
+/// line or an unsent message), for a notification.
+public struct IncomingMessage: Equatable, Sendable {
+    public let conversationID: String
+    public let rowID: Int64
+    public let text: String
+    public let sender: String?
+    public let date: Date
+    public let hasAttachments: Bool
+    public init(conversationID: String, rowID: Int64, text: String, sender: String?, date: Date, hasAttachments: Bool) {
+        self.conversationID = conversationID; self.rowID = rowID; self.text = text; self.sender = sender
+        self.date = date; self.hasAttachments = hasAttachments
+    }
+}
+
 /// Messages around one message in a conversation's history.
 public struct HistoryContext: Equatable, Sendable {
     public let page: ThreadPage
@@ -322,6 +337,56 @@ public final class MessagesReader: @unchecked Sendable {
     }
     public func sharedHistorySync(forChat guid: String, fileLimit: Int = 1000, linkLimit: Int = 1000) throws -> SharedHistory? {
         try queue.sync { try self.sharedNow(forChat: guid, fileLimit: fileLimit, linkLimit: linkLimit) }
+    }
+    /// For each conversation, its newest ordinary incoming message after `row` (none when only
+    /// your own messages, reactions or activity came since). One indexed lookup per conversation.
+    public func newestIncoming(inChats guids: [String], after row: Int64) async throws -> [IncomingMessage] {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.incomingNow(inChats: guids, after: row)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func newestIncomingSync(inChats guids: [String], after row: Int64) throws -> [IncomingMessage] {
+        try queue.sync { try self.incomingNow(inChats: guids, after: row) }
+    }
+    private func incomingNow(inChats guids: [String], after row: Int64) throws -> [IncomingMessage] {
+        do {
+            let db = try openIfNeeded()
+            try execute(db, "BEGIN DEFERRED")
+            defer { try? execute(db, "ROLLBACK") }
+            let schema = try schema(db)
+            var filters = ["j.chat_id = ?1", "m.ROWID > ?2", "m.is_from_me = 0"]
+            if schema.message.contains("associated_message_type") {
+                filters.append("(m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)")
+            }
+            if schema.message.contains("item_type") { filters.append("COALESCE(m.item_type, 0) = 0") }
+            if schema.message.contains("date_retracted") { filters.append("COALESCE(m.date_retracted, 0) = 0") }
+            let statement = try cached(db, """
+                SELECT m.ROWID, m.text, \(schema.col("attributedBody", fallback: "NULL")), m.date, h.id, \(schema.col("cache_has_attachments"))
+                FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
+                LEFT JOIN handle h ON h.ROWID = m.handle_id
+                WHERE \(filters.joined(separator: " AND "))
+                ORDER BY m.ROWID DESC LIMIT 1
+                """)
+            var result: [IncomingMessage] = []
+            for guid in guids {
+                guard let chatID = try chatRowID(db, guid: guid) else { continue }
+                defer { recycle(statement) }
+                sqlite3_bind_int64(statement, 1, chatID)
+                sqlite3_bind_int64(statement, 2, row)
+                guard sqlite3_step(statement) == SQLITE_ROW else { continue }
+                result.append(IncomingMessage(conversationID: guid, rowID: sqlite3_column_int64(statement, 0),
+                    text: BodyDecoder.decode(text: string(statement, 1), attributedBody: blob(statement, 2)),
+                    sender: string(statement, 4), date: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 3)),
+                    hasAttachments: sqlite3_column_int(statement, 5) != 0))
+            }
+            return result
+        } catch let error as DatabaseError {
+            if case .sqlite = error { closeConnection() }
+            throw error
+        }
     }
     private func sharedNow(forChat guid: String, fileLimit: Int, linkLimit: Int) throws -> SharedHistory? {
         do {

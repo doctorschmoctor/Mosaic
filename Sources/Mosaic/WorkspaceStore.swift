@@ -50,6 +50,23 @@ import MosaicCore
     /// Every open tile is protected and another conversation needs one: the reader chooses which closes.
     private(set) var replacementChoice: ReplacementChoice?
     /// Whether link previews are fetched (Settings › Privacy & Data): automatically, on a click, or never.
+    // MARK: Notifications (opt-in)
+
+    /// Whether Mosaic notifies new messages (off until the reader turns it on in Settings).
+    private(set) var notificationsEnabled = false {
+        didSet { if notificationsEnabled != oldValue { defaults.set(notificationsEnabled, forKey: "Mosaic.notifications") } }
+    }
+    /// What a notification shows of the message.
+    var notificationPreview: NotificationPreview = .full {
+        didSet { if notificationPreview != oldValue { defaults.set(notificationPreview.rawValue, forKey: "Mosaic.notificationPreview") } }
+    }
+    /// What macOS allows, as last asked.
+    private(set) var notificationPermission: NotificationPermission = .notDetermined
+    /// Conversations whose notifications are muted, and until when (`Date.distantFuture`: until
+    /// unmuted). Mosaic's own: Messages' settings and unread counts are untouched.
+    private(set) var mutedUntil: [String: Date] = [:] {
+        didSet { if mutedUntil != oldValue, let data = try? JSONEncoder().encode(mutedUntil) { defaults.set(data, forKey: "Mosaic.mutedConversations") } }
+    }
     var linkPreviews: LinkPreviewPolicy = .automatic {
         didSet {
             guard linkPreviews != oldValue else { return }
@@ -220,6 +237,7 @@ import MosaicCore
     @ObservationIgnored private var lastLoad: ChangeToken?
     /// The one reader of Messages' database: one connection, kept open, with change detection on it.
     @ObservationIgnored private let reader: MessagesReader
+    @ObservationIgnored let notifier: any MessageNotifier
     /// A second connection, at utility priority, for the long reads — searching a whole history,
     /// gathering what a conversation shared — so they never hold up loading conversations.
     @ObservationIgnored private let historyReader: MessagesReader
@@ -248,6 +266,11 @@ import MosaicCore
         animateMessages = defaults.object(forKey: "Mosaic.animateMessages") as? Bool ?? true
         let linkPreviews = defaults.string(forKey: "Mosaic.linkPreviews").flatMap(LinkPreviewPolicy.init(rawValue:)) ?? .automatic
         self.linkPreviews = linkPreviews
+        notificationsEnabled = defaults.bool(forKey: "Mosaic.notifications")
+        notificationPreview = defaults.string(forKey: "Mosaic.notificationPreview").flatMap(NotificationPreview.init(rawValue:)) ?? .full
+        let muted = defaults.data(forKey: "Mosaic.mutedConversations").flatMap { try? JSONDecoder().decode([String: Date].self, from: $0) } ?? [:]
+        mutedUntil = muted.filter { $0.value > Date() }
+        notifier = services.notifier()
         LinkPreviewLoader.shared.allowsFetching = linkPreviews != .off
         reader = MessagesReader(database: database)
         historyReader = MessagesReader(database: database, background: true)
@@ -272,6 +295,14 @@ import MosaicCore
         // workspace's or the other one's) still points at.
         OutgoingFiles.purgeStaleInBackground(in: services.outgoing, keeping: SavedDrafts.referencedPaths(in: defaults)
             .union(outgoing.values.joined().compactMap { $0.url?.path }))
+        // A click on a notification opens its conversation the usual way.
+        notifier.onOpen = { [weak self] id in self?.openFromNotification(id) }
+        if notificationsEnabled {
+            Task { [weak self] in
+                guard let self else { return }
+                self.notificationPermission = await self.notifier.permission()
+            }
+        }
         // What Contacts allows is asked off the main thread: a slow answer holds up nothing.
         Task { [weak self] in
             guard let self else { return }
@@ -1214,6 +1245,106 @@ import MosaicCore
         if contextWindows[id] != nil { instantly { contextWindows[id] = nil } }
     }
 
+    // MARK: Notifications
+
+    /// The newest row the last load had: a message notifies only when it is newer than this
+    /// (nil until the first load of a connection, which notifies nothing).
+    @ObservationIgnored private var notificationMark: Int64?
+    /// Messages notified already (conversation and row), so a message notifies at most once.
+    @ObservationIgnored private var notifiedMessages: [String] = []
+    @ObservationIgnored private var notifiedConversations: Set<String> = []
+
+    /// Turns notifications on (asking macOS the first time) or off. On only when macOS allows them.
+    func setNotificationsEnabled(_ on: Bool) async {
+        guard on else { notificationsEnabled = false; return }
+        var permission = await notifier.permission()
+        if permission == .notDetermined { permission = await notifier.requestPermission() ? .allowed : .denied }
+        notificationPermission = permission
+        notificationsEnabled = permission == .allowed
+    }
+    /// Asks macOS again what it allows (Settings shows it).
+    func refreshNotificationPermission() async { notificationPermission = await notifier.permission() }
+
+    enum MuteDuration: CaseIterable { case hour, untilTomorrow, untilUnmuted
+        var title: String {
+            switch self {
+            case .hour: return "For 1 Hour"
+            case .untilTomorrow: return "Until Tomorrow"
+            case .untilUnmuted: return "Until I Unmute"
+            }
+        }
+    }
+    func isMuted(_ id: String) -> Bool { (mutedUntil[id] ?? .distantPast) > Date() }
+    /// Mutes a conversation's notifications (Mosaic's only) and takes away the ones it has showing.
+    func mute(_ id: String, _ duration: MuteDuration, now: Date = Date()) {
+        let until: Date
+        switch duration {
+        case .hour: until = now.addingTimeInterval(3600)
+        case .untilTomorrow:
+            // 8 in the morning, tomorrow.
+            let calendar = Calendar.current
+            let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now)) ?? now.addingTimeInterval(86_400)
+            until = calendar.date(bySettingHour: 8, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+        case .untilUnmuted: until = .distantFuture
+        }
+        instantly { mutedUntil[id] = until }
+        notifiedConversations.remove(id)
+        notifier.withdraw(conversationID: id)
+    }
+    func unmute(_ id: String) { if mutedUntil[id] != nil { instantly { mutedUntil[id] = nil } } }
+    /// The muted conversations, for Settings: name and until when.
+    var mutedConversations: [(id: String, name: String, until: Date)] {
+        mutedUntil.filter { $0.value > Date() }
+            .map { entry in (entry.key, conversations.first { $0.id == entry.key }?.name ?? "A conversation", entry.value) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// After a load: the conversations with rows newer than the last load's are asked (on the
+    /// background connection) for their newest ordinary incoming message, and each one notifies
+    /// once — not for the first load of a connection, history pages, reactions, activity lines,
+    /// your own messages, a muted conversation, or one you can see in a tile.
+    private func noteNewMessages(in loaded: [Conversation]) {
+        let newest = loaded.map(\.lastMessageID).max() ?? 0
+        guard let mark = notificationMark else { notificationMark = newest; return }
+        guard newest > mark else { return }
+        notificationMark = newest
+        guard isLive, notificationsEnabled, notificationPermission == .allowed else { return }
+        let candidates = loaded.filter { $0.lastMessageID > mark && !$0.isComposeDraft && !isMuted($0.id) }.map(\.id)
+        guard !candidates.isEmpty else { return }
+        let reader = historyReader, readerGeneration = generation
+        Task { [weak self] in
+            let found = (try? await reader.newestIncoming(inChats: candidates, after: mark)) ?? []
+            guard let self, readerGeneration == self.generation else { return }
+            for message in found { self.notify(message) }
+        }
+    }
+    private func notify(_ message: IncomingMessage) {
+        let id = message.conversationID
+        let key = "\(id)#\(message.rowID)"
+        guard notificationsEnabled, !notifiedMessages.contains(key), !isMuted(id), !canSee(id),
+              let conversation = conversations.first(where: { $0.id == id }) else { return }
+        notifiedMessages.append(key)
+        if notifiedMessages.count > 500 { notifiedMessages.removeFirst(100) }
+        notifiedConversations.insert(id)
+        let sender = message.sender.map { name(for: $0) } ?? "Someone"
+        let words = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = words.isEmpty ? (message.hasAttachments ? "Attachment" : "New message") : words
+        let body: String
+        switch notificationPreview {
+        case .full: body = conversation.isGroup ? "\(sender): \(text)" : text
+        case .nameOnly: body = conversation.isGroup ? "New message from \(sender)" : "New message"
+        }
+        notifier.post(MessageNotification(identifier: key, conversationID: id, title: conversation.name, body: body))
+    }
+    /// A notification was clicked: Mosaic comes to the front and the conversation opens in a tile
+    /// with the keyboard in its message field, as from the sidebar.
+    func openFromNotification(_ id: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        unhide(id)
+        guard conversations.contains(where: { $0.id == id }) else { return }
+        openAndType(id)
+    }
+
     // MARK: What a conversation shared
 
     /// What conversations shared over their whole history, read once per session each (the
@@ -1306,6 +1437,8 @@ import MosaicCore
     /// and the seen boundary moves to that row. Called when a thread's newest message is in view,
     /// and after sending (sending is reading).
     func markSeen(_ id: String) {
+        // Read now: its notifications have done their job.
+        if notifiedConversations.remove(id) != nil { notifier.withdraw(conversationID: id) }
         guard let index = conversations.firstIndex(where: { $0.id == id }) else { return }
         if conversations[index].unreadCount != 0 { conversations[index].unreadCount = 0 }
         let loadedNewest = conversations[index].messages.reversed().lazy.compactMap { Int64($0.id) }.first ?? 0
@@ -1327,6 +1460,8 @@ import MosaicCore
         tailsInView = []; tilesOutOfView = []
         for task in searchTasks.values { task.cancel() }
         searchTasks = [:]; searchTaskGenerations = [:]; historySearches = [:]; contextWindows = [:]; activeFindTile = nil
+        // A new connection's first load is a new starting point: nothing in it is notified.
+        notificationMark = nil
         composerFocus.cancel("the workspace changed")
         historyCache = [:]; prefetchedRecent = false; tilesWithNews = []; loadingMore = []
         prefetchWaiting = []; prefetchRunning = nil; openingReads = 0; hoveredRow = nil; hoverTask?.cancel(); hoverTask = nil
@@ -1450,6 +1585,7 @@ import MosaicCore
             if !arrivals.subtracting(tilesWithNews).isEmpty { tilesWithNews.formUnion(arrivals) }
             // Publishing identical data re-rendered every tile; only publish real changes.
             if loaded != conversations { instantly { conversations = loaded } }
+            noteNewMessages(in: loaded)
             // What the open tiles show now is what they will open on next time.
             for conversation in loaded where ids.contains(conversation.id) && !conversation.messages.isEmpty {
                 remember(ThreadPage(messages: conversation.messages.filter { $0.sendState == nil }, reactions: conversation.reactions,

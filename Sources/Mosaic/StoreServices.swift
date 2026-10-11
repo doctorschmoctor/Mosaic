@@ -33,10 +33,14 @@ enum MosaicRuntime {
 struct StoreServices {
     var contacts: any ContactsSource
     var outgoing: OutgoingStorage
+    /// Makes where notifications go: the system's notification center in the installed app; a
+    /// recording that shows nothing and asks for nothing in fixture runs.
+    var notifier: @MainActor () -> any MessageNotifier = { RecordingNotifier() }
 
-    static var system: StoreServices { StoreServices(contacts: SystemContacts(), outgoing: .system) }
-    static func isolated(contacts: any ContactsSource = FixtureContacts(), outgoing: OutgoingStorage = .isolated) -> StoreServices {
-        StoreServices(contacts: contacts, outgoing: outgoing)
+    static var system: StoreServices { StoreServices(contacts: SystemContacts(), outgoing: .system, notifier: { SystemNotifier() }) }
+    static func isolated(contacts: any ContactsSource = FixtureContacts(), outgoing: OutgoingStorage = .isolated,
+                         notifier: @escaping @MainActor () -> any MessageNotifier = { RecordingNotifier() }) -> StoreServices {
+        StoreServices(contacts: contacts, outgoing: outgoing, notifier: notifier)
     }
     /// The installed app's services, or a fixture run's.
     static var processDefault: StoreServices { MosaicRuntime.isIsolated ? .isolated() : .system }

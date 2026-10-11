@@ -432,6 +432,7 @@ struct ConversationRow: View {
     private var row: some View {
         let draft = store.draftSummaries[conversation.id]
         let pinned = store.isPinned(conversation.id)
+        let muted = store.notificationsEnabled && store.isMuted(conversation.id)
         return Button(action: activate) {
             HStack(spacing: 10) {
                 if conversation.isComposeDraft { NewMessageAvatar(size: 36) } else { Avatar(conversation: conversation, size: 36) }
@@ -439,6 +440,7 @@ struct ConversationRow: View {
                     HStack(spacing: 4) {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         if pinned { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityHidden(true) }
+                        if muted { Image(systemName: "bell.slash.fill").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityHidden(true) }
                         Spacer(minLength: 0)
                         // Unread shows on an open conversation too, beside the grid icon.
                         if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
@@ -465,7 +467,7 @@ struct ConversationRow: View {
                 .contentShape(Rectangle())
         }.buttonStyle(TileControlStyle())
             .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
-                                + (pinned ? ", pinned" : "")
+                                + (pinned ? ", pinned" : "") + (muted ? ", muted" : "")
                                 + (conversation.unreadCount > 0 ? ", \(conversation.unreadCount) unread" : "")
                                 + (draft.map { ", draft: \($0.line)" } ?? ""))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
@@ -482,6 +484,18 @@ struct ConversationRow: View {
                 if !conversation.isComposeDraft {
                     // Mosaic's own pin: the conversation stays at the top of this sidebar. Messages' pins are untouched.
                     Button(pinned ? "Unpin" : "Pin to Top") { store.togglePin(conversation.id) }
+                    // Mosaic's own notifications only; Messages is not changed.
+                    if store.notificationsEnabled {
+                        if store.isMuted(conversation.id) {
+                            Button("Unmute Notifications") { store.unmute(conversation.id) }
+                        } else {
+                            Menu("Mute Notifications") {
+                                ForEach(WorkspaceStore.MuteDuration.allCases, id: \.self) { duration in
+                                    Button(duration.title) { store.mute(conversation.id, duration) }
+                                }
+                            }
+                        }
+                    }
                 }
                 if !conversation.isComposeDraft, store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
                 if draft != nil || conversation.isComposeDraft {

@@ -309,9 +309,17 @@ struct ConversationTile: View {
         if !conversation.isComposeDraft {
             items.append(.init(title: "Conversation Details", action: { NotificationCenter.default.post(name: .showConversationDetails, object: id) }))
         }
+        // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
+        items.append(.init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }))
+        // Mosaic's own notifications for this conversation (Messages is not changed).
+        if store.notificationsEnabled && !conversation.isComposeDraft {
+            if store.isMuted(id) {
+                items.append(.init(title: "Unmute Notifications", action: { [store] in store.unmute(id) }))
+            } else {
+                items.append(.init(title: "Mute Notifications", action: { [store] in store.mute(id, .untilUnmuted) }))
+            }
+        }
         return items + [
-            // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
-            .init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }),
             .init(title: conversation.isComposeDraft ? "Discard New Message" : "Discard Draft",
                   isEnabled: { [store] in store.composeDrafts[id] != nil || store.hasDraft(id) }) { [store] in store.discardDraft(id) },
             .init(title: "Close Tile", action: { [store] in store.close(id) }, separatedAbove: true),
@@ -531,8 +539,10 @@ struct MessageList: View, Equatable {
                                                incoming: !row.message.isFromMe, reduceMotion: reduceMotion))
                     // The row's place within the thread, reported as layout places it (not as it
                     // scrolls: the thread's own space does not move with the scroll).
-                    .onGeometryChange(for: CGRect.self) { proxy in proxy.frame(in: .named("thread")) } action: { frame in
-                        registry.update(row.id, frame)
+                    .applying(ThreadRenderingProbe.rowGeometry) {
+                        $0.onGeometryChange(for: CGRect.self) { proxy in proxy.frame(in: .named("thread")) } action: { frame in
+                            registry.update(row.id, frame)
+                        }
                     }
                 }
             }
@@ -870,23 +880,29 @@ struct MessageBubble: View, Equatable {
                     .background(fromMe ? Palette.outgoing(service: service) : Palette.incoming,
                                 in: RoundedRectangle(cornerRadius: 15 * zoom, style: .continuous))
                     // VoiceOver reads who wrote it, and offers the context menu's actions by name.
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(fromMe ? "You: \(message.text)" : "\(authorName): \(message.text)")
-                    .accessibilityActions {
-                        Button("Copy") { copyText() }
-                        ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
-                            Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
-                        }
-                        if message.sendState?.isFailed == true {
-                            Button("Try Again") { Task { await store.retrySend(message.presentationID, in: threadID) } }
+                    .applying(ThreadRenderingProbe.accessibilityLabels) {
+                        $0.accessibilityElement(children: .ignore)
+                            .accessibilityLabel(fromMe ? "You: \(message.text)" : "\(authorName): \(message.text)")
+                    }
+                    .applying(ThreadRenderingProbe.accessibilityActions) {
+                        $0.accessibilityActions {
+                            Button("Copy") { copyText() }
+                            ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
+                                Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
+                            }
+                            if message.sendState?.isFailed == true {
+                                Button("Try Again") { Task { await store.retrySend(message.presentationID, in: threadID) } }
+                            }
                         }
                     }
-                    .contextMenu {
-                        Button("Copy") { copyText() }
-                        ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
-                            Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
+                    .applying(ThreadRenderingProbe.contextMenus) {
+                        $0.contextMenu {
+                            Button("Copy") { copyText() }
+                            ForEach(LinkDetector.links(in: message.text), id: \.range.location) { match in
+                                Button("Open \(LinkPreviewLoader.host(match.url))") { NSWorkspace.shared.open(match.url) }
+                            }
+                            failedSendActions
                         }
-                        failedSendActions
                     }
             }
             if let previewURL { LinkPreviewCard(url: previewURL) }
@@ -1161,3 +1177,19 @@ struct OlderHistorySearchView: View {
     }
 }
 
+/// What a thread's bubbles carry, switchable so a test can measure what each part costs when a
+/// tile is resized. Always all on in the app.
+enum ThreadRenderingProbe {
+    nonisolated(unsafe) static var accessibilityLabels = true
+    nonisolated(unsafe) static var accessibilityActions = true
+    nonisolated(unsafe) static var contextMenus = true
+    nonisolated(unsafe) static var rowGeometry = true
+    static func reset() { accessibilityLabels = true; accessibilityActions = true; contextMenus = true; rowGeometry = true }
+}
+
+extension View {
+    /// The view with `change` applied when `condition` holds.
+    @ViewBuilder func applying<Changed: View>(_ condition: Bool, _ change: (Self) -> Changed) -> some View {
+        if condition { change(self) } else { self }
+    }
+}

@@ -13,6 +13,7 @@ struct SettingsView: View {
         TabView {
             SetupView().tabItem { Label("Connection", systemImage: "bubble.left.and.bubble.right") }
             AppearanceSettings().tabItem { Label("Appearance & Input", systemImage: "textformat.size") }
+            NotificationSettings().tabItem { Label("Notifications", systemImage: "bell") }
             PrivacySettings().tabItem { Label("Privacy & Data", systemImage: "hand.raised") }
         }
     }
@@ -30,6 +31,61 @@ struct AppearanceSettings: View {
         }
         .formStyle(.grouped)
         .frame(width: 590, height: 220)
+    }
+}
+
+/// Mosaic's own notifications, off until turned on: what they show, which conversations are
+/// muted, and what macOS allows. Turning them on is the only place Mosaic asks for permission.
+struct NotificationSettings: View {
+    @Environment(WorkspaceStore.self) private var store
+    @State private var working = false
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Notify me about new messages", isOn: Binding(get: { store.notificationsEnabled }, set: { on in
+                    working = true
+                    Task { await store.setNotificationsEnabled(on); working = false }
+                }))
+                .disabled(working)
+                if store.notificationPermission == .denied {
+                    HStack {
+                        Text("Notifications are off for Mosaic in System Settings.").foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Notification Settings…") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") { NSWorkspace.shared.open(url) }
+                        }
+                    }
+                }
+                Picker("Show", selection: Binding(get: { store.notificationPreview }, set: { store.notificationPreview = $0 })) {
+                    ForEach(NotificationPreview.allCases) { Text($0.title).tag($0) }
+                }
+                .disabled(!store.notificationsEnabled)
+                Text("A message notifies once, unless you can already see its conversation in a tile. Reactions, your own messages and older history never notify.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Messages can notify you as well; to be told about each message once, turn off Messages' notifications in System Settings › Notifications.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Section("Muted conversations") {
+                let muted = store.mutedConversations
+                if muted.isEmpty {
+                    Text("None. Right-click a conversation to mute it here; Messages is not changed.").foregroundStyle(.secondary)
+                } else {
+                    ForEach(muted, id: \.id) { entry in
+                        HStack {
+                            Text(entry.name).lineLimit(1)
+                            Spacer()
+                            Text(entry.until == .distantFuture ? "Until unmuted" : "Until \(entry.until.formatted(date: .abbreviated, time: .shortened))")
+                                .foregroundStyle(.secondary)
+                            Button("Unmute") { store.unmute(entry.id) }
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 590, height: 420)
+        .task { await store.refreshNotificationPermission() }
     }
 }
 
