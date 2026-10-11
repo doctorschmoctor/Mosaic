@@ -129,6 +129,29 @@ public struct HistorySearchPage: Equatable, Sendable {
     public init(matches: [Message], next: HistorySearchCursor?, scanned: Int) { self.matches = matches; self.next = next; self.scanned = scanned }
 }
 
+/// What a conversation shared over its whole history, newest first: its files (photos, videos,
+/// documents — not stickers) and the web links in its messages, each with the message it came in.
+public struct SharedHistory: Equatable, Sendable {
+    public struct File: Equatable, Sendable {
+        public let messageID: String
+        public let date: Date
+        public let attachment: Attachment
+    }
+    public struct Link: Equatable, Sendable {
+        public let messageID: String
+        public let date: Date
+        public let url: URL
+    }
+    public var files: [File]
+    public var links: [Link]
+    /// Whether every file and link was read (false when a limit cut the oldest off).
+    public var filesComplete: Bool
+    public var linksComplete: Bool
+    public init(files: [File] = [], links: [Link] = [], filesComplete: Bool = true, linksComplete: Bool = true) {
+        self.files = files; self.links = links; self.filesComplete = filesComplete; self.linksComplete = linksComplete
+    }
+}
+
 /// Messages around one message in a conversation's history.
 public struct HistoryContext: Equatable, Sendable {
     public let page: ThreadPage
@@ -166,7 +189,7 @@ public struct DatabaseSnapshot: Sendable {
 /// from the earlier connection. No read transaction is held between loads.
 public final class MessagesReader: @unchecked Sendable {
     public let database: MessagesDatabase
-    private let queue = DispatchQueue(label: "Mosaic.MessagesReader", qos: .userInitiated)
+    private let queue: DispatchQueue
     private var db: OpaquePointer?
     private var connectionNumber = 0
     private var fileIdentity: UInt64?
@@ -174,6 +197,10 @@ public final class MessagesReader: @unchecked Sendable {
 
     struct Schema {
         let message: Set<String>, attachment: Set<String>, attachmentJoin: Set<String>
+        /// `chat_message_join`'s columns: Messages keeps each message's date there too, indexed
+        /// with the chat, which lets a whole-history read go in date order without sorting.
+        var chatJoin: Set<String> = []
+        var joinHasDates: Bool { chatJoin.contains("message_date") }
         func col(_ name: String, prefix: String = "m", fallback: String = "0") -> String { message.contains(name) ? "\(prefix).\(name)" : fallback }
     }
 
@@ -187,7 +214,14 @@ public final class MessagesReader: @unchecked Sendable {
     /// arrives as a new row, so a chat is looked at again only when its newest row changes.
     private var groupPhotos: [Int64: (lastID: Int64, path: String?)] = [:]
 
-    public init(database: MessagesDatabase) { self.database = database }
+    /// `background` gives the reader a connection and queue of its own at utility priority, for
+    /// long reads (searching a whole history, gathering what a conversation shared) that must
+    /// never hold up loading conversations.
+    public init(database: MessagesDatabase, background: Bool = false) {
+        self.database = database
+        queue = DispatchQueue(label: background ? "Mosaic.MessagesReader.background" : "Mosaic.MessagesReader",
+                              qos: background ? .utility : .userInitiated)
+    }
     deinit {
         for statement in statements.values { sqlite3_finalize(statement) }
         if let db { sqlite3_close(db) }
@@ -272,6 +306,107 @@ public final class MessagesReader: @unchecked Sendable {
     public func contextSync(forChat guid: String, around rowID: Int64, before: Int = 30, after: Int = 30) throws -> HistoryContext? {
         try queue.sync { try self.contextNow(forChat: guid, around: rowID, before: before, after: after) }
     }
+    /// The files and links one conversation shared over its whole history, newest first, up to
+    /// `fileLimit` files and `linkLimit` distinct links. Files come from Messages' attachment
+    /// records (not stickers, link-preview payloads or hidden ones, and not from unsent
+    /// messages); links from the messages whose words — plain or rich text — mention "http" or
+    /// "www.", which the database finds without reading every message. Nil when the conversation
+    /// is not in the database. Read-only.
+    public func sharedHistory(forChat guid: String, fileLimit: Int = 1000, linkLimit: Int = 1000) async throws -> SharedHistory? {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try self.sharedNow(forChat: guid, fileLimit: fileLimit, linkLimit: linkLimit)) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+    public func sharedHistorySync(forChat guid: String, fileLimit: Int = 1000, linkLimit: Int = 1000) throws -> SharedHistory? {
+        try queue.sync { try self.sharedNow(forChat: guid, fileLimit: fileLimit, linkLimit: linkLimit) }
+    }
+    private func sharedNow(forChat guid: String, fileLimit: Int, linkLimit: Int) throws -> SharedHistory? {
+        do {
+            let db = try openIfNeeded()
+            try execute(db, "BEGIN DEFERRED")
+            defer { try? execute(db, "ROLLBACK") }
+            let schema = try schema(db)
+            guard let chatID = try chatRowID(db, guid: guid) else { return nil }
+            func col(_ name: String, _ fallback: String = "0") -> String { schema.col(name, prefix: "m", fallback: fallback) }
+            let order = schema.joinHasDates ? "ORDER BY j.message_date DESC, j.message_id DESC" : "ORDER BY m.date DESC, m.ROWID DESC"
+            let notUnsent = schema.message.contains("date_retracted") ? "AND (m.date_retracted IS NULL OR m.date_retracted = 0)" : ""
+            var result = SharedHistory()
+
+            let columns = schema.attachment
+            if columns.contains("filename"), schema.attachmentJoin.contains("attachment_id"), schema.attachmentJoin.contains("message_id") {
+                func attachmentCol(_ name: String, fallback: String = "NULL") -> String { columns.contains(name) ? "a.\(name)" : fallback }
+                let statement = try cached(db, """
+                    SELECT m.ROWID, m.date, a.ROWID, \(attachmentCol("guid")), a.filename, \(attachmentCol("mime_type")), \(attachmentCol("uti")),
+                           \(attachmentCol("transfer_name")), \(attachmentCol("is_sticker", fallback: "0")), \(attachmentCol("hide_attachment", fallback: "0")),
+                           \(attachmentCol("total_bytes", fallback: "0"))
+                    FROM chat_message_join j
+                    JOIN message m ON m.ROWID = j.message_id
+                    JOIN message_attachment_join maj ON maj.message_id = j.message_id
+                    JOIN attachment a ON a.ROWID = maj.attachment_id
+                    WHERE j.chat_id = ?1 \(notUnsent)
+                    \(order), a.ROWID LIMIT ?2
+                    """)
+                defer { recycle(statement) }
+                sqlite3_bind_int64(statement, 1, chatID)
+                // One more than asked for tells whether there were more.
+                sqlite3_bind_int(statement, 2, Int32(max(1, min(fileLimit, 20_000)) + 1))
+                var read = 0
+                var status = sqlite3_step(statement)
+                while status == SQLITE_ROW {
+                    defer { status = sqlite3_step(statement) }
+                    read += 1
+                    if read > fileLimit { result.filesComplete = false; break }
+                    guard sqlite3_column_int(statement, 8) == 0, sqlite3_column_int(statement, 9) == 0 else { continue }
+                    let rawPath = string(statement, 4)
+                    if let rawPath, rawPath.hasSuffix(".pluginPayloadAttachment") { continue }
+                    let path = MessagesDatabase.resolve(rawPath, home: database.home)
+                    let name = string(statement, 7) ?? rawPath.map { ($0 as NSString).lastPathComponent } ?? "Attachment"
+                    let bytes = sqlite3_column_int64(statement, 10)
+                    let attachment = Attachment(id: string(statement, 3) ?? "attachment-\(sqlite3_column_int64(statement, 2))",
+                        path: path.flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil }, name: name,
+                        mimeType: string(statement, 5), uti: string(statement, 6), byteCount: bytes > 0 ? Int(bytes) : nil)
+                    result.files.append(.init(messageID: String(sqlite3_column_int64(statement, 0)),
+                                              date: MessagesDatabase.appleDate(sqlite3_column_int64(statement, 1)), attachment: attachment))
+                }
+                guard status == SQLITE_DONE || status == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+            }
+
+            let body = col("attributedBody", "NULL")
+            let mentionsLink = schema.message.contains("attributedBody")
+                ? "(instr(m.text, 'http') > 0 OR instr(m.text, 'www.') > 0 OR instr(m.attributedBody, CAST('http' AS BLOB)) > 0 OR instr(m.attributedBody, CAST('www.' AS BLOB)) > 0)"
+                : "(instr(m.text, 'http') > 0 OR instr(m.text, 'www.') > 0)"
+            let notActivity = schema.message.contains("item_type") ? "AND m.item_type = 0" : ""
+            let statement = try cached(db, """
+                SELECT m.ROWID, m.date, m.text, \(body)
+                FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
+                WHERE j.chat_id = ?1 \(notUnsent) \(notActivity) AND \(mentionsLink)
+                \(order)
+                """)
+            defer { recycle(statement) }
+            sqlite3_bind_int64(statement, 1, chatID)
+            var seen = Set<String>()
+            var status = sqlite3_step(statement)
+            while status == SQLITE_ROW {
+                let text = BodyDecoder.decode(text: string(statement, 2), attributedBody: blob(statement, 3))
+                let messageID = String(sqlite3_column_int64(statement, 0))
+                let date = MessagesDatabase.appleDate(sqlite3_column_int64(statement, 1))
+                for match in LinkDetector.links(in: text) where seen.insert(match.url.absoluteString).inserted {
+                    if result.links.count >= linkLimit { result.linksComplete = false; break }
+                    result.links.append(.init(messageID: messageID, date: date, url: match.url))
+                }
+                if !result.linksComplete { break }
+                status = sqlite3_step(statement)
+            }
+            guard status == SQLITE_DONE || status == SQLITE_ROW else { throw DatabaseError.sqlite(String(cString: sqlite3_errmsg(db))) }
+            return result
+        } catch let error as DatabaseError {
+            if case .sqlite = error { closeConnection() }
+            throw error
+        }
+    }
 
     private func chatRowID(_ db: OpaquePointer, guid: String) throws -> Int64? {
         let lookup = try cached(db, "SELECT ROWID FROM chat WHERE guid = ?")
@@ -292,14 +427,24 @@ public final class MessagesReader: @unchecked Sendable {
             func col(_ name: String, _ fallback: String = "0") -> String { schema.col(name, prefix: "m", fallback: fallback) }
             let notReaction = schema.message.contains("associated_message_type")
                 ? "AND (m.associated_message_type IS NULL OR m.associated_message_type < 2000 OR m.associated_message_type >= 4000)" : ""
+            // In the join's date order where Messages keeps it (its chat-and-date index serves each
+            // part without sorting the chat's whole history); else by the messages' own dates.
+            let order = schema.joinHasDates
+                ? """
+                  AND (j.message_date, j.message_id) < (COALESCE((SELECT message_date FROM chat_message_join WHERE chat_id = ?1 AND message_id = ?3), ?4), ?3)
+                ORDER BY j.message_date DESC, j.message_id DESC LIMIT ?2
+                """
+                : """
+                  AND (m.date, m.ROWID) < (COALESCE((SELECT date FROM message WHERE ROWID = ?3), ?4), ?3)
+                ORDER BY m.date DESC, m.ROWID DESC LIMIT ?2
+                """
             let statement = try cached(db, """
                 SELECT m.ROWID, m.text, \(col("attributedBody", "NULL")), m.date, m.is_from_me, h.id, \(col("item_type")),
                        \(col("date_retracted", "NULL")), \(col("guid", "NULL"))
-                FROM message m JOIN chat_message_join j ON j.message_id = m.ROWID
+                FROM chat_message_join j JOIN message m ON m.ROWID = j.message_id
                 LEFT JOIN handle h ON h.ROWID = m.handle_id
                 WHERE j.chat_id = ?1 \(notReaction)
-                  AND (m.date, m.ROWID) < (COALESCE((SELECT date FROM message WHERE ROWID = ?3), ?4), ?3)
-                ORDER BY m.date DESC, m.ROWID DESC LIMIT ?2
+                \(order)
                 """)
             defer { recycle(statement) }
             let cursorRow = HistoryCursor(rowID: cursor.rowID, date: cursor.date)
@@ -486,7 +631,8 @@ public final class MessagesReader: @unchecked Sendable {
         let message = try tableColumns(db, table: "message")
         guard message.contains("is_from_me"), message.contains("date"), message.contains("text") else { throw DatabaseError.unsupportedSchema }
         let probed = Schema(message: message, attachment: try tableColumns(db, table: "attachment"),
-                            attachmentJoin: try tableColumns(db, table: "message_attachment_join"))
+                            attachmentJoin: try tableColumns(db, table: "message_attachment_join"),
+                            chatJoin: try tableColumns(db, table: "chat_message_join"))
         schema = probed
         return probed
     }

@@ -19,8 +19,6 @@ enum Palette {
     })
     /// The "Draft" mark on a sidebar row.
     static let draft = Color(nsColor: .systemOrange)
-    /// The Needs Reply flag.
-    static let needsReply = Color(nsColor: .systemRed)
     /// #218AFF — outgoing iMessage bubbles.
     static let bubbleBlue = Color(red: 0x21 / 255, green: 0x8A / 255, blue: 0xFF / 255)
     static func outgoing(service: String) -> Color {
@@ -46,7 +44,6 @@ struct WorkspaceView: View {
     @FocusState private var searchFocused: Bool
     @State private var keyboard = KeyboardRouter()
     @State private var sidebarKeyboard = SidebarKeyboard()
-    @State private var listPin = ListTopPin()
 
     var body: some View {
         @Bindable var store = store
@@ -134,64 +131,16 @@ struct WorkspaceView: View {
             }.padding(9).background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 9))
                 .padding(.horizontal, 10).padding(.top, Self.titleBarHeight + 4)
             SidebarFilterBar()
-            // A List, for its swipe actions: swiping a row left reveals Delete, as in Messages.
-            ScrollViewReader { scroller in
-                let pinnedCount = store.pinnedRowCount
-                List {
-                    ForEach(Array(store.filteredConversations.enumerated()), id: \.element.id) { index, conversation in
-                        // Rows run to the sidebar's trailing edge, so the swipe action sits flush
-                        // against the row instead of beside a gap. Pinned rows come first, under a
-                        // small caption (drawn in the row, so rows and the list's rows stay one to one).
-                        ConversationRow(conversation: conversation,
-                                        caption: pinnedCount == 0 ? nil : index == 0 ? "Pinned" : index == pinnedCount ? "Conversations" : nil)
-                            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
-                            .listRowSeparator(.hidden)
-                            // Inside the list's scroll view: gives it the slim scroller the tiles have,
-                            // one that does not thicken under the pointer or appear for a swipe, and
-                            // tells the rows while a swipe is under way.
-                            .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true,
-                                onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
-                                onScrollView: { [listPin] in listPin.attach($0) }))
-                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                                if conversation.isComposeDraft {
-                                    Button(role: .destructive) { store.discardDraft(conversation.id) } label: { Image(systemName: "trash") }
-                                        .tint(.red).accessibilityLabel("Discard draft")
-                                } else {
-                                    // Hiding leaves Messages untouched; Undo or Hidden Conversations bring it back.
-                                    Button { store.hide(conversation.id) } label: { Label("Hide", systemImage: "eye.slash") }
-                                        .tint(.gray).accessibilityLabel("Hide from Mosaic")
-                                }
-                            }
-                    }
-                    if store.filteredConversations.isEmpty && store.isLoadingConversations && store.search.isEmpty {
-                        // Messages is being read: rows in outline where the conversations will be.
-                        ForEach(0..<8, id: \.self) { index in
-                            LoadingConversationRow(index: index)
-                                .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
-                                .listRowSeparator(.hidden).listRowBackground(Color.clear)
-                        }
-                    } else if store.filteredConversations.isEmpty {
-                        Text(!store.search.isEmpty ? "No conversations found."
-                             : store.sidebarFilter == .drafts ? "No drafts. Unsent messages you close are kept here." : "Conversations will appear here.")
-                            .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
-                            .listRowSeparator(.hidden).listRowBackground(Color.clear)
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .environment(\.defaultMinListRowHeight, 1)
-                .padding(.top, 12)
-                // The keyboard's row stays in view as the arrow keys move it.
-                .onChange(of: store.sidebarSelection) { _, id in if let id { scroller.scrollTo(id) } }
-                // A new message moved a conversation to the top: a list at the top stays at the top.
-                .onChange(of: store.filteredConversations.first?.id) { old, new in
-                    guard ListTopPin.firstChanged(from: old, to: new), let old, let new, store.sidebarSelection == nil else { return }
-                    // After the list has applied the new order.
-                    DispatchQueue.main.async {
-                        if listPin.wasAtTop(oldFirst: old, in: store.filteredConversations.map(\.id)) {
-                            instantly { scroller.scrollTo(new, anchor: .top) }
-                        }
-                    }
+            // The full list stays alive under the Unread and Drafts lists, so going back to All
+            // shows it at once: rebuilding hundreds of List rows was what made that switch slow.
+            ZStack {
+                let all = store.sidebarFilter == .all
+                ConversationList(filter: .all, isActive: all)
+                    .opacity(all ? 1 : 0)
+                    .allowsHitTesting(all)
+                    .accessibilityHidden(!all)
+                if !all {
+                    ConversationList(filter: store.sidebarFilter, isActive: true).id(store.sidebarFilter)
                 }
             }
         }
@@ -237,6 +186,81 @@ struct WorkspaceView: View {
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+}
+
+/// One of the sidebar's lists: every conversation, or one filter's. A List, for its swipe actions
+/// (swiping a row left reveals Hide, or Discard for a New Message). Each list keeps its own scroll
+/// position and its own "stay at the top" pin.
+struct ConversationList: View {
+    @Environment(WorkspaceStore.self) private var store
+    let filter: SidebarFilter
+    /// The list on screen: only it follows the keyboard's row.
+    let isActive: Bool
+    @State private var listPin = ListTopPin()
+
+    var body: some View {
+        ScrollViewReader { scroller in
+            let rows = store.sidebarRows(for: filter)
+            let pinnedCount = store.pinnedRowCount(in: rows, filter: filter)
+            List {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, conversation in
+                    // Rows run to the sidebar's trailing edge, so the swipe action sits flush
+                    // against the row instead of beside a gap. Pinned rows come first, under a
+                    // small caption (drawn in the row, so rows and the list's rows stay one to one).
+                    ConversationRow(conversation: conversation,
+                                    caption: pinnedCount == 0 ? nil : index == 0 ? "Pinned" : index == pinnedCount ? "Conversations" : nil)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        // Inside the list's scroll view: gives it the slim scroller the tiles have,
+                        // one that does not thicken under the pointer or appear for a swipe, and
+                        // tells the rows while a swipe is under way.
+                        .listRowBackground(ThinScrollerInstaller(hidesForHorizontalSwipes: true,
+                            onSwipeModeChange: { swiping in store.setSidebarSwiping(swiping) },
+                            onScrollView: { [listPin] in listPin.attach($0) }))
+                        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                            if conversation.isComposeDraft {
+                                Button(role: .destructive) { store.discardDraft(conversation.id) } label: { Image(systemName: "trash") }
+                                    .tint(.red).accessibilityLabel("Discard draft")
+                            } else {
+                                // Hiding leaves Messages untouched; Undo or Hidden Conversations bring it back.
+                                Button { store.hide(conversation.id) } label: { Label("Hide", systemImage: "eye.slash") }
+                                    .tint(.gray).accessibilityLabel("Hide from Mosaic")
+                            }
+                        }
+                }
+                if rows.isEmpty && store.isLoadingConversations && store.search.isEmpty {
+                    // Messages is being read: rows in outline where the conversations will be.
+                    ForEach(0..<8, id: \.self) { index in
+                        LoadingConversationRow(index: index)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 10, bottom: 3, trailing: 0))
+                            .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                    }
+                } else if rows.isEmpty {
+                    Text(!store.search.isEmpty ? "No conversations found."
+                         : filter == .drafts ? "No drafts. Unsent messages you close are kept here."
+                         : filter == .unread ? "Nothing unread." : "Conversations will appear here.")
+                        .font(.callout).foregroundStyle(.secondary).padding(20).frame(maxWidth: .infinity)
+                        .listRowSeparator(.hidden).listRowBackground(Color.clear)
+                }
+            }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .environment(\.defaultMinListRowHeight, 1)
+            .padding(.top, 12)
+            // The keyboard's row stays in view as the arrow keys move it.
+            .onChange(of: store.sidebarSelection) { _, id in if isActive, let id { scroller.scrollTo(id) } }
+            // A new message moved a conversation to the top: a list at the top stays at the top.
+            .onChange(of: rows.first?.id) { old, new in
+                guard ListTopPin.firstChanged(from: old, to: new), let old, let new, store.sidebarSelection == nil else { return }
+                // After the list has applied the new order.
+                DispatchQueue.main.async {
+                    if listPin.wasAtTop(oldFirst: old, in: store.sidebarRows(for: filter).map(\.id)) {
+                        instantly { scroller.scrollTo(new, anchor: .top) }
+                    }
+                }
+            }
+        }
+        }
 }
 
 /// A sidebar row in outline (avatar, name and preview as soft shapes), shown while Messages is
@@ -408,7 +432,6 @@ struct ConversationRow: View {
     private var row: some View {
         let draft = store.draftSummaries[conversation.id]
         let pinned = store.isPinned(conversation.id)
-        let flagged = store.needsReply(conversation.id)
         return Button(action: activate) {
             HStack(spacing: 10) {
                 if conversation.isComposeDraft { NewMessageAvatar(size: 36) } else { Avatar(conversation: conversation, size: 36) }
@@ -417,8 +440,6 @@ struct ConversationRow: View {
                         Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
                         if pinned { Image(systemName: "pin.fill").font(.system(size: 8)).foregroundStyle(.secondary).accessibilityHidden(true) }
                         Spacer(minLength: 0)
-                        // Your own reminder, apart from what is unread.
-                        if flagged { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundStyle(Palette.needsReply) }
                         // Unread shows on an open conversation too, beside the grid icon.
                         if conversation.unreadCount > 0 { Circle().fill(Palette.accent).frame(width: 6, height: 6) }
                         if isOpen { Image(systemName: "square.grid.2x2.fill").font(.system(size: 9)).foregroundStyle(Palette.accent) }
@@ -446,7 +467,7 @@ struct ConversationRow: View {
             .accessibilityLabel((isOpen ? "\(conversation.name), open in a tile" : "Open \(conversation.name)")
                                 + (pinned ? ", pinned" : "")
                                 + (conversation.unreadCount > 0 ? ", \(conversation.unreadCount) unread" : "")
-                                + (flagged ? ", needs reply" : "") + (draft.map { ", draft: \($0.line)" } ?? ""))
+                                + (draft.map { ", draft: \($0.line)" } ?? ""))
             .accessibilityAddTraits(isSelected ? .isSelected : [])
             // No highlight under the pointer. Resting on a row fetches its history ahead (after a
             // short pause, so a sweep down the list fetches nothing) and the tile opens on its messages.
@@ -461,7 +482,6 @@ struct ConversationRow: View {
                 if !conversation.isComposeDraft {
                     // Mosaic's own pin: the conversation stays at the top of this sidebar. Messages' pins are untouched.
                     Button(pinned ? "Unpin" : "Pin to Top") { store.togglePin(conversation.id) }
-                    Button(flagged ? "Clear Needs Reply" : "Mark as Needs Reply") { store.toggleNeedsReply(conversation.id) }
                 }
                 if !conversation.isComposeDraft, store.isLive { Button("Open Messages") { store.openMessages(conversation) } }
                 if draft != nil || conversation.isComposeDraft {
@@ -532,15 +552,13 @@ struct SidebarFilterBar: View {
             store.setSidebarFilter(filter)
         } label: {
             HStack(spacing: 3) {
-                // Needs Reply is a flag, to keep the row short; its name is in the help and for VoiceOver.
-                if filter == .needsReply { Image(systemName: "flag.fill").font(.system(size: 9, weight: .semibold)) }
-                else { Text(filter.title) }
+                Text(filter.title)
                 if count > 0 { Text("\(count)").monospacedDigit().foregroundStyle(selected ? Palette.accent.opacity(0.8) : .secondary) }
             }
             .font(.system(size: 11, weight: .medium))
             .padding(.horizontal, 7).padding(.vertical, 4)
             .frame(minHeight: 20)
-            .foregroundStyle(selected ? Palette.accent : filter == .needsReply ? Palette.needsReply : Color.primary)
+            .foregroundStyle(selected ? Palette.accent : Color.primary)
             .background(selected ? Palette.accent.opacity(0.15) : Color.primary.opacity(0.05), in: Capsule())
             .contentShape(Capsule())
         }
@@ -554,7 +572,6 @@ struct SidebarFilterBar: View {
         switch filter {
         case .all: return "All conversations"
         case .unread: return "Conversations with messages you haven't seen in Mosaic (Messages and the sender are not told)"
-        case .needsReply: return "Needs Reply: conversations you flagged to answer; reading them keeps the flag until you clear it"
         case .drafts: return "Unsent messages, including New Messages you closed"
         }
     }

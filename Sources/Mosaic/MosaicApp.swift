@@ -26,7 +26,7 @@ import Quartz
                     .keyboardShortcut("f", modifiers: .command)
                 Button("Go to Conversations") { NotificationCenter.default.post(name: .focusConversationList, object: nil) }
                     .keyboardShortcut("l", modifiers: .command)
-                // The sidebar's filters, for the keyboard (and VoiceOver's menu search).
+                // The sidebar's filters, for the keyboard (and VoiceOver's menu search): ⌃⌘1–3.
                 ForEach(Array(SidebarFilter.allCases.enumerated()), id: \.element) { index, filter in
                     Toggle("Show \(filter.title)", isOn: Binding(get: { store.sidebarFilter == filter },
                                                                 set: { if $0 { store.setSidebarFilter(filter) } }))
@@ -72,11 +72,6 @@ import Quartz
                 Button("Hidden Conversations…") { store.showHiddenConversations = true }
                 Divider()
                 Button("Go to Next Unread") { if !store.goToNextUnread() { NSSound.beep() } }.keyboardShortcut("u", modifiers: [.command, .option])
-                Button(store.focused.map { store.needsReply($0.id) } == true ? "Clear Needs Reply" : "Mark as Needs Reply") {
-                    if let id = store.focused?.id { store.toggleNeedsReply(id) }
-                }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-                .disabled(store.focused?.isComposeDraft != false)
                 Button("Refresh Messages") { Task { await store.refresh() } }.keyboardShortcut("r", modifiers: .command)
                 Button("Connect Messages…") { store.showSetup = true }
             }

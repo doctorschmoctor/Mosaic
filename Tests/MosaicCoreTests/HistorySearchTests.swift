@@ -111,4 +111,31 @@ final class HistorySearchTests: XCTestCase {
         _ = try reader.contextSync(forChat: Self.alex, around: 20)
         XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), before)
     }
+
+    /// Where Messages keeps each message's date in the chat join (with its chat-and-date index),
+    /// a search goes in that order without sorting the history; the results are the same.
+    func testTheJoinsDateOrderGivesTheSameResults() throws {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        let sql = """
+        ALTER TABLE chat_message_join ADD COLUMN message_date INTEGER DEFAULT 0;
+        UPDATE chat_message_join SET message_date = (SELECT date FROM message WHERE message.ROWID = chat_message_join.message_id);
+        CREATE INDEX chat_message_join_idx_chat_date ON chat_message_join (chat_id, message_date, message_id);
+        """
+        XCTAssertEqual(sqlite3_exec(db, sql, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let reader = self.reader
+        XCTAssertEqual(try reader.searchHistorySync(forChat: Self.alex, matching: "cafe", before: cursor(45))?.matches.map(\.id), ["7", "3"])
+        XCTAssertEqual(try reader.searchHistorySync(forChat: Self.alex, matching: "plan", before: cursor(30))?.matches.map(\.id), ["7"])
+        var seen: [String] = []
+        var next: HistorySearchCursor? = cursor(45)
+        while let from = next {
+            let page = try XCTUnwrap(try reader.searchHistorySync(forChat: Self.alex, matching: "message", before: from, scanLimit: 7))
+            seen += page.matches.map(\.id)
+            next = page.next
+        }
+        XCTAssertEqual(seen, (1...40).reversed().filter { ![3, 5, 7, 9, 20, 30].contains($0) }.map(String.init),
+                       "every part in order, none repeated or skipped")
+    }
 }
+

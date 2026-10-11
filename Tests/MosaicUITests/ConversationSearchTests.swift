@@ -33,13 +33,19 @@ final class ConversationSearchTests: XCTestCase {
         CREATE TABLE message (guid TEXT, text TEXT, attributedBody BLOB, date INTEGER, is_from_me INTEGER, handle_id INTEGER,
           is_delivered INTEGER DEFAULT 0, is_read INTEGER DEFAULT 0, error INTEGER DEFAULT 0, cache_has_attachments INTEGER DEFAULT 0,
           associated_message_type INTEGER DEFAULT 0, associated_message_guid TEXT, item_type INTEGER DEFAULT 0);
+        CREATE TABLE attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT, is_sticker INTEGER DEFAULT 0,
+          hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        INSERT INTO attachment VALUES ('OLD', '~/Library/Messages/Attachments/z/old.pdf', 'application/pdf', 'com.adobe.pdf', 'old.pdf', 0, 0, 100);
+        INSERT INTO message_attachment_join VALUES (8, 1);
         INSERT INTO handle VALUES ('alex@example.test');
         INSERT INTO chat VALUES ('\(Self.alex)', '', 'alex@example.test', 'iMessage');
         INSERT INTO chat_handle_join VALUES (1,1);
         BEGIN;
         """
         for n in 1...300 {
-            let text = n == 10 || n == 150 ? "the lighthouse at dusk" : n == 5 ? "a rare word" : n == 290 ? "near the lighthouse" : "note \(n)"
+            let text = n == 10 || n == 150 ? "the lighthouse at dusk" : n == 5 ? "a rare word" : n == 290 ? "near the lighthouse"
+                : n == 7 ? "old link https://example.com/old" : n == 295 ? "new link https://example.com/new" : "note \(n)"
             sql += "INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('G\(n)', '\(text)', \(690_000_000_000_000_000 + Int64(n) * 1_000_000_000), \(n % 2), 1);"
             sql += "INSERT INTO chat_message_join VALUES (1, \(n));"
         }
@@ -119,4 +125,77 @@ final class ConversationSearchTests: XCTestCase {
         store.close(Self.alex)
         XCTAssertNil(store.historySearches[Self.alex])
     }
+
+    /// The older history is searched part after part by itself, back to the first message, with
+    /// nothing to press.
+    @MainActor func testTheOlderHistoryIsSearchedToTheStartByItself() async throws {
+        let store = try await liveStore()
+        store.historyPageSize = 50
+        store.searchOlderHistory(Self.alex, query: "lighthouse")
+        try await waitForSearch(store)
+        let search = try XCTUnwrap(store.historySearches[Self.alex])
+        XCTAssertEqual(search.matches.map(\.id), ["150", "10"], "found across four parts")
+        XCTAssertNil(search.next, "back to the first message")
+        XCTAssertEqual(search.scanned, 200)
+        XCTAssertFalse(search.isSearching)
+    }
+
+    /// A search pauses at its bounds (very many matches, or a very long history) until asked to go on.
+    @MainActor func testASearchPausesAtItsBoundsUntilAskedToGoOn() async throws {
+        let store = try await liveStore()
+        store.historyPageSize = 50
+        store.historyMatchLimit = 1
+        store.searchOlderHistory(Self.alex, query: "lighthouse")
+        try await waitForSearch(store)
+        var search = try XCTUnwrap(store.historySearches[Self.alex])
+        XCTAssertEqual(search.matches.map(\.id), ["150"])
+        XCTAssertNotNil(search.next, "paused, not finished")
+        store.continueOlderSearch(Self.alex)
+        try await waitForSearch(store)
+        search = try XCTUnwrap(store.historySearches[Self.alex])
+        XCTAssertEqual(search.matches.map(\.id), ["150", "10"])
+    }
+
+    /// The details gather files and links from the whole history, not only the loaded messages,
+    /// each once.
+    @MainActor func testDetailsReachTheWholeHistory() async throws {
+        let store = try await liveStore()
+        let loaded = try XCTUnwrap(store.conversations.first).messages
+        XCTAssertEqual(SharedContent(messages: loaded).links.map(\.url.absoluteString), ["https://example.com/new"], "only the loaded one")
+        let history = try XCTUnwrap(await store.sharedHistory(Self.alex))
+        let content = SharedContent(messages: loaded, history: history)
+        XCTAssertEqual(content.links.map(\.url.absoluteString), ["https://example.com/new", "https://example.com/old"], "newest first, each once")
+        XCTAssertEqual(content.files.map(\.attachment.name), ["old.pdf"])
+        XCTAssertEqual(content.files.first?.messageID, "8")
+        let again = try XCTUnwrap(await store.sharedHistory(Self.alex))
+        XCTAssertEqual(again, history, "read once per session")
+    }
+
+    /// Typing in the find bar never redraws the thread: the loaded matches are worked out once
+    /// per query, and only the matching bubbles are given the words.
+    @MainActor func testFindWorkIsDoneOncePerQuery() throws {
+        let messages = (1...300).map { Message(id: "\($0)", text: $0 % 50 == 0 ? "lighthouse \($0)" : "note \($0)", date: Date(), isFromMe: false) }
+        let index = FindIndex()
+        XCTAssertEqual(index.matches("lighthouse", in: messages), ["50", "100", "150", "200", "250", "300"])
+        XCTAssertEqual(index.matches("lighthouse", in: messages), ["50", "100", "150", "200", "250", "300"], "the same answer, from the last time")
+        XCTAssertEqual(index.matches("light", in: messages).count, 6)
+        XCTAssertEqual(index.rowIDs(of: messages).count, 300)
+
+        let presentation = ThreadPresentation()
+        _ = presentation.prepared(for: Conversation(id: "c", name: "Alex", participants: ["alex@example.test"], messages: messages))
+        XCTAssertEqual(presentation.findMatches("lighthouse"), ["50", "100", "150", "200", "250", "300"])
+        XCTAssertEqual(presentation.findMatches(""), [])
+
+        // Bubbles compare by what they show, not by their closures.
+        let message = messages[49]
+        let a = MessageBubble(message: message, group: false, senderName: nil, live: true, service: "iMessage", findQuery: "lighthouse")
+        var b = MessageBubble(message: message, group: false, senderName: nil, live: true, service: "iMessage", findQuery: "lighthouse",
+                              actorName: { _ in "Other" })
+        XCTAssertTrue(a == b)
+        b.findQuery = "light"
+        XCTAssertFalse(a == b, "new words redraw a matching bubble")
+        b.findQuery = "lighthouse"; b.nameContext = 1
+        XCTAssertFalse(a == b, "so do changed names")
+    }
 }
+

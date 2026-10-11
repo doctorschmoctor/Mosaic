@@ -13,13 +13,14 @@ struct ConversationTile: View {
     @State private var composerHeight = ComposerEditor.minimumHeight
     @Environment(\.zoomScale) private var zoom
     @State private var closeHovered = false
-    /// Find in Conversation (⌥⌘F): whether the bar is open, what it looks for (as typed, and as
-    /// the thread highlights it a moment later), and the match shown.
+    /// Find in Conversation (⌥⌘F): whether the bar is open, what it looks for (a moment after
+    /// typing stops — the typing itself stays in the bar), and the match shown.
     @State private var finding = false
-    @State private var findText = ""
     @State private var findQuery = ""
     @State private var findCurrent: String?
     @State private var findFocusToken = 0
+    /// The loaded messages' matches, worked out once per query and history (not per render).
+    @State private var findIndex = FindIndex()
     /// The details panel (⌘I) in place of the thread, and a message just shown from it.
     @State private var showingDetails = false
     @State private var revealedID: String?
@@ -30,21 +31,18 @@ struct ConversationTile: View {
             header
             Divider().opacity(0.6)
             if finding && !conversation.isComposeDraft {
-                let matches = FindInConversation.matches(findQuery, in: conversation.messages)
-                FindBar(text: $findText, matchCount: matches.count,
-                        position: findCurrent.flatMap { current in matches.firstIndex(of: current).map { matches.count - $0 } },
-                        searching: !findQuery.isEmpty,
-                        onOlder: { step(older: true, in: matches) }, onNewer: { step(older: false, in: matches) }, onClose: endFind,
+                let matches = findMatches
+                FindBar(matchCount: matches.count,
+                        position: findCurrent.flatMap { matches.firstIndex(of: $0).map { $0 + 1 } },
+                        searching: !findWords.isEmpty, searchingOlder: isSearchingOlder,
+                        onQuery: { setFindQuery($0) },
+                        onOlder: { step(older: true) }, onNewer: { step(older: false) }, onClose: endFind,
                         focusToken: findFocusToken)
-                // Beyond what is loaded: a search of the older history, part by part, on request.
-                if store.isLive, !findQuery.isEmpty {
-                    OlderHistorySearchView(conversationID: conversation.id, query: findQuery,
-                                           senderName: { handle in handle.map { senderNames[$0] ?? (conversation.isGroup ? Recipient.display($0) : conversation.name) } ?? conversation.name }) { messageID in
-                        findCurrent = messageID
-                        // Loaded already: the match is shown where it is; else the messages around it.
-                        if conversation.messages.contains(where: { $0.id == messageID }) { store.leaveContext(conversation.id) }
-                        else { Task { await store.showInContext(conversation.id, messageID: messageID) } }
-                    }
+                // Beyond what is loaded: the older history, searched by itself as the words settle.
+                if store.isLive, findWords.count >= WorkspaceStore.historySearchMinimumLength {
+                    OlderHistorySearchView(conversationID: conversation.id, query: findWords,
+                                           senderName: { handle in handle.map { senderNames[$0] ?? (conversation.isGroup ? Recipient.display($0) : conversation.name) } ?? conversation.name },
+                                           onChoose: { show($0) })
                 }
                 Divider().opacity(0.6)
             }
@@ -122,22 +120,22 @@ struct ConversationTile: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .findNextInConversation)) { note in
             guard finding, let info = note.object as? FindStep, info.conversationID == conversation.id else { return }
-            step(older: info.older, in: FindInConversation.matches(findQuery, in: conversation.messages))
+            step(older: info.older)
         }
-        // The highlight follows the typing a moment later, so a long thread is not redrawn per key.
-        .task(id: findText) {
-            guard finding else { return }
-            if !findText.isEmpty { try? await Task.sleep(for: .milliseconds(150)) }
+        // The older history is searched by itself once the words have settled a moment longer
+        // (a new word supersedes it; closing the bar stops it).
+        .task(id: finding ? findWords : nil) {
+            guard finding, store.isLive, !conversation.isComposeDraft else { return }
+            guard findWords.count >= WorkspaceStore.historySearchMinimumLength else { store.cancelOlderSearch(conversation.id); return }
+            try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            findQuery = findText
-            // The newest match first.
-            findCurrent = FindInConversation.matches(findText, in: conversation.messages).last
+            store.searchOlderHistory(conversation.id, query: findWords)
         }
-        // A message edited or unsent away from the query: the current match moves to one that still matches.
+        // A loaded message edited or unsent away from the query: the current match moves to one that still matches.
         .onChange(of: conversation.messages) { _, messages in
-            guard finding, let current = findCurrent else { return }
-            let matches = FindInConversation.matches(findQuery, in: messages)
-            if !matches.contains(current) { findCurrent = matches.last }
+            guard finding, let current = findCurrent, messages.contains(where: { $0.presentationID == current }) else { return }
+            let loaded = findIndex.matches(findQuery, in: messages)
+            if !loaded.contains(current) { findCurrent = loaded.last }
         }
         .onDrop(of: [UTType.text], isTargeted: $isDropTarget) { providers in
             guard let provider = providers.first else { return false }
@@ -153,11 +151,47 @@ struct ConversationTile: View {
         }
     }
 
-    /// Moves to the next older (or newer) match, wrapping around.
-    private func step(older: Bool, in matches: [String]) {
-        guard !matches.isEmpty else { return }
-        guard let current = findCurrent, let index = matches.firstIndex(of: current) else { findCurrent = matches.last; return }
-        findCurrent = matches[(index + (older ? matches.count - 1 : 1)) % matches.count]
+    /// The find bar's words, trimmed.
+    private var findWords: String { findQuery.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// Every match, newest first: the loaded messages', then the older history's as its search
+    /// finds them (a message that has since been loaded counts once).
+    private var findMatches: [String] {
+        let loaded = findIndex.matches(findQuery, in: conversation.messages)
+        guard let search = store.historySearches[conversation.id], search.query == findWords, !search.matches.isEmpty else { return loaded.reversed() }
+        let loadedRows = findIndex.rowIDs(of: conversation.messages)
+        return loaded.reversed() + search.matches.map(\.id).filter { !loadedRows.contains($0) }
+    }
+    private var isSearchingOlder: Bool {
+        store.historySearches[conversation.id].map { $0.query == findWords && $0.isSearching } ?? false
+    }
+    /// New words from the find bar: the thread marks them, the newest loaded match is shown, and
+    /// a window into older history from the last words closes.
+    private func setFindQuery(_ query: String) {
+        guard query != findQuery else { return }
+        findQuery = query
+        findCurrent = findIndex.matches(query, in: conversation.messages).last
+        store.leaveContext(conversation.id)
+    }
+    /// Moves to the next older (or newer) match — from the loaded messages on into the older
+    /// history — wrapping around once the whole history has been searched.
+    private func step(older: Bool) {
+        let matches = findMatches
+        guard !matches.isEmpty else { NSSound.beep(); return }
+        guard let current = findCurrent, let index = matches.firstIndex(of: current) else { show(matches[0]); return }
+        var next = index + (older ? 1 : -1)
+        if next >= matches.count {
+            // More may still be found further back.
+            if isSearchingOlder { NSSound.beep(); return }
+            next = 0
+        }
+        if next < 0 { next = matches.count - 1 }
+        show(matches[next])
+    }
+    /// Shows a match: where it is among the loaded messages, or else the messages around it.
+    private func show(_ id: String) {
+        findCurrent = id
+        if conversation.messages.contains(where: { $0.presentationID == id || $0.id == id }) { store.leaveContext(conversation.id) }
+        else { Task { await store.showInContext(conversation.id, messageID: id) } }
     }
     /// Whether there is history before the loaded messages (more to scroll back to, or past the ceiling).
     private var hasOlderHistory: Bool {
@@ -166,6 +200,11 @@ struct ConversationTile: View {
     /// Closes the details and shows a message where it was sent, outlined for a moment.
     private func reveal(_ id: String) {
         showingDetails = false
+        // From further back than the tile has loaded: the messages around it.
+        guard conversation.messages.contains(where: { $0.id == id || $0.presentationID == id }) else {
+            Task { await store.showInContext(conversation.id, messageID: id) }
+            return
+        }
         store.leaveContext(conversation.id)
         revealedID = id
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { if revealedID == id { revealedID = nil } }
@@ -186,7 +225,7 @@ struct ConversationTile: View {
     }
     /// Closes the find bar; the keyboard goes back to this tile's message field.
     private func endFind() {
-        finding = false; findText = ""; findQuery = ""; findCurrent = nil
+        finding = false; findQuery = ""; findCurrent = nil
         store.findClosed(conversation.id)
         store.cancelOlderSearch(conversation.id)
         store.leaveContext(conversation.id)
@@ -208,11 +247,6 @@ struct ConversationTile: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(conversation.name).font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                    if store.needsReply(conversation.id) {
-                        Image(systemName: "flag.fill").font(.system(size: 9)).foregroundStyle(Palette.needsReply)
-                            .help("Needs Reply — clear it from this header's menu or the sidebar")
-                            .accessibilityLabel("Needs reply")
-                    }
                     if store.isProtected(conversation.id) {
                         Image(systemName: "lock.fill").font(.system(size: 9)).foregroundStyle(.secondary)
                             .help("Protected: never replaced to make room for another conversation")
@@ -262,8 +296,6 @@ struct ConversationTile: View {
         return items + [
             // Keeps this tile open when another conversation needs room (unlike a sidebar pin, which only orders the list).
             .init(title: protected ? "Allow Replacement" : "Protect from Replacement", action: { [store] in store.toggleProtection(id) }),
-            .init(title: store.needsReply(id) ? "Clear Needs Reply" : "Mark as Needs Reply",
-                  isEnabled: { [store] in store.conversations.contains { $0.id == id } }) { [store] in store.toggleNeedsReply(id) },
             .init(title: conversation.isComposeDraft ? "Discard New Message" : "Discard Draft",
                   isEnabled: { [store] in store.composeDrafts[id] != nil || store.hasDraft(id) }) { [store] in store.discardDraft(id) },
             .init(title: "Close Tile", action: { [store] in store.close(id) }, separatedAbove: true),
@@ -414,6 +446,11 @@ struct MessageList: View, Equatable {
     var body: some View {
         let prepared = presentation.prepared(for: conversation)
         let rows = prepared.rows
+        // Only the matching bubbles are given the find bar's words: a new query redraws those
+        // alone, never the whole thread.
+        let findMatches = presentation.findMatches(findQuery)
+        // What the bubbles' names come from, so a bubble that skips redrawing still shows names that changed.
+        let nameContext = senderNames.hashValue ^ conversation.name.hashValue ^ (conversation.isGroup ? 1 : 0)
         let content = ThreadContent(first: rows.first?.id, last: rows.last?.id, count: rows.count)
         let ids = prepared.ids
         let reactions = prepared.reactions
@@ -460,9 +497,13 @@ struct MessageList: View, Equatable {
                                       reactions: row.message.guid.flatMap { reactions[$0] } ?? [],
                                       reply: replyContext(for: row.message, in: byGUID),
                                       highlighted: highlightedID == row.id || findCurrent == row.id,
-                                      findQuery: findQuery,
+                                      findQuery: findMatches.contains(row.id) ? findQuery : "",
+                                      nameContext: nameContext,
                                       actorName: { name(of: $0) }, replyAuthor: { author(of: $0) },
                                       onShowOriginal: { original in jump(to: original.presentationID, proxy: proxy) })
+                            // A bubble whose own values are unchanged is not redrawn (its closures
+                            // are left out of the comparison: what they read is in `nameContext`).
+                            .equatable()
                     }
                     .id(row.id)
                     // Messages in a run from the same person sit close together; a new run gets the full gap.
@@ -629,6 +670,19 @@ struct MessageRow: Identifiable, Equatable {
     private var cached: Prepared?
     /// How many times the rows were built (tests).
     private(set) var buildCount = 0
+    private var findQuery = ""
+    private var findBuild = -1
+    private var findSet: Set<String> = []
+
+    /// The rows whose text has the find bar's words, worked out once per query and build.
+    func findMatches(_ query: String) -> Set<String> {
+        guard !query.isEmpty, let cached else { return [] }
+        if query == findQuery, findBuild == buildCount { return findSet }
+        findQuery = query
+        findBuild = buildCount
+        findSet = Set(FindInConversation.matches(query, in: cached.rows.map(\.message)))
+        return findSet
+    }
 
     func prepared(for conversation: Conversation) -> Prepared {
         let clock = MessageText.currentEnvironment()
@@ -717,7 +771,7 @@ enum MessageText {
     }
 }
 
-struct MessageBubble: View {
+struct MessageBubble: View, Equatable {
     @Environment(WorkspaceStore.self) private var store
     @Environment(\.zoomScale) private var zoom
     let message: Message
@@ -739,9 +793,29 @@ struct MessageBubble: View {
     var highlighted = false
     /// Words to mark in the text (Find in Conversation).
     var findQuery = ""
+    /// Changes when the names the closures below give change (a contact was named, a group renamed).
+    var nameContext = 0
     var actorName: (ReactionActor) -> String = { _ in "Someone" }
     var replyAuthor: (Message) -> String = { _ in "" }
     var onShowOriginal: (Message) -> Void = { _ in }
+
+    init(message: Message, threadID: String = "", group: Bool, senderName: String?, live: Bool, service: String,
+         showsStatus: Bool = true, showsTime: Bool = true, authorName: String = "", reactions: [ReactionSummary] = [],
+         reply: ReplyContext? = nil, highlighted: Bool = false, findQuery: String = "", nameContext: Int = 0,
+         actorName: @escaping (ReactionActor) -> String = { _ in "Someone" }, replyAuthor: @escaping (Message) -> String = { _ in "" },
+         onShowOriginal: @escaping (Message) -> Void = { _ in }) {
+        self.message = message; self.threadID = threadID; self.group = group; self.senderName = senderName; self.live = live
+        self.service = service; self.showsStatus = showsStatus; self.showsTime = showsTime; self.authorName = authorName
+        self.reactions = reactions; self.reply = reply; self.highlighted = highlighted; self.findQuery = findQuery
+        self.nameContext = nameContext; self.actorName = actorName; self.replyAuthor = replyAuthor; self.onShowOriginal = onShowOriginal
+    }
+
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message == rhs.message && lhs.threadID == rhs.threadID && lhs.group == rhs.group && lhs.senderName == rhs.senderName
+            && lhs.live == rhs.live && lhs.service == rhs.service && lhs.showsStatus == rhs.showsStatus && lhs.showsTime == rhs.showsTime
+            && lhs.authorName == rhs.authorName && lhs.reactions == rhs.reactions && lhs.reply == rhs.reply
+            && lhs.highlighted == rhs.highlighted && lhs.findQuery == rhs.findQuery && lhs.nameContext == rhs.nameContext
+    }
 
     var body: some View {
         if message.isUnsent {
@@ -867,6 +941,30 @@ struct MessageBubble: View {
     }
 }
 
+/// The loaded messages' matches for the find bar, worked out once for each query and history and
+/// reused by every render that asks (the bar's count, stepping, the thread's marks).
+@MainActor final class FindIndex {
+    private var query = ""
+    private var messages: [Message] = []
+    private var result: [String] = []
+    private var rowsFor: [Message] = []
+    private var rows: Set<String> = []
+    /// The matches' presentation ids, oldest first.
+    func matches(_ query: String, in messages: [Message]) -> [String] {
+        // Comparing arrays that share their storage (an unchanged history) costs nothing.
+        if query == self.query, messages == self.messages { return result }
+        self.query = query
+        self.messages = messages
+        result = FindInConversation.matches(query, in: messages)
+        return result
+    }
+    /// The database rows of the loaded messages, to leave out older matches that are loaded now.
+    func rowIDs(of messages: [Message]) -> Set<String> {
+        if messages != rowsFor { rowsFor = messages; rows = Set(messages.map(\.id)) }
+        return rows
+    }
+}
+
 /// Matching for Find in Conversation: the loaded messages whose text contains the words, ignoring
 /// case and accents. Unsent messages have no words to match, and activity lines are not messages.
 enum FindInConversation {
@@ -893,27 +991,31 @@ extension Notification.Name {
     static let findNextInConversation = Notification.Name("Mosaic.findNextInConversation")
 }
 
-/// A tile's find bar: the words to look for in its loaded messages, how many match and which one
-/// is shown, and buttons to the older and newer match. Return (or ↑) goes to the older match,
-/// Shift–Return (or ↓) to the newer one, and Esc closes the bar. It searches the messages
-/// loaded in the tile — the scope the placeholder names.
+/// A tile's find bar: the words to look for, how many messages match and which one is shown, and
+/// buttons to the older and newer match. Return (or ↑) goes to the older match, Shift–Return (or
+/// ↓) to the newer one, and Esc closes the bar. What is typed stays in the bar's own state, so a
+/// keystroke redraws the bar alone; the words go to the tile (`onQuery`) a moment after typing
+/// stops.
 struct FindBar: View {
-    @Binding var text: String
     let matchCount: Int
     /// Which match is shown, counted from the newest (1).
     let position: Int?
     /// Whether there are words to look for (so "No matches" can be said).
     let searching: Bool
+    /// The older history is still being searched (more matches may come).
+    var searchingOlder = false
+    let onQuery: (String) -> Void
     let onOlder: () -> Void
     let onNewer: () -> Void
     let onClose: () -> Void
     /// Changes when ⌥⌘F asks for the field again while the bar is open.
     var focusToken = 0
+    @State private var text = ""
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
-            RecipientTextField(text: $text, takesFocus: true, placeholder: "Find in loaded messages", focusToken: focusToken) { command in
+            RecipientTextField(text: $text, takesFocus: true, placeholder: "Find in conversation", focusToken: focusToken) { command in
                 switch command {
                 case .submit:
                     if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { onNewer() } else { onOlder() }
@@ -925,7 +1027,7 @@ struct FindBar: View {
                 }
             }
             .frame(height: 22)
-            .accessibilityLabel("Find in loaded messages")
+            .accessibilityLabel("Find in conversation")
             Text(status).font(.system(size: 11)).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).fixedSize()
                 .accessibilityLabel(status)
             Button(action: onOlder) { Image(systemName: "chevron.up") }.buttonStyle(.borderless)
@@ -936,12 +1038,19 @@ struct FindBar: View {
         }
         .padding(.horizontal, 12).padding(.vertical, 5)
         .background(Color.primary.opacity(0.035))
+        // The thread marks the words a moment after typing stops, so a keystroke never redraws it.
+        .task(id: text) {
+            if !text.isEmpty { try? await Task.sleep(for: .milliseconds(150)) }
+            guard !Task.isCancelled else { return }
+            onQuery(text)
+        }
     }
 
     private var status: String {
-        guard searching else { return "Loaded messages" }
-        guard matchCount > 0 else { return "No matches" }
-        return position.map { "\($0) of \(matchCount)" } ?? "\(matchCount) found"
+        guard searching else { return "" }
+        guard matchCount > 0 else { return searchingOlder ? "Searching…" : "No matches" }
+        let count = searchingOlder ? "\(matchCount)+" : "\(matchCount)"
+        return position.map { "\($0) of \(count)" } ?? "\(count) found"
     }
 }
 
@@ -963,10 +1072,10 @@ struct ContextBanner: View {
     }
 }
 
-/// Searching a tile's history older than what it has loaded, for the find bar's words: a button
-/// to start, the matches as they are found (date, who, the line), and a way to go further. Each
-/// part reads a bounded number of older messages; their words — plain and rich text — are
-/// matched on this Mac, and nothing is indexed or kept.
+/// The find bar's matches in the history older than what the tile has loaded, listed as the
+/// search finds them (date, who, the line). The search starts by itself when the words settle and
+/// goes back part by part on a connection of its own, so loading is never held up; their words —
+/// plain and rich text — are matched on this Mac, and nothing is indexed or kept.
 struct OlderHistorySearchView: View {
     @Environment(WorkspaceStore.self) private var store
     let conversationID: String
@@ -989,24 +1098,19 @@ struct OlderHistorySearchView: View {
                 HStack(spacing: 6) {
                     if search.isSearching {
                         ProgressView().controlSize(.small)
-                        Text("Searching older messages…")
+                        Text(search.matches.isEmpty ? "Searching older messages…" : "\(summary(search)) · searching…").lineLimit(1)
                         Spacer(minLength: 4)
-                        Button("Stop") { store.cancelOlderSearch(conversationID) }.buttonStyle(.borderless)
                     } else {
                         Text(summary(search)).lineLimit(1)
                         Spacer(minLength: 4)
+                        // Stopped at its bounds (very many matches, or a very long history): on request only.
                         if search.next != nil {
                             Button("Search Further") { store.continueOlderSearch(conversationID) }.buttonStyle(.borderless)
-                                .help("Look through the next \(WorkspaceStore.searchScanLimit) older messages")
+                                .help("Look further back in this conversation")
                         }
                     }
                 }
-            } else {
-                Button { store.searchOlderHistory(conversationID, query: query) } label: {
-                    Label("Search older messages for “\(query)”", systemImage: "clock.arrow.circlepath")
-                }
-                .buttonStyle(.borderless)
-                .help("Looks through this conversation's older messages on this Mac, \(WorkspaceStore.searchScanLimit) at a time: their words, plain or rich text — not attachments or earlier versions of edited messages")
+                .help("Older messages on this Mac are searched by their words, plain or rich text — not attachments or earlier versions of edited messages")
             }
         }
         .font(.system(size: 11))
@@ -1016,8 +1120,9 @@ struct OlderHistorySearchView: View {
 
     private func summary(_ search: HistorySearch) -> String {
         if search.failed { return "Couldn't search older messages right now." }
-        let found = search.matches.isEmpty ? "No older matches" : search.matches.count == 1 ? "1 older match" : "\(search.matches.count) older matches"
-        let scope = search.next == nil ? "searched back to the first message" : "in the \(search.scanned) messages before these"
+        let found = search.matches.isEmpty ? "No older matches" : search.matches.count == 1 ? "1 older match" : "\(search.matches.count.formatted()) older matches"
+        if search.isSearching { return found }
+        let scope = search.next == nil ? "searched back to the first message" : "in the \(search.scanned.formatted()) messages before these"
         return "\(found) · \(scope)"
     }
 

@@ -2,8 +2,7 @@ import XCTest
 import MosaicCore
 @testable import Mosaic
 
-/// What needs attention: the Unread, Needs Reply and Drafts filters with their counts, Needs Reply
-/// as the reader's own reminder (reading leaves it), Go to Next Unread, unread and draft marks on
+/// What needs attention: the Unread and Drafts filters with their counts, Go to Next Unread, unread and draft marks on
 /// Focus chips, and a thread counted as read only once the reader can see it.
 final class AttentionTests: XCTestCase {
     private func defaults() -> UserDefaults {
@@ -18,7 +17,7 @@ final class AttentionTests: XCTestCase {
     @MainActor func testFiltersListWhatNeedsAttentionWithCounts() throws {
         let store = WorkspaceStore(defaults: defaults(), forceDemo: true)
         let alex = try id("Alex Morgan", in: store), crew = try id("Weekend crew", in: store)
-        let sam = try id("Sam Rivera", in: store), mom = try id("Mom", in: store)
+        let sam = try id("Sam Rivera", in: store)
         XCTAssertEqual(store.count(for: .unread), 3)
         store.sidebarFilter = .unread
         XCTAssertEqual(store.filteredConversations.map(\.id), [alex, crew, sam])
@@ -26,39 +25,20 @@ final class AttentionTests: XCTestCase {
         XCTAssertEqual(store.count(for: .unread), 2, "reading one leaves the others' counts")
         XCTAssertEqual(store.filteredConversations.map(\.id), [alex, sam])
 
-        XCTAssertEqual(store.count(for: .needsReply), 0)
-        store.toggleNeedsReply(mom)
-        XCTAssertTrue(store.needsReply(mom))
-        store.sidebarFilter = .needsReply
-        XCTAssertEqual(store.filteredConversations.map(\.id), [mom])
-        store.markSeen(mom)
-        store.open(mom); store.focus(mom)
-        XCTAssertTrue(store.needsReply(mom), "reading or opening keeps the reminder")
-        store.toggleNeedsReply(mom)
-        XCTAssertFalse(store.needsReply(mom), "only clearing it does")
-        XCTAssertEqual(store.count(for: .needsReply), 0)
-
         store.workspace.drafts[alex] = "Draft"
         store.updateDraftSummaries()
         XCTAssertEqual(store.count(for: .drafts), 1)
         XCTAssertEqual(store.count(for: .all), 0, "All carries no count")
         // A hidden conversation counts nowhere.
-        store.toggleNeedsReply(sam)
         store.hide(sam)
         XCTAssertEqual(store.count(for: .unread), 1)
-        XCTAssertEqual(store.count(for: .needsReply), 0)
     }
 
-    @MainActor func testNeedsReplyIsKeptAcrossARelaunch() throws {
-        let suite = defaults()
-        suite.set(false, forKey: "Mosaic.live")
-        let store = WorkspaceStore(defaults: suite)
-        let jamie = try id("Jamie Chen", in: store)
-        store.toggleNeedsReply(jamie)
-        store.persistNow()
-        XCTAssertEqual(WorkspaceStore(defaults: suite).needsReplyIDs, [jamie])
-        let json = #"{"openIDs":["a"]}"#
-        XCTAssertEqual(try JSONDecoder().decode(Workspace.self, from: Data(json.utf8)).needsReplyIDs, [], "older workspaces decode")
+    /// Workspaces saved by the version that had Needs Reply flags still open.
+    func testWorkspacesWithTheOldNeedsReplyFlagsStillDecode() throws {
+        let json = #"{"openIDs":["a"],"needsReplyIDs":["a"]}"#
+        XCTAssertEqual(try JSONDecoder().decode(Workspace.self, from: Data(json.utf8)).openIDs, ["a"])
+        XCTAssertEqual(SidebarFilter.allCases, [.all, .unread, .drafts])
     }
 
     @MainActor func testGoToNextUnreadWalksThroughWhatIsUnread() throws {

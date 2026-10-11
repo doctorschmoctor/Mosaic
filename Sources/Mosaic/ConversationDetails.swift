@@ -4,10 +4,10 @@ import AppKit
 import MosaicCore
 #endif
 
-/// What a conversation has shared, gathered from the messages a tile has loaded: its people (with
-/// the addresses Messages routes to), photos and videos, files and links, newest first. Built from
-/// the loaded messages only, so it follows edits, unsends and deletions as they arrive and never
-/// reads more history; the panel says so.
+/// What a conversation has shared — photos and videos, files and links, newest first — from the
+/// messages the tile has loaded (so it follows edits, unsends and deletions as they arrive) and,
+/// in the installed app, from its whole history (`SharedHistory`, read on the background
+/// connection), each item once.
 struct SharedContent: Equatable {
     struct Item: Identifiable, Equatable {
         let messageID: String
@@ -25,19 +25,32 @@ struct SharedContent: Equatable {
     var files: [Item] = []
     var links: [Link] = []
 
-    init(messages: [Message]) {
-        for message in messages.reversed() where !message.isUnsent && message.sendState == nil {
-            for attachment in message.attachments where !attachment.isSticker {
-                let item = Item(messageID: message.id, attachment: attachment, date: message.date)
-                switch attachment.kind {
-                case .image, .video: media.append(item)
-                case .audio, .file: files.append(item)
-                }
-            }
-            for match in LinkDetector.links(in: message.text) where !links.contains(where: { $0.url == match.url }) {
-                links.append(Link(messageID: message.id, url: match.url, date: message.date))
+    init(messages: [Message], history: SharedHistory? = nil) {
+        var seenItems = Set<String>(), seenLinks = Set<String>()
+        func add(_ item: Item) {
+            guard seenItems.insert(item.id).inserted else { return }
+            switch item.attachment.kind {
+            case .image, .video: media.append(item)
+            case .audio, .file: files.append(item)
             }
         }
+        func add(_ link: Link) { if seenLinks.insert(link.id).inserted { links.append(link) } }
+        for message in messages.reversed() where !message.isUnsent && message.sendState == nil {
+            for attachment in message.attachments where !attachment.isSticker {
+                add(Item(messageID: message.id, attachment: attachment, date: message.date))
+            }
+            for match in LinkDetector.links(in: message.text) { add(Link(messageID: message.id, url: match.url, date: message.date)) }
+        }
+        guard let history else { return }
+        // The whole history's, after the loaded ones; a loaded message's items are already in.
+        for file in history.files where !file.attachment.isSticker {
+            add(Item(messageID: file.messageID, attachment: file.attachment, date: file.date))
+        }
+        for link in history.links { add(Link(messageID: link.messageID, url: link.url, date: link.date)) }
+        // Newest first across both.
+        media.sort { $0.date > $1.date }
+        files.sort { $0.date > $1.date }
+        links.sort { $0.date > $1.date }
     }
     /// The files that are on this Mac, for Quick Look's next and previous.
     var localMedia: [URL] { media.compactMap { $0.attachment.path.map(URL.init(fileURLWithPath:)) } }
@@ -60,6 +73,9 @@ struct ConversationDetailsPanel: View {
     let onShowMessage: (String) -> Void
     let onClose: () -> Void
     @State private var section: Section = .people
+    /// The whole history's files and links, once read (nil until then, and in the demo workspace).
+    @State private var history: SharedHistory?
+    @State private var readingHistory = false
 
     enum Section: String, CaseIterable, Identifiable {
         case people, media, files, links
@@ -75,7 +91,7 @@ struct ConversationDetailsPanel: View {
     }
 
     var body: some View {
-        let content = SharedContent(messages: conversation.messages)
+        let content = SharedContent(messages: conversation.messages, history: history)
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Picker("Details", selection: $section) {
@@ -100,8 +116,18 @@ struct ConversationDetailsPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             Divider().opacity(0.6)
-            Text(scope).font(.system(size: 10)).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.vertical, 6)
+            HStack(spacing: 6) {
+                if readingHistory { ProgressView().controlSize(.mini) }
+                Text(scope).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.vertical, 6)
+        }
+        // The whole history is read once the panel is open, on the background connection.
+        .task(id: conversation.id) {
+            guard store.isLive, history == nil else { return }
+            readingHistory = true
+            history = await store.sharedHistory(conversation.id)
+            readingHistory = false
         }
     }
 
@@ -114,9 +140,18 @@ struct ConversationDetailsPanel: View {
         }
     }
     private var scope: String {
+        if readingHistory { return "Looking through the whole conversation…" }
+        if let history {
+            var notes: [String] = []
+            if !history.filesComplete { notes.append("the newest 1,000 files") }
+            if !history.linksComplete { notes.append("the newest 1,000 links") }
+            let base = notes.isEmpty ? "From the whole conversation" : "From the whole conversation · " + notes.joined(separator: " and ")
+            // Links are found where a message mentions "http" or "www.".
+            return base + (section == .links ? " · links written with http or www" : "")
+        }
         let loaded = conversation.messages.filter { $0.sendState == nil }.count
         let base = "From the \(loaded) loaded message\(loaded == 1 ? "" : "s")"
-        return hasOlderHistory ? base + " · older ones aren't included (Find › Search older messages looks further)" : base
+        return hasOlderHistory ? base + " · older ones aren't included" : base
     }
 
     private var people: some View {

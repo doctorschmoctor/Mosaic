@@ -70,7 +70,7 @@ struct PrivacySettings: View {
             Section("On this Mac") {
                 Text("Drafts — unsent text, New Message recipients and the files waiting in composers — are kept in Mosaic's preferences. Pictures you paste or pick wait in ~/Library/Application Support/Mosaic/Outgoing until they are sent or discarded. Message history, pictures and previews are kept in memory only.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("Unread, Needs Reply, pins and hidden conversations are Mosaic's own: nothing is marked read or changed in Messages, and no read receipt is sent.")
+                Text("Unread, pins and hidden conversations are Mosaic's own: nothing is marked read or changed in Messages, and no read receipt is sent.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("Adding a photo that is only in iCloud makes Photos download the original.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

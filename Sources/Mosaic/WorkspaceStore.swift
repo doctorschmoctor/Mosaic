@@ -47,8 +47,6 @@ import MosaicCore
     var pinnedIDs: [String] = [] { didSet { if pinnedIDs != oldValue { persist() } } }
     /// Open tiles never replaced to make room for another conversation.
     var protectedIDs: Set<String> = [] { didSet { if protectedIDs != oldValue { persist() } } }
-    /// Conversations marked Needs Reply (a reminder the reader sets and clears; not unread state).
-    var needsReplyIDs: Set<String> = [] { didSet { if needsReplyIDs != oldValue { persist() } } }
     /// Every open tile is protected and another conversation needs one: the reader chooses which closes.
     private(set) var replacementChoice: ReplacementChoice?
     /// Whether link previews are fetched (Settings › Privacy & Data): automatically, on a click, or never.
@@ -90,7 +88,7 @@ import MosaicCore
     private(set) var draftSummaries: [String: DraftSummary] = [:]
     /// What the sidebar lists: every conversation, or only the drafts.
     var sidebarFilter: SidebarFilter = .all
-    /// Shows one of the sidebar's filters (its pills, or ⌃⌘1–4); the keyboard's row starts over.
+    /// Shows one of the sidebar's filters (its pills, or ⌃⌘1–3); the keyboard's row starts over.
     func setSidebarFilter(_ filter: SidebarFilter) {
         guard sidebarFilter != filter else { return }
         instantly { sidebarFilter = filter; sidebarSelection = nil }
@@ -222,6 +220,9 @@ import MosaicCore
     @ObservationIgnored private var lastLoad: ChangeToken?
     /// The one reader of Messages' database: one connection, kept open, with change detection on it.
     @ObservationIgnored private let reader: MessagesReader
+    /// A second connection, at utility priority, for the long reads — searching a whole history,
+    /// gathering what a conversation shared — so they never hold up loading conversations.
+    @ObservationIgnored private let historyReader: MessagesReader
     @ObservationIgnored private var contactNames = ContactNames()
     @ObservationIgnored private var originalTitles: [String: String] = [:]
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
@@ -249,6 +250,7 @@ import MosaicCore
         self.linkPreviews = linkPreviews
         LinkPreviewLoader.shared.allowsFetching = linkPreviews != .off
         reader = MessagesReader(database: database)
+        historyReader = MessagesReader(database: database, background: true)
         forcedDemo = forceDemo || ProcessInfo.processInfo.arguments.contains("--demo")
         // Live unless the demo workspace was chosen: a fresh install starts with an empty workspace
         // whose "Connect Messages" leads to the connection settings. Nothing opens or asks on
@@ -365,7 +367,7 @@ import MosaicCore
             var state = Workspace()
             state.openIDs = openIDs; state.focusedID = focusedID; state.layout = layout
             state.drafts = drafts; state.seenMessageIDs = seenMessageIDs; state.hidden = hidden
-            state.zoom = zoom; state.pinnedIDs = pinnedIDs; state.protectedIDs = protectedIDs; state.needsReplyIDs = needsReplyIDs
+            state.zoom = zoom; state.pinnedIDs = pinnedIDs; state.protectedIDs = protectedIDs
             return state
         }
         set {
@@ -378,7 +380,6 @@ import MosaicCore
             if zoom != newValue.zoom { zoom = newValue.zoom }
             if pinnedIDs != newValue.pinnedIDs { pinnedIDs = newValue.pinnedIDs }
             if protectedIDs != newValue.protectedIDs { protectedIDs = newValue.protectedIDs }
-            if needsReplyIDs != newValue.needsReplyIDs { needsReplyIDs = newValue.needsReplyIDs }
         }
     }
     /// Applies a `Workspace` mutation, writing back only the fields it changed.
@@ -392,12 +393,13 @@ import MosaicCore
     var visibleConversations: [Conversation] { hidden.isEmpty ? conversations : conversations.filter { hidden[$0.id] == nil } }
     /// What the sidebar lists, in order: the chosen filter's rows, matching the search when there
     /// is one (names, people, the last message, and a draft's own words).
-    var filteredConversations: [Conversation] {
+    var filteredConversations: [Conversation] { sidebarRows(for: sidebarFilter) }
+    /// What one of the sidebar's lists shows (the All list stays alive under the others).
+    func sidebarRows(for filter: SidebarFilter) -> [Conversation] {
         let rows: [Conversation]
-        switch sidebarFilter {
+        switch filter {
         case .all: rows = pinnedFirst(visibleConversations)
         case .unread: rows = pinnedFirst(unreadConversations)
-        case .needsReply: rows = pinnedFirst(visibleConversations.filter { needsReplyIDs.contains($0.id) })
         case .drafts: rows = draftRows
         }
         guard !search.isEmpty else { return rows }
@@ -416,10 +418,12 @@ import MosaicCore
         return pinnedIDs.compactMap { byID[$0] } + rows.filter { !pinned.contains($0.id) }
     }
     /// How many of the sidebar's rows, from the top, are pinned ones.
-    var pinnedRowCount: Int {
-        guard sidebarFilter == .all, !pinnedIDs.isEmpty else { return 0 }
+    var pinnedRowCount: Int { pinnedRowCount(in: filteredConversations, filter: sidebarFilter) }
+    /// How many of a list's rows, from the top, are pinned ones (only All has the Pinned heading).
+    func pinnedRowCount(in rows: [Conversation], filter: SidebarFilter) -> Int {
+        guard filter == .all, !pinnedIDs.isEmpty else { return 0 }
         let pinned = Set(pinnedIDs)
-        return filteredConversations.prefix { pinned.contains($0.id) }.count
+        return rows.prefix { pinned.contains($0.id) }.count
     }
     func isPinned(_ id: String) -> Bool { pinnedIDs.contains(id) }
     /// Pins a conversation to the top of the sidebar, or unpins it. Only Mosaic's sidebar changes.
@@ -449,22 +453,13 @@ import MosaicCore
     /// marked read in Messages and no one is told).
     var unreadConversations: [Conversation] { visibleConversations.filter { $0.unreadCount > 0 } }
     var unreadCount: Int { unreadConversations.count }
-    var needsReplyCount: Int { visibleConversations.filter { needsReplyIDs.contains($0.id) }.count }
     /// How many rows a filter lists, for its count in the sidebar.
     func count(for filter: SidebarFilter) -> Int {
         switch filter {
         case .all: return 0
         case .unread: return unreadCount
-        case .needsReply: return needsReplyCount
         case .drafts: return draftCount
         }
-    }
-    func needsReply(_ id: String) -> Bool { needsReplyIDs.contains(id) }
-    /// Marks a conversation as needing a reply, or clears that. Reading it changes nothing here:
-    /// only the reader clears it.
-    func toggleNeedsReply(_ id: String) {
-        guard conversations.contains(where: { $0.id == id }) else { return }
-        instantly { if needsReplyIDs.contains(id) { needsReplyIDs.remove(id) } else { needsReplyIDs.insert(id) } }
     }
     /// Opens the next conversation with unread messages (or an open tile with a new message),
     /// after the focused one in the sidebar's order, wrapping around; the cursor goes to its field.
@@ -1117,12 +1112,21 @@ import MosaicCore
     private(set) var contextWindows: [String: HistoryContext] = [:]
     @ObservationIgnored private var searchTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var searchGeneration = 0
-    /// Rows one part of a search reads before it stops and offers to go on.
-    static let searchScanLimit = 2000
+    /// The fewest characters the find bar searches the older history for (one letter would match
+    /// most of it); the loaded messages are matched from the first.
+    static let historySearchMinimumLength = 2
+    /// Rows one part of a search reads; parts follow one another by themselves.
+    @ObservationIgnored var historyPageSize = 2000
+    /// Where a search pauses for the reader to go on (Search Further): this many matches, or
+    /// this many rows read — bounds a very long history only reaches.
+    @ObservationIgnored var historyMatchLimit = 500
+    @ObservationIgnored var historyScanLimit = 250_000
 
-    /// Searches the tile's history older than the oldest message it shows, for `query` — part by
-    /// part, each reading at most `searchScanLimit` rows. A new search (or `cancelOlderSearch`)
-    /// supersedes the one running, whose results are never shown.
+    /// Searches the tile's history older than the oldest message it shows, for `query`: part
+    /// after part on the background connection, newest first, until the conversation's first
+    /// message (or a bound — `historyMatchLimit` matches or `historyScanLimit` rows — after which
+    /// Search Further goes on). A new search (or `cancelOlderSearch`) supersedes the one running,
+    /// whose results are never shown.
     func searchOlderHistory(_ id: String, query: String) {
         cancelOlderSearch(id)
         let words = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1130,29 +1134,38 @@ import MosaicCore
         historySearches[id] = HistorySearch(query: words, matches: [], next: start, scanned: 0, isSearching: false)
         continueOlderSearch(id)
     }
-    /// Reads the next part of the tile's search.
+    /// Goes on with the tile's search: part after part until the first message or the next bound.
     func continueOlderSearch(_ id: String) {
-        guard var search = historySearches[id], !search.isSearching, let cursor = search.next else { return }
+        guard var search = historySearches[id], !search.isSearching, var cursor = search.next else { return }
         search.isSearching = true
         historySearches[id] = search
         searchGeneration += 1
         let generation = searchGeneration, readerGeneration = self.generation
-        let reader = self.reader, query = search.query
+        let reader = self.historyReader, query = search.query
+        let pageSize = historyPageSize
+        let matchBound = search.matches.count + historyMatchLimit, scanBound = search.scanned + historyScanLimit
         searchTasks[id] = Task { [weak self] in
-            let page = try? await reader.searchHistory(forChat: id, matching: query, before: cursor, scanLimit: WorkspaceStore.searchScanLimit)
-            // A search that was superseded or cancelled meanwhile publishes nothing.
-            guard let self, !Task.isCancelled, readerGeneration == self.generation,
-                  self.searchTaskGenerations[id] == generation, var current = self.historySearches[id], current.query == query else { return }
-            current.isSearching = false
-            if let page {
-                current.matches += page.matches
-                current.next = page.next
-                current.scanned += page.scanned
-            } else {
-                current.failed = true
+            while true {
+                let page = try? await reader.searchHistory(forChat: id, matching: query, before: cursor, scanLimit: pageSize)
+                // A search that was superseded or cancelled meanwhile publishes nothing.
+                guard let self, !Task.isCancelled, readerGeneration == self.generation,
+                      self.searchTaskGenerations[id] == generation, var current = self.historySearches[id], current.query == query else { return }
+                if let page {
+                    current.matches += page.matches
+                    current.next = page.next
+                    current.scanned += page.scanned
+                } else {
+                    current.failed = true
+                }
+                guard let next = current.next, page != nil, current.matches.count < matchBound, current.scanned < scanBound else {
+                    current.isSearching = false
+                    self.historySearches[id] = current
+                    self.searchTasks[id] = nil
+                    return
+                }
+                self.historySearches[id] = current
+                cursor = next
             }
-            self.historySearches[id] = current
-            self.searchTasks[id] = nil
         }
         searchTaskGenerations[id] = generation
     }
@@ -1188,6 +1201,28 @@ import MosaicCore
     /// Back to the tile's newest messages.
     func leaveContext(_ id: String) {
         if contextWindows[id] != nil { instantly { contextWindows[id] = nil } }
+    }
+
+    // MARK: What a conversation shared
+
+    /// What conversations shared over their whole history, read once per session each (the
+    /// newest messages, where anything new arrives, are merged in from the tile); a few are kept.
+    @ObservationIgnored private var sharedHistories: [String: SharedHistory] = [:]
+    @ObservationIgnored private var sharedOrder: [String] = []
+    static let sharedHistoryCacheLimit = 6
+    /// The files and links a conversation shared over its whole history, for its details — read
+    /// on the background connection, so loading is never held up. Nil in the demo workspace or
+    /// when it can't be read (the details then show what the tile has loaded).
+    func sharedHistory(_ id: String) async -> SharedHistory? {
+        guard isLive else { return nil }
+        if let cached = sharedHistories[id] { return cached }
+        let readerGeneration = generation
+        guard let shared = try? await historyReader.sharedHistory(forChat: id), readerGeneration == generation else { return nil }
+        sharedHistories[id] = shared
+        sharedOrder.removeAll { $0 == id }
+        sharedOrder.append(id)
+        if sharedOrder.count > Self.sharedHistoryCacheLimit { sharedHistories[sharedOrder.removeFirst()] = nil }
+        return shared
     }
 
     // MARK: Seeing the newest message
@@ -2058,6 +2093,8 @@ import MosaicCore
         ContactPhotos.shared.reset()
         AvatarImages.shared.removeAll()
         contactPhotoGeneration += 1
+        sharedHistories = [:]
+        sharedOrder = []
     }
 
     // MARK: Undo
@@ -2560,13 +2597,12 @@ struct DraftSummary: Equatable {
 
 /// What the sidebar lists.
 enum SidebarFilter: String, CaseIterable, Identifiable {
-    case all, unread, needsReply, drafts
+    case all, unread, drafts
     var id: String { rawValue }
     var title: String {
         switch self {
         case .all: return "All"
         case .unread: return "Unread"
-        case .needsReply: return "Needs Reply"
         case .drafts: return "Drafts"
         }
     }
