@@ -1,19 +1,61 @@
 import AppKit
 import SwiftUI
+import CSQLite
 
 // Mosaic as the app runs it — its window and its menus, which SwiftUI keeps up to date through
-// the app itself (a test's NSHostingView has no menus) — with the fictional demo workspace. Tiles
-// are closed and opened the reader's ways: a header's close button, the Workspace menu's Close
-// Focused Tile and Reopen Closed Tile, a conversation opened from the sidebar. After each, the
-// tiles drawn must be the tiles open, where the layout puts them, within a second and a half.
-// Prints what it saw; exits 0 when every step held, 1 when one did not.
-// Usage: MosaicAppCheck --demo [--store-menus]
-//   --store-menus adds a menu whose items read the store's tiles directly, as the Workspace
-//   menu's did before MenuState: a check that the harness sees the failure it guards against.
+// the app itself (a test's NSHostingView has no menus). Tiles are closed and opened the reader's
+// ways: a header's close button (the pointer over it first), the Workspace menu's Close Focused
+// Tile and Reopen Closed Tile, a conversation opened from the sidebar. After each, the tiles drawn
+// must be the tiles open, where the layout puts them, within a second and a half. Prints what it
+// saw; exits 0 when every step held, 1 when one did not. Fictional conversations only.
+//
+// Usage: MosaicAppCheck --demo                  the demo workspace
+//        MosaicAppCheck --isolated --live       a synthetic Messages database of 200 conversations,
+//                                               four with 600 messages, and new messages arriving
+//                                               all the while (the store polls and refreshes)
+//        add --store-menus                      the Workspace menu as it was before MenuState,
+//                                               reading the store's tiles directly
 
-@main struct AppCheck: App {
+@main enum AppCheckMain {
+    @MainActor static func main() {
+        if CommandLine.arguments.contains("--store-menus") { StoreMenusApp.main() } else { CheckApp.main() }
+    }
+}
+
+@MainActor enum Harness {
     static let suite = "MosaicAppCheck-\(UUID())"
-    @State private var store = WorkspaceStore(defaults: UserDefaults(suiteName: AppCheck.suite)!, forceDemo: true)
+    static let live = CommandLine.arguments.contains("--live")
+    static var mode: String {
+        (live ? "live" : "demo") + (CommandLine.arguments.contains("--store-menus") ? ", menus that read the store" : "")
+    }
+    static func makeStore() -> WorkspaceStore {
+        let defaults = UserDefaults(suiteName: suite)!
+        guard live else { return WorkspaceStore(defaults: defaults, forceDemo: true) }
+        return WorkspaceStore(defaults: defaults, database: MessagesDatabase(path: SyntheticMessages.create()))
+    }
+}
+
+struct CheckApp: App {
+    @State private var store = Harness.makeStore()
+    @NSApplicationDelegateAdaptor(CheckDelegate.self) private var delegate
+
+    var body: some Scene {
+        Window("Mosaic", id: "workspace") {
+            WorkspaceView().environment(store)
+                .frame(minWidth: 940, minHeight: 620)
+                .task { await Check.run(store) }
+        }
+        .defaultSize(width: 1320, height: 860)
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified(showsTitle: false))
+        .commands { WorkspaceCommands(store: store) }
+    }
+}
+
+/// The app with the Workspace menu as it was before MenuState: its items' states read from the
+/// store itself, in the app's body.
+struct StoreMenusApp: App {
+    @State private var store = Harness.makeStore()
     @NSApplicationDelegateAdaptor(CheckDelegate.self) private var delegate
 
     var body: some Scene {
@@ -26,20 +68,33 @@ import SwiftUI
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .commands {
-            WorkspaceCommands(store: store)
-            StoreMenus(store: store, readsStore: CommandLine.arguments.contains("--store-menus"))
-        }
-    }
-}
-
-/// Items whose state is read from the store itself (only with --store-menus).
-struct StoreMenus: Commands {
-    let store: WorkspaceStore
-    let readsStore: Bool
-    var body: some Commands {
-        CommandMenu("Check") {
-            Button("Arrange") {}.disabled(readsStore && !store.canArrangeTiles)
-            Button("Reopen") {}.disabled(readsStore && !store.canReopenClosedTile)
+            CommandGroup(replacing: .newItem) {
+                Button("New Message") { store.beginNewChat() }.keyboardShortcut("n", modifiers: .command)
+            }
+            CommandMenu("Workspace") {
+                ForEach(Array(SidebarFilter.allCases.enumerated()), id: \.element) { index, filter in
+                    Toggle("Show \(filter.title)", isOn: Binding(get: { store.sidebarFilter == filter },
+                                                                set: { if $0 { store.setSidebarFilter(filter) } }))
+                        .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [.command, .control])
+                }
+                Divider()
+                Button("Zoom In") { store.zoomIn() }.keyboardShortcut("=", modifiers: .command).disabled(!store.canZoomIn)
+                Button("Zoom Out") { store.zoomOut() }.keyboardShortcut("-", modifiers: .command).disabled(!store.canZoomOut)
+                Button("Actual Size (\(store.zoomLabel))") { store.resetZoom() }.keyboardShortcut("0", modifiers: .command).disabled(store.zoom == 1)
+                Divider()
+                Group {
+                    Button("Move Tile Left") { if !store.moveFocusedTile(by: -1) { NSSound.beep() } }
+                        .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                    Button("Move Tile Right") { if !store.moveFocusedTile(by: 1) { NSSound.beep() } }
+                        .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                    Button("Equal Tile Sizes") { store.equalizeTiles() }
+                }
+                .disabled(!store.canArrangeTiles)
+                Divider()
+                Button("Close Focused Tile") { if let id = store.focused?.id { store.close(id) } }.keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Reopen Closed Tile") { store.reopenLastClosedTile() }.keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(!store.canReopenClosedTile)
+            }
         }
     }
 }
@@ -49,7 +104,69 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         // Never holds up a CI job.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 90) { print("App check: timed out"); exit(2) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { print("App check (\(MainActor.assumeIsolated { Harness.mode })): timed out"); exit(2) }
+    }
+}
+
+/// A Messages database of fictional conversations, and new messages arriving in it.
+enum SyntheticMessages {
+    static let people = 200
+    static let longThreads = 4
+    nonisolated(unsafe) static var path = ""
+    nonisolated(unsafe) static var arrivals = 0
+
+    static func create() -> String {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "MosaicAppCheck-\(UUID())")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        path = directory.appending(path: "chat.db").path
+        var statements = ["""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE chat (guid TEXT, display_name TEXT, chat_identifier TEXT, service_name TEXT);
+        CREATE TABLE handle (id TEXT);
+        CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+        CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);
+        CREATE TABLE message (guid TEXT, text TEXT, attributedBody BLOB, date INTEGER, is_from_me INTEGER, handle_id INTEGER,
+          is_delivered INTEGER DEFAULT 0, is_read INTEGER DEFAULT 1, error INTEGER DEFAULT 0, cache_has_attachments INTEGER DEFAULT 0,
+          associated_message_type INTEGER DEFAULT 0, associated_message_guid TEXT, item_type INTEGER DEFAULT 0, date_retracted INTEGER DEFAULT 0);
+        BEGIN;
+        """]
+        let now = Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000)
+        var row = 0
+        for person in 1...people {
+            statements.append("INSERT INTO handle VALUES ('person\(person)@example.test');")
+            statements.append("INSERT INTO chat VALUES ('iMessage;-;person\(person)@example.test', '', 'person\(person)@example.test', 'iMessage');")
+            statements.append("INSERT INTO chat_handle_join VALUES (\(person), \(person));")
+            let count = person <= longThreads ? 600 : 3
+            for index in 0..<count {
+                row += 1
+                // The long threads are the most recent conversations, so they lead the sidebar.
+                let date = now - Int64(person) * 86_400_000_000_000 - Int64(count - index) * 60_000_000_000
+                let fromMe = index % 3 == 0
+                statements.append("INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('G\(row)', 'Message \(index) in conversation \(person): a few words that wrap across the bubble when the tile is narrow', \(date), \(fromMe ? 1 : 0), \(fromMe ? 0 : person));")
+                statements.append("INSERT INTO chat_message_join VALUES (\(person), \(row));")
+            }
+        }
+        statements.append("COMMIT;")
+        execute(statements.joined(separator: "\n"))
+        return path
+    }
+
+    /// A new message from someone whose conversation is not open, as a live account has all the time.
+    static func arrive() {
+        arrivals += 1
+        let person = longThreads + 1 + arrivals % (people - longThreads)
+        let date = Int64(Date().timeIntervalSinceReferenceDate * 1_000_000_000)
+        execute("""
+        INSERT INTO message (guid, text, date, is_from_me, handle_id, is_read) VALUES ('A\(arrivals)', 'New message \(arrivals)', \(date), 0, \(person), 0);
+        INSERT INTO chat_message_join VALUES (\(person), last_insert_rowid());
+        """)
+    }
+
+    static func execute(_ sql: String) {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else { return }
+        defer { sqlite3_close(db) }
+        if sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK { print("App check: database: " + String(cString: sqlite3_errmsg(db))) }
     }
 }
 
@@ -57,19 +174,28 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
     static var failures: [String] = []
 
     static func run(_ store: WorkspaceStore) async {
-        let mode = CommandLine.arguments.contains("--store-menus") ? " (menus that read the store)" : ""
-        menuValues = { store.menu.values }
+        if Harness.live {
+            // The conversations load; four open, as tiles.
+            for _ in 0..<200 where store.conversations.count < SyntheticMessages.people { await pause(0.05) }
+            guard store.conversations.count >= SyntheticMessages.people else { return finish("the conversations did not load (\(store.conversations.count))") }
+            for person in 1...SyntheticMessages.longThreads {
+                if let id = store.conversations.first(where: { $0.participants.contains("person\(person)@example.test") })?.id { store.open(id) }
+            }
+            // Messages keep arriving in other conversations.
+            Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { _ in SyntheticMessages.arrive() }
+        }
         await pause(2)
         store.setLayout(.grid)
         await pause(0.8)
         guard let window = NSApp.windows.first(where: { !handles(in: $0.contentView).isEmpty }) else { return finish("no workspace window") }
-        guard store.openIDs.count == 4 else { return finish("four demo tiles expected, \(store.openIDs.count) open") }
-        print("App check\(mode): \(store.openIDs.count) tiles open in a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
+        guard store.openIDs.count == 4 else { return finish("four tiles expected, \(store.openIDs.count) open") }
+        let longest = store.tiles.map(\.messages.count).max() ?? 0
+        print("App check (\(Harness.mode)): \(store.openIDs.count) tiles open (up to \(longest) messages loaded), \(store.conversations.count) conversations, a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
         await expectInPlace(store, window, "at launch")
 
-        // A header's close button, pressed and released (the top-left tile).
+        // A header's close button, the pointer over it first (the top-left tile).
         let first = store.displayOrder[0]
-        guard pressCloseOfTopLeftTile(in: window) else { return finish("no tile header to press") }
+        guard await pressCloseOfTopLeftTile(in: window) else { return finish("no tile header to press") }
         if store.openIDs.contains(first) { failures.append("the close button did not close its tile") }
         await expectInPlace(store, window, "after a tile's close button")
 
@@ -98,7 +224,7 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
         while store.openIDs.count > 1 {
             await pause(0.3)
             let count = store.openIDs.count
-            guard pressCloseOfTopLeftTile(in: window) else { break }
+            guard await pressCloseOfTopLeftTile(in: window) else { break }
             await expectInPlace(store, window, "after closing down to \(count - 1)")
         }
         finish(nil)
@@ -106,13 +232,13 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
 
     static func finish(_ problem: String?) {
         if let problem { failures.append(problem) }
-        UserDefaults.standard.removePersistentDomain(forName: AppCheck.suite)
-        let mode = CommandLine.arguments.contains("--store-menus") ? " (menus that read the store)" : ""
+        UserDefaults.standard.removePersistentDomain(forName: Harness.suite)
+        if !SyntheticMessages.path.isEmpty { try? FileManager.default.removeItem(atPath: (SyntheticMessages.path as NSString).deletingLastPathComponent) }
         if failures.isEmpty {
-            print("App check\(mode): passed")
+            print("App check (\(Harness.mode)): passed")
             exit(0)
         }
-        print("App check\(mode): FAILED — " + failures.joined(separator: "; "))
+        print("App check (\(Harness.mode)): FAILED — " + failures.joined(separator: "; "))
         exit(1)
     }
 
@@ -156,10 +282,20 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
         print("  drawn headers: " + drawn.map { "(\(Int($0.minX)),\(Int($0.maxY)) \(Int($0.width))w)" }.joined(separator: " "))
         print("  planned: " + store.displayOrder.compactMap { plan?.frames[$0] }.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))w)" }.joined(separator: " "))
         failures.append("tiles not in place \(label)")
+        // Whether they get there later, and when.
+        while Date().timeIntervalSince(start) < 6 {
+            if inPlace(store, window) {
+                print("  …in place after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+                return
+            }
+            await pause(0.05)
+        }
+        print("  …still not in place after 6 s")
     }
 
-    /// Presses and releases the close button of the top-left tile's header, as the reader does.
-    static func pressCloseOfTopLeftTile(in window: NSWindow) -> Bool {
+    /// The pointer goes over the close button of the top-left tile's header (it shows its hover
+    /// state), then presses and releases it, as the reader does.
+    static func pressCloseOfTopLeftTile(in window: NSWindow) async -> Bool {
         let all = handles(in: window.contentView)
         guard let handle = all.min(by: { a, b in
             let fa = a.convert(a.bounds, to: nil), fb = b.convert(b.bounds, to: nil)
@@ -168,10 +304,13 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
         let point = handle.convert(NSPoint(x: handle.closeRect.midX, y: handle.closeRect.midY), to: nil)
         func event(_ type: NSEvent.EventType) -> NSEvent? {
             NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .mouseMoved ? 0 : 1)
         }
-        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return false }
+        guard let moved = event(.mouseMoved), let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return false }
+        handle.mouseEntered(with: moved)
+        await pause(0.15)
         handle.mouseDown(with: down)
+        await pause(0.05)
         handle.mouseUp(with: up)
         return true
     }
@@ -200,12 +339,11 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
                 return true
             }
             if Date().timeIntervalSince(start) > 1.5 {
-                print("App check: \(title) unavailable in the menu bar; the menu's values: \(String(describing: menuValues?()))")
+                print("App check: \(title) unavailable in the menu bar")
                 failures.append("\(title) is unavailable")
                 return false
             }
             await pause(0.05)
         }
     }
-    static var menuValues: (() -> Any)?
 }
