@@ -14,12 +14,24 @@ final class TileCloseTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
     }
+    @MainActor private func handleViews(in view: NSView) -> [TileHeaderHandle.HandleView] {
+        (view as? TileHeaderHandle.HandleView).map { [$0] } ?? view.subviews.flatMap { handleViews(in: $0) }
+    }
     /// Where a tile's message field is in the window: it moves with its tile.
     @MainActor private func field(_ id: String) -> NSRect? {
         DraftTextView.editor(for: id).map { $0.convert($0.bounds, to: nil) }
     }
 
     @MainActor func testTheTilesLeftFillAClosedTilesPlaceAtOnce() async throws {
+        try await closeAndTime(sidebarRows: 0)
+    }
+    /// The same with a full sidebar, as a real Messages history has: closing a tile changes what
+    /// every row shows (the open-tile mark), which must not hold the tiles up.
+    @MainActor func testWithAFullSidebarToo() async throws {
+        try await closeAndTime(sidebarRows: 500)
+    }
+
+    @MainActor private func closeAndTime(sidebarRows: Int) async throws {
         _ = NSApplication.shared
         let name = "MosaicTest-\(UUID())"
         addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
@@ -28,6 +40,12 @@ final class TileCloseTests: XCTestCase {
         XCTAssertEqual(store.openIDs.count, 4)
         store.close(store.openIDs[3])
         let ids = store.openIDs
+        if sidebarRows > 0 {
+            store.conversations += (1...sidebarRows).map {
+                Conversation(id: "extra-\($0)", name: "Person \($0)", participants: ["person\($0)@example.test"], preview: "Hello there",
+                             lastActivity: Date(timeIntervalSinceReferenceDate: 600_000_000 - Double($0)))
+            }
+        }
         // Long threads, as real conversations have.
         let day = Date(timeIntervalSinceReferenceDate: 700_000_000)
         for id in ids {
@@ -48,8 +66,21 @@ final class TileCloseTests: XCTestCase {
         let before = try ids.map { try XCTUnwrap(field($0), "tile \($0) has its message field") }
         XCTAssertGreaterThan(abs(before[2].minY - before[1].minY), 50, "three tiles: two rows")
 
+        // The close button of the first tile's header, pressed and released as the reader does.
+        let handles = handleViews(in: hosting).filter { $0.window != nil }
+        let handle = try XCTUnwrap(handles.min { a, b in
+            let fa = a.convert(a.bounds, to: nil), fb = b.convert(b.bounds, to: nil)
+            return (fa.maxY, -fa.minX) > (fb.maxY, -fb.minX)
+        }, "a tile header")
+        let point = handle.convert(NSPoint(x: handle.closeRect.midX, y: handle.closeRect.midY), to: nil)
+        func event(_ type: NSEvent.EventType) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber,
+                               context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
         let start = Date()
-        store.close(ids[0])
+        handle.mouseDown(with: event(.leftMouseDown))
+        handle.mouseUp(with: event(.leftMouseUp))
+        XCTAssertFalse(store.openIDs.contains(ids[0]), "the top-left tile closed")
         hosting.layoutSubtreeIfNeeded()
         let firstPass = Date().timeIntervalSince(start)
         var settled: TimeInterval?
@@ -61,7 +92,7 @@ final class TileCloseTests: XCTestCase {
             hosting.layoutSubtreeIfNeeded()
             try await Task.sleep(for: .milliseconds(5))
         }
-        print("Closing a tile: first layout \(Int(firstPass * 1000)) ms; tiles in their new places after \(settled.map { "\(Int($0 * 1000)) ms" } ?? "never")")
+        print("Closing a tile (\(sidebarRows) more sidebar rows): first layout \(Int(firstPass * 1000)) ms; tiles in their new places after \(settled.map { "\(Int($0 * 1000)) ms" } ?? "never")")
         let after = try XCTUnwrap(settled, "the two tiles left sit side by side in one row")
         XCTAssertLessThan(after, 1.0, "and get there at once")
     }
