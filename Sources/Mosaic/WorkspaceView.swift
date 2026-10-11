@@ -1058,8 +1058,10 @@ struct DividerHandle: View {
         case 125, 126: // ↓ ↑ from the search field: into the list.
             guard modifiers.isEmpty, inSearchField, let sidebar else { return false }
             return sidebar.focusList(event.keyCode == 125 ? .first : .last)
-        case 53: // Esc in the search field: clear it, then give up the keyboard.
-            guard modifiers.isEmpty, inSearchField else { return false }
+        case 53: // Esc with a tile's details open: back to its thread. In the search field: clear it, then give up the keyboard.
+            guard modifiers.isEmpty else { return false }
+            if !inSearchField, store.closeDetails() { return true }
+            guard inSearchField else { return false }
             if store.search.isEmpty { window.makeFirstResponder(nil) } else { instantly { store.search = "" } }
             return true
         default:

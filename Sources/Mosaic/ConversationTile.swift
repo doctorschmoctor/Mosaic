@@ -42,7 +42,7 @@ struct ConversationTile: View {
                 if store.isLive, findWords.count >= WorkspaceStore.historySearchMinimumLength {
                     OlderHistorySearchView(conversationID: conversation.id, query: findWords,
                                            senderName: { handle in handle.map { senderNames[$0] ?? (conversation.isGroup ? Recipient.display($0) : conversation.name) } ?? conversation.name },
-                                           onChoose: { show($0) })
+                                           onChoose: { chooseMatch($0) })
                 }
                 Divider().opacity(0.6)
             }
@@ -61,8 +61,8 @@ struct ConversationTile: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             } else if showingDetails {
-                ConversationDetailsPanel(conversation: conversation, hasOlderHistory: hasOlderHistory,
-                                         onShowMessage: { id in reveal(id) }, onClose: { showingDetails = false })
+                ConversationDetailsPanel(conversation: conversation,
+                                         onShowMessage: { id in reveal(id) }, onClose: { closeDetails() })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let context = store.contextWindows[conversation.id] {
                 // Older messages around a search result. Nothing here counts as read (it is not
@@ -70,7 +70,7 @@ struct ConversationTile: View {
                 MessageList(conversation: contextConversation(context), isLive: store.isLive, canLoadMore: false,
                             senderNames: senderNames, zoom: zoom, animateNew: false,
                             findQuery: finding ? findQuery : "", findCurrent: findCurrent ?? context.anchorID,
-                            showsLatestButton: false, onLoadMore: {})
+                            showsLatestButton: false, startsAt: context.anchorID, onLoadMore: {})
                     .equatable()
                     .id("context-\(context.anchorID)")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -116,7 +116,12 @@ struct ConversationTile: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .showConversationDetails)) { note in
             guard note.object as? String == conversation.id, !conversation.isComposeDraft else { return }
-            showingDetails.toggle()
+            if showingDetails { closeDetails() } else { showingDetails = true; store.detailsOpened(conversation.id) }
+        }
+        // Esc while the details are open (KeyboardRouter): back to the thread.
+        .onReceive(NotificationCenter.default.publisher(for: .closeConversationDetails)) { note in
+            guard note.object as? String == conversation.id, showingDetails else { return }
+            closeDetails()
         }
         .onReceive(NotificationCenter.default.publisher(for: .findNextInConversation)) { note in
             guard finding, let info = note.object as? FindStep, info.conversationID == conversation.id else { return }
@@ -187,19 +192,30 @@ struct ConversationTile: View {
         if next < 0 { next = matches.count - 1 }
         show(matches[next])
     }
+    /// A match chosen from the older matches' list: the find bar closes and the tile shows that
+    /// message, outlined, among the messages around it (or where it is, if it is loaded).
+    private func chooseMatch(_ id: String) {
+        finding = false; findQuery = ""; findCurrent = nil
+        store.findClosed(conversation.id)
+        store.cancelOlderSearch(conversation.id)
+        reveal(id)
+        store.requestComposerFocus(conversation.id)
+    }
     /// Shows a match: where it is among the loaded messages, or else the messages around it.
     private func show(_ id: String) {
         findCurrent = id
         if conversation.messages.contains(where: { $0.presentationID == id || $0.id == id }) { store.leaveContext(conversation.id) }
         else { Task { await store.showInContext(conversation.id, messageID: id) } }
     }
-    /// Whether there is history before the loaded messages (more to scroll back to, or past the ceiling).
-    private var hasOlderHistory: Bool {
-        store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? WorkspaceStore.pageSize)
-    }
     /// Closes the details and shows a message where it was sent, outlined for a moment.
-    private func reveal(_ id: String) {
+    /// Back from the details to the thread, with the keyboard in the message field.
+    private func closeDetails() {
         showingDetails = false
+        store.detailsClosed(conversation.id)
+        store.requestComposerFocus(conversation.id)
+    }
+    private func reveal(_ id: String) {
+        if showingDetails { showingDetails = false; store.detailsClosed(conversation.id) }
         // From further back than the tile has loaded: the messages around it.
         guard conversation.messages.contains(where: { $0.id == id || $0.presentationID == id }) else {
             Task { await store.showInContext(conversation.id, messageID: id) }
@@ -394,6 +410,8 @@ struct MessageList: View, Equatable {
     var showsLatestButton = true
     /// The tile shows as many messages as it can (1,000): a note at the top says older ones exist.
     var historyCeiling = false
+    /// The row the thread opens on instead of the newest message (a window around a search result).
+    var startsAt: String? = nil
     var onSearchOlder: () -> Void = {}
     let onLoadMore: () -> Void
     /// The newest message is in view (the store marks it seen once the reader can see the tile),
@@ -419,7 +437,7 @@ struct MessageList: View, Equatable {
             && lhs.isLoadingMore == rhs.isLoadingMore
             && lhs.senderNames == rhs.senderNames && lhs.zoom == rhs.zoom && lhs.animateNew == rhs.animateNew
             && lhs.seenBoundary == rhs.seenBoundary && lhs.findQuery == rhs.findQuery && lhs.findCurrent == rhs.findCurrent
-            && lhs.historyCeiling == rhs.historyCeiling
+            && lhs.historyCeiling == rhs.historyCeiling && lhs.startsAt == rhs.startsAt
     }
 
     /// A person in this thread, as the thread names them.
@@ -521,7 +539,7 @@ struct MessageList: View, Equatable {
             .coordinateSpace(name: "thread")
             .padding(16 * zoom)
             .environment(\.threadAttachments, attachmentFiles)
-            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry,
+            .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry, startRow: startsAt,
                                              onNearTop: canLoadMore ? onLoadMore : nil) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
@@ -529,7 +547,7 @@ struct MessageList: View, Equatable {
         // The find bar's current match is brought to the middle of the tile (also when the
         // thread first appears around one).
         .onChange(of: findCurrent) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
-        .onAppear { if let id = findCurrent { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } } }
+        .onAppear { if startsAt == nil, let id = findCurrent { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } } }
         }
         .overlay(alignment: .bottomTrailing) {
             if !isNearBottom && showsLatestButton {

@@ -688,6 +688,7 @@ import MosaicCore
         cancelOlderSearch(id)
         contextWindows[id] = nil
         if activeFindTile == id { activeFindTile = nil }
+        if detailsTile == id { detailsTile = nil }
         tilesOutOfView.remove(id)
         tailsInView.remove(id)
         if tilesWithNews.contains(id) { tilesWithNews.remove(id) }
@@ -1095,6 +1096,16 @@ import MosaicCore
         NotificationCenter.default.post(name: .showConversationDetails, object: id)
     }
     func findOpened(_ id: String) { activeFindTile = id }
+    /// The tile whose details are open, for Esc (KeyboardRouter).
+    @ObservationIgnored private(set) var detailsTile: String?
+    func detailsOpened(_ id: String) { detailsTile = id }
+    func detailsClosed(_ id: String) { if detailsTile == id { detailsTile = nil } }
+    /// Esc with a tile's details open: back to its thread. False when no details are open.
+    @discardableResult func closeDetails() -> Bool {
+        guard let id = detailsTile, openIDs.contains(id) else { detailsTile = nil; return false }
+        NotificationCenter.default.post(name: .closeConversationDetails, object: id)
+        return true
+    }
     func findClosed(_ id: String) { if activeFindTile == id { activeFindTile = nil } }
     /// ⌘G (older) or ⇧⌘G (newer) in the open find bar. False when no bar is open.
     @discardableResult func findStep(older: Bool) -> Bool {

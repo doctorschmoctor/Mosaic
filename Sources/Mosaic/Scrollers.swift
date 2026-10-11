@@ -176,6 +176,11 @@ final class ScrollPinner: NSObject {
     private var lastDocumentSize = CGSize.zero
     private var observers: [NSObjectProtocol] = []
     private var adjusting = false
+    /// A row to show when the thread first appears, instead of the newest message (a window
+    /// into older history around a search result): it is brought to the middle of the view and
+    /// held there while the rows around it settle, until the reader scrolls.
+    var startRow: String?
+    private var centering: String?
 
     deinit { detach() }
 
@@ -203,10 +208,41 @@ final class ScrollPinner: NSObject {
         }
         lastClipSize = clip.bounds.size
         lastDocumentSize = scrollView.documentView?.frame.size ?? .zero
+        if let startRow {
+            // A window into older history starts on its row, not on its newest message.
+            isNearBottom = false
+            centering = startRow
+            sizeChanged()
+            center(startRow, tries: 30)
+            for delay in [0.12, 0.35, 0.8] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.centering == startRow else { return }
+                    self.center(startRow, tries: 0)
+                }
+            }
+            return
+        }
         // A list starts on its newest message.
         distanceFromBottom = 0
         isNearBottom = true
         sizeChanged()
+    }
+    /// Brings a row to the middle of the view once layout has reported where it is.
+    private func center(_ id: String, tries: Int) {
+        guard centering == id else { return }
+        guard let frame = registry?.frames[id], let geometry else {
+            if tries > 0 { DispatchQueue.main.async { [weak self] in self?.center(id, tries: tries - 1) } }
+            return
+        }
+        let (clip, documentHeight, flipped) = geometry
+        let maximum = max(0, documentHeight - clip.bounds.height)
+        let top = min(max(0, frame.midY - clip.bounds.height / 2), maximum)
+        let targetY = flipped ? top : maximum - top
+        if abs(clip.bounds.origin.y - targetY) > 0.5 { scroll(toY: targetY) }
+        distanceFromBottom = currentDistance() ?? 0
+        distanceFromTop = currentTop() ?? top
+        isNearBottom = distanceFromBottom <= Self.nearBottomTolerance
+        anchor = isNearBottom ? nil : (id, top - frame.minY)
     }
     func detach() {
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
@@ -308,6 +344,8 @@ final class ScrollPinner: NSObject {
         distanceFromTop = currentTop() ?? distanceFromTop
     }
     private func remember() {
+        // The reader scrolled: the starting row is theirs to leave.
+        centering = nil
         guard let distance = currentDistance() else { return }
         distanceFromBottom = distance
         distanceFromTop = currentTop() ?? 0
@@ -450,6 +488,8 @@ struct MessageScrollSupport: NSViewRepresentable {
     /// What the thread is about to show, so a size change can be told apart: append, prepend or reflow.
     var content = ThreadContent()
     var registry: ThreadRowRegistry? = nil
+    /// The row the thread starts on instead of its newest message (see `ScrollPinner.startRow`).
+    var startRow: String? = nil
     /// Scrolled near the top of what is loaded (see `ScrollPinner.onNearTop`).
     var onNearTop: (() -> Void)? = nil
     var onNearBottomChanged: (Bool) -> Void
@@ -457,6 +497,7 @@ struct MessageScrollSupport: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> InstallerView {
         let view = InstallerView()
+        context.coordinator.pinner.startRow = startRow
         view.pinner = context.coordinator.pinner
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
         context.coordinator.pinner.onNearTop = onNearTop

@@ -58,8 +58,10 @@ struct SharedContent: Equatable {
 }
 
 extension Notification.Name {
-    /// Opens the details of the tile whose id is the object.
+    /// Opens the details of the tile whose id is the object (or closes them, when open).
     static let showConversationDetails = Notification.Name("Mosaic.showConversationDetails")
+    /// Closes the details of the tile whose id is the object (Esc).
+    static let closeConversationDetails = Notification.Name("Mosaic.closeConversationDetails")
 }
 
 /// A tile's details (⌘I, or the header's menu), in place of its thread: People, Photos & Videos,
@@ -68,8 +70,6 @@ extension Notification.Name {
 struct ConversationDetailsPanel: View {
     @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
-    /// Whether the tile has more history than it has loaded.
-    let hasOlderHistory: Bool
     let onShowMessage: (String) -> Void
     let onClose: () -> Void
     @State private var section: Section = .people
@@ -98,8 +98,10 @@ struct ConversationDetailsPanel: View {
                     ForEach(Section.allCases) { section in Text(title(section, content)).tag(section) }
                 }
                 .pickerStyle(.segmented).labelsHidden().controlSize(.small)
+                // While the whole history is being read.
+                if readingHistory { ProgressView().controlSize(.mini).accessibilityLabel("Reading the whole conversation") }
                 Button("Done", action: onClose).buttonStyle(.borderless).font(.system(size: 11, weight: .medium))
-                    .keyboardShortcut(.cancelAction)
+                    .help("Back to the conversation (Esc)")
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             Divider().opacity(0.6)
@@ -115,12 +117,6 @@ struct ConversationDetailsPanel: View {
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Divider().opacity(0.6)
-            HStack(spacing: 6) {
-                if readingHistory { ProgressView().controlSize(.mini) }
-                Text(scope).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.vertical, 6)
         }
         // The whole history is read once the panel is open, on the background connection.
         .task(id: conversation.id) {
@@ -139,21 +135,6 @@ struct ConversationDetailsPanel: View {
         case .links: return content.links.isEmpty ? section.title : "\(section.title) \(content.links.count)"
         }
     }
-    private var scope: String {
-        if readingHistory { return "Looking through the whole conversation…" }
-        if let history {
-            var notes: [String] = []
-            if !history.filesComplete { notes.append("the newest 1,000 files") }
-            if !history.linksComplete { notes.append("the newest 1,000 links") }
-            let base = notes.isEmpty ? "From the whole conversation" : "From the whole conversation · " + notes.joined(separator: " and ")
-            // Links are found where a message mentions "http" or "www.".
-            return base + (section == .links ? " · links written with http or www" : "")
-        }
-        let loaded = conversation.messages.filter { $0.sendState == nil }.count
-        let base = "From the \(loaded) loaded message\(loaded == 1 ? "" : "s")"
-        return hasOlderHistory ? base + " · older ones aren't included" : base
-    }
-
     private var people: some View {
         VStack(alignment: .leading, spacing: 10) {
             if conversation.isGroup {
