@@ -347,21 +347,18 @@ public final class MessagesReader: @unchecked Sendable {
                     JOIN message_attachment_join maj ON maj.message_id = j.message_id
                     JOIN attachment a ON a.ROWID = maj.attachment_id
                     WHERE j.chat_id = ?1 \(notUnsent)
-                    \(order), a.ROWID LIMIT ?2
+                    \(order), a.ROWID
                     """)
                 defer { recycle(statement) }
                 sqlite3_bind_int64(statement, 1, chatID)
-                // One more than asked for tells whether there were more.
-                sqlite3_bind_int(statement, 2, Int32(max(1, min(fileLimit, 20_000)) + 1))
-                var read = 0
                 var status = sqlite3_step(statement)
                 while status == SQLITE_ROW {
                     defer { status = sqlite3_step(statement) }
-                    read += 1
-                    if read > fileLimit { result.filesComplete = false; break }
                     guard sqlite3_column_int(statement, 8) == 0, sqlite3_column_int(statement, 9) == 0 else { continue }
                     let rawPath = string(statement, 4)
                     if let rawPath, rawPath.hasSuffix(".pluginPayloadAttachment") { continue }
+                    // One more file than asked for: the oldest are left out (the statement is reset, never read to the end).
+                    if result.files.count >= fileLimit { result.filesComplete = false; break }
                     let path = MessagesDatabase.resolve(rawPath, home: database.home)
                     let name = string(statement, 7) ?? rawPath.map { ($0 as NSString).lastPathComponent } ?? "Attachment"
                     let bytes = sqlite3_column_int64(statement, 10)

@@ -290,7 +290,7 @@ final class FocusHandoffTests: XCTestCase {
         store.beginFind()
         try await settle(host, seconds: 0.4)
         let field = host.window.firstResponder as? NSTextView
-        XCTAssertEqual((field?.delegate as? NSTextField)?.placeholderString, "Find in loaded messages",
+        XCTAssertEqual((field?.delegate as? NSTextField)?.placeholderString, "Find in conversation",
                        "the find field has the keyboard; it is in \(describe(host.window.firstResponder))")
         XCTAssertEqual(store.activeFindTile, id)
         typeText("coffee", in: host)
