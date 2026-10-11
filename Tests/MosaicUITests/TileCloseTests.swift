@@ -96,3 +96,41 @@ final class StartRowTests: XCTestCase {
         XCTAssertEqual(plain.contentView.bounds.origin.y, 2600, accuracy: 0.5)
     }
 }
+
+/// A long thread lays out its newest rows, and older ones only as the reader goes up to them.
+final class ThreadWindowTests: XCTestCase {
+    @MainActor private func rows(_ count: Int, from: Int = 1) -> [MessageRow] {
+        let day = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        let messages = (from..<(from + count)).map { Message(id: "\($0)", text: "note \($0)", date: day + Double($0) * 60, isFromMe: $0 % 2 == 0) }
+        return ThreadPresentation().prepared(for: Conversation(id: "c", name: "Alex", participants: ["a@example.test"], messages: messages)).rows
+    }
+
+    @MainActor func testTheWindowGrowsUpwardAndShrinksBackAtTheNewest() {
+        let all = rows(300)
+        let presentation = ThreadPresentation()
+        let size = ThreadPresentation.windowSize
+        XCTAssertEqual(presentation.window(all, following: true).count, size, "following the newest: the newest rows only")
+        XCTAssertEqual(presentation.window(all, following: true).last?.id, "300")
+        XCTAssertTrue(presentation.expand(all))
+        XCTAssertEqual(presentation.window(all, following: false).count, size * 2, "near the top: more older rows")
+        XCTAssertEqual(presentation.window(all, following: true).count, size * 2, "kept while the reader is up there")
+        // New rows arrive below while reading: the window keeps its start.
+        let more = all + rows(5, from: 301)
+        XCTAssertEqual(presentation.window(more, following: false).first?.id, all[300 - size * 2].id)
+        // Back at the newest message: it shrinks again.
+        XCTAssertTrue(presentation.release())
+        XCTAssertEqual(presentation.window(more, following: true).count, size)
+        // A match far up is laid out, with a few rows above it.
+        XCTAssertTrue(presentation.include("15", in: more))
+        let window = presentation.window(more, following: true)
+        XCTAssertEqual(window.first?.id, "5")
+        XCTAssertFalse(presentation.include("200", in: more), "already laid out")
+        // Once the window reaches the first row, every row stays laid out (older pages appear above).
+        XCTAssertTrue(presentation.include("3", in: more))
+        XCTAssertEqual(presentation.window(more, following: false).count, more.count)
+        XCTAssertFalse(presentation.expand(more))
+        // A short thread is laid out whole.
+        let short = rows(40)
+        XCTAssertEqual(ThreadPresentation().window(short, following: true).count, 40)
+    }
+}

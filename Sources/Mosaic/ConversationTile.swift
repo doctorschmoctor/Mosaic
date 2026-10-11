@@ -438,6 +438,8 @@ struct MessageList: View, Equatable {
     /// Rows, reactions and lookups derived from the conversation, kept between renders (a class,
     /// so refreshing it costs no invalidation). Scrolling, highlights and resizes reuse them.
     @State private var presentation = ThreadPresentation()
+    /// Changes when more (or fewer) rows are to be laid out (`ThreadPresentation.window`).
+    @State private var windowRevision = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     static func == (lhs: MessageList, rhs: MessageList) -> Bool {
@@ -472,12 +474,18 @@ struct MessageList: View, Equatable {
     var body: some View {
         let prepared = presentation.prepared(for: conversation)
         let rows = prepared.rows
+        // The rows laid out: the newest ones, and older ones as the reader scrolls up to them (or
+        // a match or a reply's original is shown), so resizing, moving or opening a tile lays out
+        // what can be seen and a little more — not every loaded message.
+        let _ = windowRevision
+        let shown = presentation.window(rows, following: isNearBottom)
+        let showsStart = shown.startIndex == 0
         // Only the matching bubbles are given the find bar's words: a new query redraws those
         // alone, never the whole thread.
         let findMatches = presentation.findMatches(findQuery)
         // What the bubbles' names come from, so a bubble that skips redrawing still shows names that changed.
         let nameContext = senderNames.hashValue ^ conversation.name.hashValue ^ (conversation.isGroup ? 1 : 0)
-        let content = ThreadContent(first: rows.first?.id, last: rows.last?.id, count: rows.count)
+        let content = ThreadContent(first: shown.first?.id, last: shown.last?.id, count: shown.count)
         let ids = prepared.ids
         let reactions = prepared.reactions
         let byGUID = prepared.byGUID
@@ -491,7 +499,7 @@ struct MessageList: View, Equatable {
             VStack(alignment: .leading, spacing: 10 * zoom) {
                 // Earlier messages load by themselves as the reader nears the top; a small spinner
                 // shows while they come.
-                if historyCeiling {
+                if historyCeiling && showsStart {
                     // Not the start of the conversation: the most a tile shows.
                     VStack(spacing: 4) {
                         Text("Showing the newest \(WorkspaceStore.maximumHistory.formatted()) messages. Older ones are still on this Mac.")
@@ -500,7 +508,7 @@ struct MessageList: View, Equatable {
                     }
                     .frame(maxWidth: .infinity).padding(.vertical, 6)
                 }
-                if canLoadMore && isLoadingMore {
+                if canLoadMore && isLoadingMore && showsStart {
                     ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, 4)
                         .accessibilityLabel("Loading earlier messages")
                 }
@@ -508,9 +516,10 @@ struct MessageList: View, Equatable {
                     Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity).padding(.top, 24)
                 }
-                ForEach(rows) { row in
+                ForEach(shown) { row in
                     VStack(spacing: 10 * zoom) {
-                        if let day = row.dayLabel {
+                        // The first row laid out always says its day.
+                        if let day = row.dayLabel ?? (row.id == shown.first?.id ? MessageText.day(row.message.date) : nil) {
                             Text(day).font(.system(size: 10 * zoom, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
                         }
@@ -550,13 +559,24 @@ struct MessageList: View, Equatable {
             .padding(16 * zoom)
             .environment(\.threadAttachments, attachmentFiles)
             .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry, startRow: startsAt,
-                                             onNearTop: canLoadMore ? onLoadMore : nil) { near in
+                                             onNearTop: { [presentation] in
+                // Near the top of what is laid out: older loaded rows first, then older history.
+                if presentation.expand(rows) { windowRevision += 1 } else if canLoadMore { onLoadMore() }
+            }) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
         }
         // The find bar's current match is brought to the middle of the tile (also when the
-        // thread first appears around one).
-        .onChange(of: findCurrent) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
+        // thread first appears around one), laid out first if it was further up.
+        .onChange(of: findCurrent) { _, id in
+            guard let id else { return }
+            if presentation.include(id, in: rows) {
+                windowRevision += 1
+                DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+            } else {
+                proxy.scrollTo(id, anchor: .center)
+            }
+        }
         .onAppear { if startsAt == nil, let id = findCurrent { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } } }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -570,7 +590,13 @@ struct MessageList: View, Equatable {
         }
         .onAppear { if isNearBottom { onTailSeen() } }
         .onDisappear { onTailLeft() }
-        .onChange(of: isNearBottom) { _, near in if near { onTailSeen() } else { onTailLeft() } }
+        .onChange(of: isNearBottom) { _, near in
+            if near {
+                onTailSeen()
+                // Back at the newest message: the older rows laid out on the way up can go.
+                if presentation.release() { windowRevision += 1 }
+            } else { onTailLeft() }
+        }
         .onChange(of: ids) { old, new in
             // Only rows appended at the tail animate: never the initial load (no change event),
             // an older page loading above, a reconnect or confirmation (same identities), a
@@ -589,7 +615,12 @@ struct MessageList: View, Equatable {
     }
     /// Goes to a reply's original and outlines it for a moment.
     private func jump(to id: String, proxy: ScrollViewProxy) {
-        proxy.scrollTo(id, anchor: .center)
+        if presentation.include(id, in: presentation.prepared(for: conversation).rows) {
+            windowRevision += 1
+            DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+        } else {
+            proxy.scrollTo(id, anchor: .center)
+        }
         highlightedID = id
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { if highlightedID == id { highlightedID = nil } }
     }
@@ -701,6 +732,68 @@ struct MessageRow: Identifiable, Equatable {
     private var findQuery = ""
     private var findBuild = -1
     private var findSet: Set<String> = []
+
+    // MARK: The rows laid out
+
+    /// How many rows a thread lays out at least (and adds each time the reader nears the top of
+    /// them): far more than a tile shows, far fewer than a long history.
+    static let windowSize = 80
+    /// The first row laid out last time, and whether that was the very first row.
+    private var windowFirst: String?
+    private var windowCoversAll = false
+    /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
+    /// the newest message does not drop them until the reader is back there.
+    private var holdsOlder = false
+
+    /// The rows to lay out: the newest `windowSize` while following the newest message; else from
+    /// where the window began (every row, once it reached the first — so older pages that load
+    /// above appear), so nothing in view moves when rows arrive below.
+    func window(_ rows: [MessageRow], following: Bool) -> ArraySlice<MessageRow> {
+        guard rows.count > Self.windowSize else {
+            windowFirst = rows.first?.id
+            windowCoversAll = true
+            return rows[...]
+        }
+        let start: Int
+        if following && !holdsOlder {
+            start = rows.count - Self.windowSize
+        } else if windowCoversAll {
+            start = 0
+        } else if let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }) {
+            start = index
+        } else {
+            start = rows.count - Self.windowSize
+        }
+        windowFirst = rows[start].id
+        windowCoversAll = start == 0
+        return rows[start...]
+    }
+    /// Lays out more of the older loaded rows. False when every row is laid out already.
+    func expand(_ rows: [MessageRow]) -> Bool {
+        guard !windowCoversAll, let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }), index > 0 else { return false }
+        let start = max(0, index - Self.windowSize)
+        windowFirst = rows[start].id
+        windowCoversAll = start == 0
+        holdsOlder = true
+        return true
+    }
+    /// Makes sure a row is laid out, with a few above it. True when the window had to grow.
+    func include(_ id: String, in rows: [MessageRow]) -> Bool {
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
+        let current = windowFirst.flatMap { first in rows.firstIndex { $0.id == first } } ?? max(0, rows.count - Self.windowSize)
+        holdsOlder = true
+        guard index < current + 3, current > 0 else { return false }
+        let start = max(0, index - 10)
+        windowFirst = rows[start].id
+        windowCoversAll = start == 0
+        return true
+    }
+    /// Back at the newest message: the window may shrink to the newest rows again. True when it held older ones.
+    func release() -> Bool {
+        guard holdsOlder else { return false }
+        holdsOlder = false
+        return true
+    }
 
     /// The rows whose text has the find bar's words, worked out once per query and build.
     func findMatches(_ query: String) -> Set<String> {
