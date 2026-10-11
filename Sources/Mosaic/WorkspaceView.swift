@@ -795,6 +795,7 @@ struct TileCanvas: Layout {
     func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
     func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        TileTrace.note("canvas places \(subviews.count) views: \(TileTrace.frames(subviews.map { $0[TileFrameKey.self] }.filter { $0.width > 40 && $0.height > 40 }))")
         for subview in subviews {
             let frame = subview[TileFrameKey.self]
             subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), anchor: .topLeading,
@@ -832,6 +833,7 @@ struct TileWorkspace: View {
             let viewFrame = geometry.frame(in: .global)
             let plan = TileLayout.plan(order: order, viewport: viewport, layout: layout,
                 gridFractions: gridFractions, rowWeights: rowWeights, columnWeights: columnWeights, topInset: topInset)
+            let _ = TileTrace.note("workspace plans \(order.count) tiles in \(Int(viewport.width))×\(Int(viewport.height)): \(TileTrace.frames(order.compactMap { plan.frames[$0] }))")
             // How any order would lay out right now, so a reorder knows where each tile was and where it goes.
             let _ = (store.tilePlanner = { [gridFractions, rowWeights, columnWeights] order in
                 TileLayout.plan(order: order, viewport: viewport, layout: layout,

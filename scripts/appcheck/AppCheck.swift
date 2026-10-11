@@ -173,6 +173,14 @@ enum SyntheticMessages {
 @MainActor enum Check {
     static var failures: [String] = []
 
+    /// Prints what the tile area does (TileTrace) from now until `untrace`, with the time since.
+    static func trace(_ label: String) {
+        let start = Date()
+        print("  trace: \(label)")
+        TileTrace.sink = { message in print("    +\(Int(Date().timeIntervalSince(start) * 1000)) ms \(message)") }
+    }
+    static func untrace() { TileTrace.sink = nil }
+
     static func run(_ store: WorkspaceStore) async {
         if Harness.live {
             // The conversations load; four open, as tiles.
@@ -188,6 +196,10 @@ enum SyntheticMessages {
         store.setLayout(.grid)
         await pause(0.8)
         guard let window = NSApp.windows.first(where: { !handles(in: $0.contentView).isEmpty }) else { return finish("no workspace window") }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        await pause(0.3)
+        print("App check: app active \(NSApp.isActive), window key \(window.isKeyWindow), main \(window.isMainWindow)")
         guard store.openIDs.count == 4 else { return finish("four tiles expected, \(store.openIDs.count) open") }
         let longest = store.tiles.map(\.messages.count).max() ?? 0
         print("App check (\(Harness.mode)): \(store.openIDs.count) tiles open (up to \(longest) messages loaded), \(store.conversations.count) conversations, a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
@@ -217,6 +229,7 @@ enum SyntheticMessages {
         // A conversation from the sidebar (a row's press opens it and puts the cursor in it).
         await pause(0.3)
         if let other = store.conversations.first(where: { !store.openIDs.contains($0.id) })?.id {
+            trace("opening a conversation from the sidebar")
             store.openAndType(other)
             await expectInPlace(store, window, "after opening a conversation from the sidebar")
         }
@@ -271,11 +284,13 @@ enum SyntheticMessages {
         let start = Date()
         while Date().timeIntervalSince(start) < 1.5 {
             if inPlace(store, window) {
+                untrace()
                 print("App check: \(store.openIDs.count) tiles in place \(label) after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
                 return
             }
             await pause(0.01)
         }
+        untrace()
         let drawn = handles(in: window.contentView).map { $0.convert($0.bounds, to: nil) }
         let plan = store.tilePlanner?(store.displayOrder)
         print("App check: tiles NOT in place \(label): \(store.openIDs.count) open, \(drawn.count) drawn")
@@ -309,6 +324,7 @@ enum SyntheticMessages {
         guard let moved = event(.mouseMoved), let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return false }
         handle.mouseEntered(with: moved)
         await pause(0.15)
+        trace("pressing a tile's close button")
         handle.mouseDown(with: down)
         await pause(0.05)
         handle.mouseUp(with: up)
@@ -335,6 +351,7 @@ enum SyntheticMessages {
             menu.update()
             if menu.items[index].isEnabled {
                 print("App check: \(title) available after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+                trace("choosing \(title)")
                 menu.performActionForItem(at: index)
                 return true
             }

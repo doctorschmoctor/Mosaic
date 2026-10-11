@@ -108,6 +108,7 @@ struct TileHeaderHandle: NSViewRepresentable {
         override func mouseExited(with event: NSEvent) { closeHovered = false }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            TileTrace.note(window == nil ? "a tile header left the window" : "a tile header joined the window")
             if window == nil { closeHovered = false }
         }
 

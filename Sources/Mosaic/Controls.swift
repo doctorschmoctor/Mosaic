@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 
 /// Mosaic has no motion: every workspace change takes effect on the next frame. This runs `changes`
 /// in a transaction that suppresses any implicit SwiftUI animation that might otherwise apply.
@@ -54,5 +55,24 @@ extension EnvironmentValues {
     var zoomScale: CGFloat {
         get { self[ZoomScaleKey.self] }
         set { self[ZoomScaleKey.self] = newValue }
+    }
+}
+
+/// What the tile area does, for diagnosing layout problems: closes, the workspace's plan, the
+/// canvas placing its tiles, headers joining and leaving the window, refreshes. Counts and frames
+/// only — never a conversation, a name or an address. Silent unless debug messages of the
+/// "tiles" category are being collected:
+///   log stream --level debug --predicate 'subsystem == "com.doctorschmoctor.Mosaic" && category == "tiles"'
+/// The app check (scripts/appcheck) prints them through `sink`.
+enum TileTrace {
+    static let log = OSLog(subsystem: "com.doctorschmoctor.Mosaic", category: "tiles")
+    nonisolated(unsafe) static var sink: ((String) -> Void)?
+    static func note(_ message: @autoclosure () -> String) {
+        if let sink { sink(message()) }
+        guard log.isEnabled(type: .debug) else { return }
+        os_log(.debug, log: log, "%{public}@", message())
+    }
+    static func frames(_ frames: [CGRect]) -> String {
+        frames.map { "(\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))×\(Int($0.height)))" }.joined(separator: " ")
     }
 }

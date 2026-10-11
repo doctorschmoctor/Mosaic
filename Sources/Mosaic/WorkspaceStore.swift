@@ -773,6 +773,8 @@ import MosaicCore
         lastUsed[id] = useCount
     }
     func close(_ id: String) {
+        TileTrace.note("close begins: \(openIDs.count) open")
+        defer { TileTrace.note("close ends: \(openIDs.count) open") }
         // Everything a close changes, in one transaction (see `instantly`).
         instantly {
             if openIDs.contains(id) { rememberClosed(id) }
@@ -1531,7 +1533,9 @@ import MosaicCore
 
     private func performRefresh(background: Bool = false) async {
         let requestGeneration = generation
+        TileTrace.note("refresh begins")
         defer {
+            TileTrace.note("refresh ends")
             if isLoadingConversations, generation == requestGeneration, connectedBefore || connectionError != nil {
                 isLoadingConversations = false
             }
