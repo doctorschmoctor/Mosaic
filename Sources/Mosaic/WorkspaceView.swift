@@ -789,6 +789,11 @@ struct TileCanvas: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         proposal.replacingUnspecifiedDimensions(by: .zero)
     }
+    /// The canvas has no alignment guides of its own. Without these, SwiftUI's default merges its
+    /// tiles' guides, which measures every tile — every thread inside — whenever the canvas is
+    /// placed in its frame.
+    func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         for subview in subviews {
             let frame = subview[TileFrameKey.self]

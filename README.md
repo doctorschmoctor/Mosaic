@@ -128,6 +128,7 @@ Message history, thumbnails, link previews and contact names stay in memory. Mos
 ./scripts/test.sh          # unit and UI tests (a fixture run: no Contacts, no real files, no sending)
 ./scripts/build-app.sh     # signed app → build/Mosaic.zip
 ./scripts/render-preview.sh docs/workspace.png   # the README screenshot, from demo data
+./scripts/app-check.sh     # closes and opens tiles in the running app (demo data, its menus)
 ```
 
 CI runs the tests, builds the app and renders the preview on every push. Launch with `--demo` for the fictional workspace. Tests, the preview renderer and `--demo` / `--isolated` launches (or `MOSAIC_ISOLATED=1`) are fixture runs: they never read the Mac's Contacts or ask for a permission, never read the signed-in Messages database unless given one, keep outgoing files and preferences apart from the installed app's, and cannot send. `scripts/test.sh` stops a run that goes `MOSAIC_TEST_STALL_SECONDS` (300) without output and names the test it stalled in. After adding source files, run `python3 scripts/generate-xcode-project.py`.

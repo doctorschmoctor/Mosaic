@@ -110,6 +110,20 @@ import MosaicCore
         guard sidebarFilter != filter else { return }
         instantly { sidebarFilter = filter; sidebarSelection = nil }
     }
+    /// What the menu bar shows: copied from the store once a change is done (MenuState).
+    let menu = MenuState()
+    /// Copies what the menus show into `menu`, and again on the next turn of the main queue after
+    /// anything it was taken from changes — never inside the change itself.
+    private func trackMenu() {
+        let values = withObservationTracking {
+            // `heldTile` follows the unobserved drag, so a drag starting or ending is seen here.
+            MenuState.Values(canArrangeTiles: heldTile == nil && canArrangeTiles, canReopenClosedTile: canReopenClosedTile, sidebarFilter: sidebarFilter,
+                             canZoomIn: canZoomIn, canZoomOut: canZoomOut, isActualSize: zoom == 1, zoomLabel: zoomLabel)
+        } onChange: { [weak self] in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackMenu() } }
+        }
+        menu.update(values)
+    }
     /// A change that can still be taken back (a discarded draft, a hidden conversation), shown at
     /// the bottom of the sidebar for a few seconds.
     private(set) var undoNote: UndoNote?
@@ -348,6 +362,7 @@ import MosaicCore
         }
         composerFocus.isOpen = { [weak self] id in self?.openIDs.contains(id) ?? false }
         startPolling()
+        trackMenu()
     }
 
     /// The poll is a fallback: changes are normally picked up within a moment by the file watcher.
@@ -532,15 +547,16 @@ import MosaicCore
     /// the tile used longest ago that is not protected. When every tile is protected, nothing
     /// closes by itself: the reader is asked which tile makes room (`replacementChoice`).
     func open(_ id: String, thenType: Bool = false) {
+        instantly { openNow(id, thenType: thenType) }
+    }
+    private func openNow(_ id: String, thenType: Bool) {
         var opened = false
-        instantly {
-            mutate { opened = $0.open(id) }
-            // Every tile taken: the one used longest ago gives up its place to the new one.
-            if !opened, let victim = tileToReplace() {
-                evict(victim)
-                mutate { $0.replace(victim, with: id) }
-                opened = true
-            }
+        mutate { opened = $0.open(id) }
+        // Every tile taken: the one used longest ago gives up its place to the new one.
+        if !opened, let victim = tileToReplace() {
+            evict(victim)
+            mutate { $0.replace(victim, with: id) }
+            opened = true
         }
         guard opened else {
             if openIDs.count >= Workspace.maximumTiles {
@@ -757,16 +773,17 @@ import MosaicCore
         lastUsed[id] = useCount
     }
     func close(_ id: String) {
-        if openIDs.contains(id) { rememberClosed(id) }
+        // Everything a close changes, in one transaction (see `instantly`).
         instantly {
+            if openIDs.contains(id) { rememberClosed(id) }
             if tileDrag?.id == id { tileDrag = nil }
             mutate { $0.close(id) }
             keepDraftOfClosingTile(id)
             releaseTileState(id)
+            if focusTarget == id { focusTarget = nil }
+            composerFocus.cancel(for: id)
+            updateDraftSummaries()
         }
-        if focusTarget == id { focusTarget = nil }
-        composerFocus.cancel(for: id)
-        updateDraftSummaries()
     }
     /// Hides a conversation from Mosaic: its tile closes (its draft is kept) and it leaves the
     /// sidebar. Nothing changes in Messages — the conversation and its history stay there — and a
@@ -778,15 +795,15 @@ import MosaicCore
         instantly {
             close(id)
             hidden[id] = String(max(conversation.lastActivity, Date()).timeIntervalSinceReferenceDate)
+            // A hidden conversation is not one to reopen by ⌘⇧T.
+            recentlyClosed.removeAll { $0 == id }
+            if sidebarSelection == id { sidebarSelection = nil }
+            offerUndo("\(conversation.name) hidden from Mosaic", undo: { [weak self] in
+                guard let self else { return }
+                self.unhide(id)
+                if wasOpen { self.openAndType(id) }
+            })
         }
-        // A hidden conversation is not one to reopen by ⌘⇧T.
-        recentlyClosed.removeAll { $0 == id }
-        if sidebarSelection == id { sidebarSelection = nil }
-        offerUndo("\(conversation.name) hidden from Mosaic", undo: { [weak self] in
-            guard let self else { return }
-            self.unhide(id)
-            if wasOpen { self.openAndType(id) }
-        })
     }
     /// Shows a hidden conversation in the sidebar again.
     func unhide(_ id: String) {
@@ -878,10 +895,12 @@ import MosaicCore
     /// over and confirms it). The newest request replaces any earlier one.
     func requestComposerFocus(_ id: String) {
         guard openIDs.contains(id) else { return }
-        focus(id)
-        focusTarget = id
-        focusToken += 1
-        composerFocus.request(id, token: focusToken)
+        instantly {
+            focus(id)
+            focusTarget = id
+            focusToken += 1
+            composerFocus.request(id, token: focusToken)
+        }
     }
     func reorder(_ id: String, before destination: String) { instantly { mutate { $0.reorder(id, before: destination) } } }
 
@@ -994,6 +1013,9 @@ import MosaicCore
     /// gets a tile — free space, or the place of the tile used longest ago — or its tile is
     /// found, and the cursor goes into that tile's message field, ready to type.
     func openAndType(_ id: String) {
+        instantly { openAndTypeNow(id) }
+    }
+    private func openAndTypeNow(_ id: String) {
         if !openIDs.contains(id) { open(id, thenType: true) }
         // Every tile is protected: the reader chooses which closes first (`chooseReplacement`).
         guard openIDs.contains(id) else { return }

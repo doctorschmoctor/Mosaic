@@ -98,6 +98,39 @@ final class TileCloseTests: XCTestCase {
     }
 }
 
+/// The menus read `store.menu`, which follows the store once a change is done — on the next turn
+/// of the main queue, never inside the change (MenuState says why).
+final class MenuStateTests: XCTestCase {
+    @MainActor func testTheMenusFollowTheStoreOnceAChangeIsDone() async throws {
+        let name = "MosaicTest-\(UUID())"
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: name)!, forceDemo: true)
+        store.setLayout(.grid)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(store.menu.values.canArrangeTiles)
+        XCTAssertFalse(store.menu.values.canReopenClosedTile, "nothing closed yet")
+        XCTAssertEqual(store.menu.values.sidebarFilter, .all)
+
+        store.close(store.openIDs[0])
+        XCTAssertFalse(store.menu.values.canReopenClosedTile, "not inside the change")
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(store.menu.values.canReopenClosedTile, "once it is done")
+
+        store.setSidebarFilter(.drafts)
+        store.setLayout(.focus)
+        store.zoomIn()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(store.menu.values.sidebarFilter, .drafts)
+        XCTAssertFalse(store.menu.values.canArrangeTiles, "Focus shows one tile")
+        XCTAssertFalse(store.menu.values.isActualSize)
+        XCTAssertEqual(store.menu.values.zoomLabel, store.zoomLabel)
+
+        store.reopenLastClosedTile()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(store.menu.values.canReopenClosedTile, "reopened: nothing left to reopen")
+    }
+}
+
 /// A window into older history opens on the message it is around, not on its newest one.
 final class StartRowTests: XCTestCase {
     final class Flipped: NSView { override var isFlipped: Bool { true } }
