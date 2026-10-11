@@ -213,11 +213,11 @@ final class ScrollPinner: NSObject {
             isNearBottom = false
             centering = startRow
             sizeChanged()
-            center(startRow, tries: 30)
+            centerRow(startRow, tries: 30)
             for delay in [0.12, 0.35, 0.8] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     guard let self, self.centering == startRow else { return }
-                    self.center(startRow, tries: 0)
+                    self.centerRow(startRow, tries: 0)
                 }
             }
             return
@@ -228,10 +228,10 @@ final class ScrollPinner: NSObject {
         sizeChanged()
     }
     /// Brings a row to the middle of the view once layout has reported where it is.
-    private func center(_ id: String, tries: Int) {
+    private func centerRow(_ id: String, tries: Int) {
         guard centering == id else { return }
         guard let frame = registry?.frames[id], let geometry else {
-            if tries > 0 { DispatchQueue.main.async { [weak self] in self?.center(id, tries: tries - 1) } }
+            if tries > 0 { DispatchQueue.main.async { [weak self] in self?.centerRow(id, tries: tries - 1) } }
             return
         }
         let (clip, documentHeight, flipped) = geometry
