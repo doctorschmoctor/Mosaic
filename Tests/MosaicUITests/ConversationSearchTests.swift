@@ -162,12 +162,13 @@ final class ConversationSearchTests: XCTestCase {
         let store = try await liveStore()
         let loaded = try XCTUnwrap(store.conversations.first).messages
         XCTAssertEqual(SharedContent(messages: loaded).links.map(\.url.absoluteString), ["https://example.com/new"], "only the loaded one")
-        let history = try XCTUnwrap(await store.sharedHistory(Self.alex))
+        let read = await store.sharedHistory(Self.alex)
+        let history = try XCTUnwrap(read)
         let content = SharedContent(messages: loaded, history: history)
         XCTAssertEqual(content.links.map(\.url.absoluteString), ["https://example.com/new", "https://example.com/old"], "newest first, each once")
         XCTAssertEqual(content.files.map(\.attachment.name), ["old.pdf"])
         XCTAssertEqual(content.files.first?.messageID, "8")
-        let again = try XCTUnwrap(await store.sharedHistory(Self.alex))
+        let again = await store.sharedHistory(Self.alex)
         XCTAssertEqual(again, history, "read once per session")
     }
 
