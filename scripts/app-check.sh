@@ -10,9 +10,11 @@ export CLANG_MODULE_CACHE_PATH="$PWD/.build/ModuleCache"
 sources=()
 for file in Sources/Mosaic/*.swift; do [[ "$file" == */MosaicApp.swift ]] || sources+=("$file"); done
 swiftc -swift-version 5 -parse-as-library -I Sources/CSQLite Sources/MosaicCore/*.swift "${sources[@]}" scripts/appcheck/AppCheck.swift -o .build/MosaicAppCheck
-.build/MosaicAppCheck --demo
+status=0
+.build/MosaicAppCheck --demo || status=$?
 if .build/MosaicAppCheck --demo --store-menus; then
     echo "App check: menus that read the store passed too (the harness did not reproduce the stale tiles)"
 else
     echo "App check: as expected, menus that read the store left the tiles out of place"
 fi
+exit $status

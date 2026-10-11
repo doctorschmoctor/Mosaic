@@ -58,6 +58,7 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
 
     static func run(_ store: WorkspaceStore) async {
         let mode = CommandLine.arguments.contains("--store-menus") ? " (menus that read the store)" : ""
+        menuValues = { store.menu.values }
         await pause(2)
         store.setLayout(.grid)
         await pause(0.8)
@@ -74,12 +75,12 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
 
         // The Workspace menu: Close Focused Tile, then Reopen Closed Tile.
         if let focused = store.focused?.id {
-            if perform("Close Focused Tile") {
+            if await perform("Close Focused Tile") {
                 if store.openIDs.contains(focused) { failures.append("Close Focused Tile did not close it") }
                 await expectInPlace(store, window, "after Close Focused Tile")
             }
             await pause(0.3)
-            if perform("Reopen Closed Tile") {
+            if await perform("Reopen Closed Tile") {
                 if !store.openIDs.contains(focused) { failures.append("Reopen Closed Tile did not reopen it") }
                 await expectInPlace(store, window, "after Reopen Closed Tile")
             }
@@ -175,9 +176,9 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Chooses a menu bar item by its title, as a click on it would; false when it is missing or
-    /// unavailable.
-    static func perform(_ title: String) -> Bool {
+    /// Chooses a menu bar item by its title, as a click on it would (the menu is brought up to
+    /// date first, as opening it does); false when it is missing or stays unavailable.
+    static func perform(_ title: String) async -> Bool {
         func find(in menu: NSMenu) -> (NSMenu, Int)? {
             for (index, item) in menu.items.enumerated() {
                 if item.title == title { return (menu, index) }
@@ -185,16 +186,26 @@ final class CheckDelegate: NSObject, NSApplicationDelegate {
             }
             return nil
         }
-        guard let main = NSApp.mainMenu, let (menu, index) = find(in: main) else {
-            failures.append("no menu item \(title)")
-            return false
+        let start = Date()
+        while true {
+            guard let main = NSApp.mainMenu, let (menu, index) = find(in: main) else {
+                failures.append("no menu item \(title)")
+                return false
+            }
+            menu.delegate?.menuNeedsUpdate?(menu)
+            menu.update()
+            if menu.items[index].isEnabled {
+                print("App check: \(title) available after \(Int(Date().timeIntervalSince(start) * 1000)) ms")
+                menu.performActionForItem(at: index)
+                return true
+            }
+            if Date().timeIntervalSince(start) > 1.5 {
+                print("App check: \(title) unavailable in the menu bar; the menu's values: \(String(describing: menuValues?()))")
+                failures.append("\(title) is unavailable")
+                return false
+            }
+            await pause(0.05)
         }
-        menu.update()
-        guard menu.items[index].isEnabled else {
-            failures.append("\(title) is unavailable")
-            return false
-        }
-        menu.performActionForItem(at: index)
-        return true
     }
+    static var menuValues: (() -> Any)?
 }
