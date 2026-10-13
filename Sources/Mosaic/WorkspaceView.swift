@@ -908,9 +908,12 @@ struct TileWorkspace: View {
         let raised = held != nil || store.liftedTile == chat.id || store.settlingTile == chat.id
         TileMotion(motion: store.dragMotion, slot: frame.origin, isHeld: held != nil,
                    spring: store.tileSprings[chat.id] ?? .zero, isLifted: store.liftedTile == chat.id) {
+            // The callbacks ask the store for the layout as it is when the pointer moves, so a tile
+            // need not be drawn again for them when the layout changes (ConversationTile's ==).
             ConversationTile(conversation: chat,
-                onDragChanged: movable ? { (translation: CGSize) in store.dragTile(chat.id, translation: translation, plan: plan) } : nil,
-                onDragEnded: { store.finishTileDrag(chat.id) })
+                onDragChanged: movable ? { [store, id = chat.id] translation in store.dragTile(id, translation: translation) } : nil,
+                onDragEnded: { [store, id = chat.id] in store.finishTileDrag(id) })
+                .equatable()
                 .frame(width: frame.width, height: frame.height)
         }
         // Whether the tile is within the workspace's view (Columns can scroll tiles out of it): a

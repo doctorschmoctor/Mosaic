@@ -1053,6 +1053,11 @@ import MosaicCore
     /// The spring tiles move with: quick, settling without a wobble.
     static let tileSpring = Animation.spring(response: 0.3, dampingFraction: 0.86)
 
+    /// The pointer moved with a tile held, in the workspace as it is laid out now.
+    func dragTile(_ id: String, translation: CGSize) {
+        guard let plan = tilePlanner?(displayOrder) else { return }
+        dragTile(id, translation: translation, plan: plan)
+    }
     /// The pointer moved with a tile held. The tile follows the pointer exactly; when it crosses
     /// into another tile's place, the tiles between spring to their new places.
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
@@ -1563,6 +1568,9 @@ import MosaicCore
             connectedBefore = true; lastRefreshed = Date()
             startWatchingDatabase()
             guard let snapshot else { return } // unchanged since the last load
+            // A tile being moved, or settling into place, is not held up by a re-render.
+            await waitWhileTilesMove()
+            guard generation == requestGeneration, isLive else { return }
             lastLoad = snapshot.token
             let ids = request.openIDs
             var loaded = snapshot.conversations
@@ -1651,6 +1659,17 @@ import MosaicCore
                 }
                 connectionError = error.localizedDescription
             }
+        }
+    }
+
+    /// Returns once no tile is held or settling into place (or after ten seconds, whatever the
+    /// tiles are doing). What a refresh brings changes what the tiles show, and drawing that while
+    /// tiles move made them stall; it can wait the fraction of a second a move takes.
+    private func waitWhileTilesMove() async {
+        var waited = 0
+        while tileDrag != nil || settlingTile != nil, waited < 200, !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(50))
+            waited += 1
         }
     }
 

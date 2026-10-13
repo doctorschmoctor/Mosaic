@@ -4,11 +4,18 @@ import UniformTypeIdentifiers
 import MosaicCore
 #endif
 
-struct ConversationTile: View {
+struct ConversationTile: View, Equatable {
     @Environment(WorkspaceStore.self) private var store
     let conversation: Conversation
     var onDragChanged: ((CGSize) -> Void)? = nil
     var onDragEnded: (() -> Void)? = nil
+    /// Two tiles draw the same when they show the same conversation and both can be moved or
+    /// neither can. The drag callbacks are left out: the workspace makes them afresh each time it
+    /// lays out, so they always differ, yet they do the same thing (they ask the store, which knows
+    /// the current layout). Comparing them redrew every tile whenever any tile moved.
+    static func == (lhs: ConversationTile, rhs: ConversationTile) -> Bool {
+        lhs.conversation == rhs.conversation && (lhs.onDragChanged == nil) == (rhs.onDragChanged == nil)
+    }
     @State private var isDropTarget = false
     @State private var composerHeight = ComposerEditor.minimumHeight
     @Environment(\.zoomScale) private var zoom
