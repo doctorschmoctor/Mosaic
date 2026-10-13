@@ -152,6 +152,16 @@ import MosaicCore
     private(set) var heldTile: HeldTile?
     /// Where the held tile is now; read only by the held tile's position.
     let dragMotion = TileDragMotion()
+    /// Moves a picture of the held tile instead of the tile (TileDragStage).
+    let dragStage = TileDragStage()
+    /// The held tile whose picture is moving; the tile itself waits hidden in its place.
+    private(set) var stagedDrag: String?
+    /// A tile's header was pressed: a drag may follow, so a picture of the tile is made now,
+    /// while nothing moves (the layout's own drags have pictures only).
+    func prepareTileDrag(_ id: String) {
+        guard layout != .focus, openIDs.count > 1, tileDrag == nil, let frame = tilePlanner?(displayOrder).frames[id] else { return }
+        dragStage.capture(id, frame: frame)
+    }
     /// The tile shown lifted (slightly larger, with a deeper shadow): the held one, and then the
     /// released one until it has settled into its place.
     private(set) var liftedTile: String?
@@ -1064,9 +1074,14 @@ import MosaicCore
         guard layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).
         if tileDrag?.id != id {
-            instantly { tileDrag = TileDragSession(id: id, origin: frame, order: openIDs) }
-            // Picked up: the tile lifts off the board.
-            if tileMotionEnabled() { withAnimation(Self.tileSpring) { liftedTile = id } } else { instantly { liftedTile = id } }
+            // Its picture moves when there is one; the tile then waits, hidden, until it is let go.
+            let staged = dragStage.begin(id, frame: frame, lift: tileMotionEnabled())
+            instantly {
+                stagedDrag = staged ? id : nil
+                tileDrag = TileDragSession(id: id, origin: frame, order: openIDs)
+            }
+            // Picked up: the tile lifts off the board (the picture lifts itself).
+            if tileMotionEnabled() && !staged { withAnimation(Self.tileSpring) { liftedTile = id } } else { instantly { liftedTile = id } }
         }
         guard var drag = tileDrag else { return }
         let before = drag.order
@@ -1134,10 +1149,15 @@ import MosaicCore
             heldTile = held
         }
         if let drag = tileDrag {
-            if dragMotion.origin != drag.frame.origin { dragMotion.origin = drag.frame.origin }
-        } else if liftedTile != nil, liftedTile != settlingTile {
-            // Ended some other way (the tile closed, the layout changed): nothing settles.
-            liftedTile = nil
+            if stagedDrag == drag.id { dragStage.move(to: drag.frame.origin) }
+            else if dragMotion.origin != drag.frame.origin { dragMotion.origin = drag.frame.origin }
+        } else {
+            // The tile shows again where its picture is, and the picture goes.
+            if stagedDrag != nil { stagedDrag = nil; dragStage.end() }
+            if liftedTile != nil, liftedTile != settlingTile {
+                // Ended some other way (the tile closed, the layout changed): nothing settles.
+                liftedTile = nil
+            }
         }
     }
     func draft(_ id: String) -> Binding<String> {

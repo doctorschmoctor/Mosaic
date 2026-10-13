@@ -887,6 +887,12 @@ struct TileWorkspace: View {
             ForEach(store.tiles) { chat in
                 if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, viewFrame: viewFrame) }
             }
+            // The held tile's picture moves here, above every tile (TileDragStage).
+            TileStage(stage: store.dragStage)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+                .zIndex(1000)
+                .tileFrame(CGRect(origin: .zero, size: plan.size))
             ForEach(plan.dividers) { divider in
                 DividerHandle(divider: divider, enabled: store.heldTile == nil,
                     onChanged: { translation in resize(divider, translation: translation, plan: plan) },
@@ -906,7 +912,9 @@ struct TileWorkspace: View {
         let frame = held.map { CGRect(origin: slot.origin, size: $0.size) } ?? slot
         let movable = store.layout != .focus && store.tiles.count > 1
         let raised = held != nil || store.liftedTile == chat.id || store.settlingTile == chat.id
-        TileMotion(motion: store.dragMotion, slot: frame.origin, isHeld: held != nil,
+        // While its picture moves (TileDragStage), the held tile itself stays in its place, hidden.
+        let staged = store.stagedDrag == chat.id
+        TileMotion(motion: store.dragMotion, slot: frame.origin, isHeld: held != nil && !staged,
                    spring: store.tileSprings[chat.id] ?? .zero, isLifted: store.liftedTile == chat.id) {
             // The callbacks ask the store for the layout as it is when the pointer moves, so a tile
             // need not be drawn again for them when the layout changes (ConversationTile's ==).
@@ -916,6 +924,7 @@ struct TileWorkspace: View {
                 .equatable()
                 .frame(width: frame.width, height: frame.height)
         }
+        .opacity(staged ? 0 : 1)
         // Whether the tile is within the workspace's view (Columns can scroll tiles out of it): a
         // tile out of view does not count as read.
         .onGeometryChange(for: Bool.self) { proxy in
@@ -972,7 +981,7 @@ struct TileMotion<Content: View>: View {
     @ViewBuilder let content: Content
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    static var liftScale: CGFloat { 1.015 }
+    static var liftScale: CGFloat { TileDragStage.liftScale }
 
     var body: some View {
         let _ = TileTrace.note("motion body")

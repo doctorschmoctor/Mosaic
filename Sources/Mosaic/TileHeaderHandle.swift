@@ -19,6 +19,8 @@ struct TileHeaderHandle: NSViewRepresentable {
     let onClick: () -> Void
     let onClose: () -> Void
     var onCloseHover: (Bool) -> Void = { _ in }
+    /// A press on the header, not on the close button: a drag may follow.
+    var onPress: () -> Void = {}
     /// The header's menu (right-click or Control-click): actions on this tile.
     var menuItems: [MenuItem] = []
 
@@ -42,6 +44,7 @@ struct TileHeaderHandle: NSViewRepresentable {
     private func apply(_ view: HandleView) {
         view.onDragChanged = onDragChanged; view.onDragEnded = onDragEnded; view.onClick = onClick; view.onClose = onClose
         view.onCloseHover = onCloseHover
+        view.onPress = onPress
         view.menuItems = menuItems
         view.closeLabel = closeLabel
         if view.draggable != draggable {
@@ -62,6 +65,7 @@ struct TileHeaderHandle: NSViewRepresentable {
         var onClick: (() -> Void)?
         var onClose: (() -> Void)?
         var onCloseHover: ((Bool) -> Void)?
+        var onPress: (() -> Void)?
         var menuItems: [MenuItem] = []
         var closeLabel = "Close tile" { didSet { closeElement.setAccessibilityLabel(closeLabel) } }
         private var pressOrigin: NSPoint?
@@ -152,6 +156,7 @@ struct TileHeaderHandle: NSViewRepresentable {
             pressOrigin = event.locationInWindow
             pressWindow = event.window ?? window
             pressedClose = isOnClose(convert(event.locationInWindow, from: nil))
+            if !pressedClose, draggable { onPress?() }
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDragged, .leftMouseUp]) { [weak self] event in
                 guard let self, event.window === self.pressWindow else { return event }
                 self.handledEvent = event

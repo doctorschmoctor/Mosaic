@@ -303,6 +303,7 @@ struct ConversationTile: View, Equatable {
             onDragChanged: { onDragChanged?($0) }, onDragEnded: { onDragEnded?() },
             onClick: { store.requestComposerFocus(conversation.id) }, onClose: { store.close(conversation.id) },
             onCloseHover: { hovered in if closeHovered != hovered { closeHovered = hovered } },
+            onPress: { [store, id = conversation.id] in store.prepareTileDrag(id) },
             menuItems: headerMenu))
         .help(onDragChanged == nil ? "" : "Drag to move this tile")
         .accessibilityElement(children: .contain)

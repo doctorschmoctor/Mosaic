@@ -455,9 +455,12 @@ enum SyntheticMessages {
             NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
                                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         }
-        let kinds = ["workspace plans", "canvas places", "tile body", "motion body", "held order changes", "refresh applies", "drag begins", "drag ends", "move"]
+        let kinds = ["workspace plans", "canvas places", "tile body", "motion body", "held order changes", "refresh applies", "drag begins", "drag ends", "picture taken", "move"]
         var notes: [(time: CFTimeInterval, kind: String)] = []
-        TileTrace.sink = { message in notes.append((CACurrentMediaTime(), kinds.first { message.hasPrefix($0) } ?? "other")) }
+        TileTrace.sink = { message in
+            if message.hasPrefix("picture taken") { print("  " + message) }
+            notes.append((CACurrentMediaTime(), kinds.first { message.hasPrefix($0) } ?? "other"))
+        }
         let recorder = FrameRecorder()
         recorder.start(in: content)
         await Check.pause(0.3)
