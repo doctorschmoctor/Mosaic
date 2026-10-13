@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import QuartzCore
 import CSQLite
 
 // Mosaic as the app runs it — its window and its menus, which SwiftUI keeps up to date through
@@ -205,6 +206,12 @@ enum SyntheticMessages {
         print("App check (\(Harness.mode)): \(store.openIDs.count) tiles open (up to \(longest) messages loaded), \(store.conversations.count) conversations, a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
         await expectInPlace(store, window, "at launch")
 
+        // A fast drag around the grid, measured.
+        if !CommandLine.arguments.contains("--store-menus") {
+            await DragBenchmark.run(store, window)
+            await expectInPlace(store, window, "after the drag")
+        }
+
         // A header's close button, the pointer over it first (the top-left tile).
         let first = store.displayOrder[0]
         guard await pressCloseOfTopLeftTile(in: window) else { return finish("no tile header to press") }
@@ -363,4 +370,121 @@ enum SyntheticMessages {
             await pause(0.05)
         }
     }
+}
+
+
+/// The display's frames and the main thread's busy stretches while something runs: a display
+/// link's callbacks come on the main thread, so a frame the main thread was too busy for shows
+/// up as a gap between two callbacks.
+@MainActor final class FrameRecorder: NSObject {
+    private var link: CADisplayLink?
+    private var observer: CFRunLoopObserver?
+    private(set) var stamps: [CFTimeInterval] = []
+    private(set) var busy: [CFTimeInterval] = []
+    private var woke: CFTimeInterval = 0
+
+    func start(in view: NSView) {
+        let link = view.displayLink(target: self, selector: #selector(tick(_:)))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue | CFRunLoopActivity.beforeWaiting.rawValue, true, 0) { [weak self] _, activity in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let now = CACurrentMediaTime()
+                if activity == .afterWaiting { self.woke = now } else if self.woke > 0 { self.busy.append(now - self.woke); self.woke = 0 }
+            }
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        self.observer = observer
+    }
+    @objc private func tick(_ link: CADisplayLink) { stamps.append(link.timestamp) }
+    func stop() {
+        link?.invalidate(); link = nil
+        if let observer { CFRunLoopRemoveObserver(CFRunLoopGetMain(), observer, .commonModes) }
+        observer = nil
+    }
+    /// The usual time between frames, the frames missed (a gap of n frames misses n − 1), and the longest gap.
+    var frames: (interval: Double, count: Int, missed: Int, longest: Double) {
+        let gaps = zip(stamps.dropFirst(), stamps).map { $0 - $1 }.filter { $0 > 0 }
+        guard !gaps.isEmpty else { return (0, 0, 0, 0) }
+        let interval = gaps.sorted()[gaps.count / 2]
+        let missed = gaps.reduce(0) { $0 + max(0, Int(($1 / interval).rounded()) - 1) }
+        return (interval, gaps.count + 1, missed, gaps.max() ?? 0)
+    }
+}
+
+/// A fast drag: the top-left tile is picked up by its header and carried around the grid —
+/// over each of the other tiles and back, a quarter of a second for each stretch — with the
+/// pointer moving at 120 Hz, then let go. Prints how the frames kept up and what was redone.
+@MainActor enum DragBenchmark {
+    static func run(_ store: WorkspaceStore, _ window: NSWindow) async {
+        let headers = Check.handles(in: window.contentView).map { ($0, $0.convert($0.bounds, to: nil)) }
+            .sorted { (-$0.1.maxY.rounded(), $0.1.minX.rounded()) < (-$1.1.maxY.rounded(), $1.1.minX.rounded()) }
+        guard headers.count == 4, let content = window.contentView else { print("Drag benchmark: four tile headers expected, found \(headers.count)"); return }
+        // Where the pointer goes: the middle of each header (left of the close button), top-left first.
+        func spot(_ frame: CGRect) -> CGPoint { CGPoint(x: frame.minX + frame.width * 0.4, y: frame.midY) }
+        let tl = spot(headers[0].1), tr = spot(headers[1].1), bl = spot(headers[2].1), br = spot(headers[3].1)
+        let path = [tl, tr, br, bl, tl, br, tr, bl, tl]
+        let leg = 0.25
+        let total = leg * Double(path.count - 1)
+        func position(_ t: Double) -> CGPoint {
+            let index = min(Int(t / leg), path.count - 2)
+            let f = min(1, (t - Double(index) * leg) / leg)
+            let a = path[index], b = path[index + 1]
+            return CGPoint(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f)
+        }
+        let handle = headers[0].0
+        func event(_ type: NSEvent.EventType, _ point: CGPoint) -> NSEvent {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        }
+        var counts: [String: Int] = [:]
+        TileTrace.sink = { message in
+            let key = ["workspace plans", "canvas places", "tile body", "motion body", "held order changes"].first { message.hasPrefix($0) } ?? "other"
+            counts[key, default: 0] += 1
+        }
+        let recorder = FrameRecorder()
+        recorder.start(in: content)
+        await Check.pause(0.3)
+        handle.mouseDown(with: event(.leftMouseDown, tl))
+        let moves = MoveTimes()
+        let begin = CACurrentMediaTime()
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let timer = Timer(timeInterval: 1.0 / 120, repeats: true) { timer in
+                MainActor.assumeIsolated {
+                    let t = CACurrentMediaTime() - begin
+                    guard t < total else { timer.invalidate(); done.resume(); return }
+                    let start = CACurrentMediaTime()
+                    handle.mouseDragged(with: event(.leftMouseDragged, position(t)))
+                    moves.add(CACurrentMediaTime() - start)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        let dragged = recorder.frames
+        let busyDuringDrag = recorder.busy
+        handle.mouseUp(with: event(.leftMouseUp, position(total)))
+        await Check.pause(1.0)
+        recorder.stop()
+        TileTrace.sink = nil
+        let all = recorder.frames
+        let frame = dragged.interval
+        let longBusy = busyDuringDrag.filter { $0 > frame * 1.05 }
+        func ms(_ seconds: Double) -> String { String(format: "%.1f ms", seconds * 1000) }
+        print("Drag benchmark (\(Harness.mode)): \(moves.count) pointer moves in \(String(format: "%.2f", total)) s, \(counts["held order changes"] ?? 0) order changes; each move took \(ms(moves.average)) on average, \(ms(moves.longest)) at most")
+        print("  while dragging: \(dragged.count) frames of \(ms(frame)), \(dragged.missed) missed, longest gap \(ms(dragged.longest)); the main thread was busy longer than a frame \(longBusy.count) times, longest \(ms(busyDuringDrag.max() ?? 0))")
+        print("  with the drop's settling: \(all.count) frames, \(all.missed) missed, longest gap \(ms(all.longest))")
+        print("  redone: workspace plans \(counts["workspace plans"] ?? 0), canvas placements \(counts["canvas places"] ?? 0), tile bodies \(counts["tile body"] ?? 0), tile motion bodies \(counts["motion body"] ?? 0)")
+        print("  order now \(store.openIDs == store.displayOrder ? "committed" : "not committed"), \(store.heldTile == nil ? "nothing held" : "a tile still held")")
+        if store.heldTile != nil { Check.failures.append("a tile is still held after the drag") }
+    }
+}
+
+/// How long each pointer move took to handle.
+@MainActor final class MoveTimes {
+    private(set) var count = 0
+    private var total: Double = 0
+    private(set) var longest: Double = 0
+    func add(_ seconds: Double) { count += 1; total += seconds; longest = max(longest, seconds) }
+    var average: Double { count == 0 ? 0 : total / Double(count) }
 }

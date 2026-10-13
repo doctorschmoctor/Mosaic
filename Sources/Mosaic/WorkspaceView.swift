@@ -972,6 +972,7 @@ struct TileMotion<Content: View>: View {
     static var liftScale: CGFloat { 1.015 }
 
     var body: some View {
+        let _ = TileTrace.note("motion body")
         let offset = isHeld ? CGSize(width: motion.origin.x - slot.x, height: motion.origin.y - slot.y) : spring
         let scale = isLifted && !reduceMotion ? Self.liftScale : 1
         content

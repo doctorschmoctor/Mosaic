@@ -1124,7 +1124,10 @@ import MosaicCore
     /// held tile's place on every move.
     private func publishDrag() {
         let held = tileDrag.map { HeldTile(id: $0.id, size: $0.origin.size, order: $0.order) }
-        if held != heldTile { heldTile = held }
+        if held != heldTile {
+            TileTrace.note(held == nil ? "drag ends" : heldTile == nil ? "drag begins" : "held order changes")
+            heldTile = held
+        }
         if let drag = tileDrag {
             if dragMotion.origin != drag.frame.origin { dragMotion.origin = drag.frame.origin }
         } else if liftedTile != nil, liftedTile != settlingTile {

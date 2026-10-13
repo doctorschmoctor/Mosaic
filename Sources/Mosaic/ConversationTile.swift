@@ -27,6 +27,7 @@ struct ConversationTile: View {
     private var isFocused: Bool { store.focusedID == conversation.id }
 
     var body: some View {
+        let _ = TileTrace.note("tile body")
         VStack(spacing: 0) {
             header
             Divider().opacity(0.6)
