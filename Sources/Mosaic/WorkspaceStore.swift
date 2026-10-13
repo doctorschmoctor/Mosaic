@@ -1613,6 +1613,7 @@ import MosaicCore
             if !newBoundaries.isEmpty { seenMessageIDs.merge(newBoundaries) { current, _ in current } }
             if !arrivals.subtracting(tilesWithNews).isEmpty { tilesWithNews.formUnion(arrivals) }
             // Publishing identical data re-rendered every tile; only publish real changes.
+            TileTrace.note("refresh applies")
             if loaded != conversations { instantly { conversations = loaded } }
             noteNewMessages(in: loaded)
             // What the open tiles show now is what they will open on next time.
