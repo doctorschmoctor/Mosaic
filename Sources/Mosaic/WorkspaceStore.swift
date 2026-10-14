@@ -1682,12 +1682,13 @@ import MosaicCore
         }
     }
 
-    /// Returns once no tile is held or settling into place (or after ten seconds, whatever the
-    /// tiles are doing). What a refresh brings changes what the tiles show, and drawing that while
-    /// tiles move made them stall; it can wait the fraction of a second a move takes.
+    /// Returns once no tile is held or settling into place and no thread is being scrolled (or
+    /// after ten seconds, whatever the tiles are doing). What a refresh brings changes what the
+    /// tiles show, and drawing that while tiles move or scroll made them stall; it can wait the
+    /// fraction of a second a move takes.
     private func waitWhileTilesMove() async {
         var waited = 0
-        while tileDrag != nil || settlingTile != nil, waited < 200, !Task.isCancelled {
+        while tileDrag != nil || settlingTile != nil || ScrollActivity.isScrolling(), waited < 200, !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(50))
             waited += 1
         }

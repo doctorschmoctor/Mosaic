@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuartzCore
 
 /// An overlay scroller that draws the same slim knob whether idle, hovered, or being dragged.
 /// The system scroller grows a track and a thicker knob under the pointer; this one never does.
@@ -355,6 +356,7 @@ final class ScrollPinner: NSObject {
     private func remember() {
         // The reader scrolled: the starting row is theirs to leave.
         centering = nil
+        ScrollActivity.noteScroll()
         guard let distance = currentDistance() else { return }
         distanceFromBottom = distance
         distanceFromTop = currentTop() ?? 0
@@ -560,4 +562,15 @@ struct MessageScrollSupport: NSViewRepresentable {
             }
         }
     }
+}
+
+
+/// When a thread was last scrolled by the reader. While one is moving (and a moment after), what
+/// a refresh brings waits (`WorkspaceStore.waitWhileTilesMove`): drawing it mid-scroll held
+/// frames up for tens of milliseconds.
+@MainActor enum ScrollActivity {
+    private(set) static var lastScroll: CFTimeInterval = 0
+    static func noteScroll() { lastScroll = CACurrentMediaTime() }
+    /// Scrolled within the last `quiet` seconds.
+    static func isScrolling(quiet: CFTimeInterval = 0.35) -> Bool { CACurrentMediaTime() - lastScroll < quiet }
 }

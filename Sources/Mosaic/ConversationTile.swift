@@ -84,18 +84,9 @@ struct ConversationTile: View, Equatable {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .simultaneousGesture(TapGesture().onEnded { store.requestComposerFocus(conversation.id) })
             } else {
-                MessageList(conversation: conversation, isLive: store.isLive,
-                            canLoadMore: store.isLive && conversation.messages.count >= (store.historyLimits[conversation.id] ?? 100) && conversation.messages.count < 1000,
-                            isLoadingMore: store.loadingMore.contains(conversation.id),
-                            senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
-                            seenBoundary: store.seenBoundary(conversation.id),
-                            findQuery: finding ? findQuery : "", findCurrent: finding ? findCurrent : revealedID,
-                            historyCeiling: store.isLive && conversation.messages.count >= WorkspaceStore.maximumHistory,
-                            onSearchOlder: { openFind() },
-                            onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
-                            onTailSeen: { [store, id = conversation.id] in store.tailSeen(id) },
-                            onTailLeft: { [store, id = conversation.id] in store.tailLeft(id) })
-                    .equatable()
+                TileThread(conversation: conversation, senderNames: senderNames, zoom: zoom,
+                           findQuery: finding ? findQuery : "", findCurrent: finding ? findCurrent : revealedID,
+                           onSearchOlder: { openFind() })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     // A click anywhere in the thread puts the keyboard in this tile's composer; links
                     // and pictures keep working because this runs alongside their gestures.
@@ -399,6 +390,37 @@ struct ConversationTile: View, Equatable {
         }
         .buttonStyle(TileControlStyle())
         .accessibilityLabel("Insert emoji into message to \(conversation.name)").help("Emoji & Symbols")
+    }
+}
+
+/// A tile's thread, with what the store knows of its loading (how deep it goes, whether older
+/// messages are on their way, what was seen). A view of its own: those are kept in collections
+/// for every tile, and reading them in the tile made each tile draw again — header, composer
+/// and all — whenever any tile loaded older messages. Here only this small view is asked again,
+/// and the thread itself only when its own values changed.
+struct TileThread: View {
+    @Environment(WorkspaceStore.self) private var store
+    let conversation: Conversation
+    let senderNames: [String: String]
+    let zoom: CGFloat
+    let findQuery: String
+    let findCurrent: String?
+    let onSearchOlder: () -> Void
+
+    var body: some View {
+        let count = conversation.messages.count
+        MessageList(conversation: conversation, isLive: store.isLive,
+                    canLoadMore: store.isLive && count >= (store.historyLimits[conversation.id] ?? WorkspaceStore.pageSize) && count < WorkspaceStore.maximumHistory,
+                    isLoadingMore: store.loadingMore.contains(conversation.id),
+                    senderNames: senderNames, zoom: zoom, animateNew: store.animateMessages,
+                    seenBoundary: store.seenBoundary(conversation.id),
+                    findQuery: findQuery, findCurrent: findCurrent,
+                    historyCeiling: store.isLive && count >= WorkspaceStore.maximumHistory,
+                    onSearchOlder: onSearchOlder,
+                    onLoadMore: { [store, id = conversation.id] in store.loadMore(id) },
+                    onTailSeen: { [store, id = conversation.id] in store.tailSeen(id) },
+                    onTailLeft: { [store, id = conversation.id] in store.tailLeft(id) })
+            .equatable()
     }
 }
 
@@ -759,7 +781,7 @@ struct MessageRow: Identifiable, Equatable {
     static let windowSize = 80
     /// How many older rows are added each time the reader nears the top of what is laid out: a
     /// few views' worth, so each addition is small (laying out a whole page at once held a frame up).
-    static let step = 40
+    static let step = 25
     /// The first row laid out last time.
     private var windowFirst: String?
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
