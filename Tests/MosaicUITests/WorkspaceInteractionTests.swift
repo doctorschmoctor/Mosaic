@@ -144,13 +144,16 @@ final class WorkspaceInteractionTests: XCTestCase {
         let plan = TileLayout.plan(order: ids, viewport: viewport, layout: .grid)
         let d = try XCTUnwrap(plan.frames[ids[3]])
 
-        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100), plan: plan)
+        // As the pointer moves, each move is placed in the layout as it is then (with the tiles' new places).
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100))
         XCTAssertEqual(store.dragMotion.origin, CGPoint(x: plan.area.minX, y: d.minY - 100), "stopped at the tile area's left edge")
         XCTAssertEqual(store.displayOrder, [ids[0], ids[1], ids[3], ids[2]], "goes to the place it is drawn over")
-        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -2000), plan: plan)
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -2000))
         XCTAssertEqual(store.dragMotion.origin, plan.area.origin, "and at its top")
+        XCTAssertEqual(store.displayOrder, [ids[3], ids[0], ids[1], ids[2]])
 
-        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100), plan: plan)
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100))
+        XCTAssertEqual(store.displayOrder, [ids[0], ids[1], ids[3], ids[2]])
         store.finishTileDrag()
         XCTAssertEqual(store.workspace.openIDs, [ids[0], ids[1], ids[3], ids[2]])
         XCTAssertEqual(store.tileSprings[ids[3]], CGSize(width: 0, height: -100), "lands from where it was drawn, not from the pointer")
