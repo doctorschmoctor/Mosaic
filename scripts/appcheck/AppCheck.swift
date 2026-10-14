@@ -574,7 +574,12 @@ enum SyntheticMessages {
         let loadedBefore = store.tiles.map(\.messages.count).reduce(0, +)
         let kinds = ["thread window grows", "older page asked", "older page arrives", "refresh applies", "tile body"]
         var notes: [(time: CFTimeInterval, kind: String)] = []
-        TileTrace.sink = { message in notes.append((CACurrentMediaTime(), kinds.first { message.hasPrefix($0) } ?? "other")) }
+        var raw: [(time: CFTimeInterval, text: String)] = []
+        TileTrace.sink = { message in
+            let now = CACurrentMediaTime()
+            notes.append((now, kinds.first { message.hasPrefix($0) } ?? "other"))
+            if !message.hasPrefix("thread stack placed") || raw.last?.text != message { raw.append((now, message)) }
+        }
         let recorder = FrameRecorder()
         recorder.start(in: content)
         await Check.pause(0.3)
@@ -634,6 +639,9 @@ enum SyntheticMessages {
         }
         for stretch in stretches.sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(6) {
             print("  stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - begin) * 1000)) ms: " + tally(stretch.start, stretch.end))
+            for note in raw.filter({ $0.time >= stretch.start && $0.time <= stretch.end }).prefix(12) {
+                print("      +\(Int((note.time - stretch.start) * 1000)) ms \(note.text)")
+            }
         }
         // Back to the newest message for what follows.
         let maximum = max(0, document.frame.height - clip.bounds.height)

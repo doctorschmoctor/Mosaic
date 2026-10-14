@@ -1,4 +1,5 @@
 import SwiftUI
+import QuartzCore
 import UniformTypeIdentifiers
 #if SWIFT_PACKAGE
 import MosaicCore
@@ -404,6 +405,7 @@ struct ThreadStack: Layout {
     let registry: ThreadRowRegistry
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let started = CACurrentMediaTime()
         var height: CGFloat = 0
         var width: CGFloat = 0
         for (index, subview) in subviews.enumerated() {
@@ -411,9 +413,12 @@ struct ThreadStack: Layout {
             height += size.height + (index > 0 ? spacing : 0)
             width = max(width, size.width)
         }
+        TileTrace.note("thread stack sized \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms")
         return CGSize(width: proposal.width ?? width, height: height)
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let started = CACurrentMediaTime()
+        defer { TileTrace.note("thread stack placed \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms") }
         var y = bounds.minY
         let reports = ThreadRenderingProbe.rowGeometry
         for (index, subview) in subviews.enumerated() {
