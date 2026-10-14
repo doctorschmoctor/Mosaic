@@ -100,6 +100,14 @@ import QuartzCore
         }
     }
 
+    /// The part of the tile canvas in view (canvas coordinates): all of it, unless it scrolls.
+    var visibleArea: CGRect? {
+        guard let view, view.window != nil, view.bounds.height > 0 else { return nil }
+        let visible = view.visibleRect
+        guard !visible.isEmpty else { return nil }
+        return CGRect(x: visible.minX, y: view.bounds.height - visible.maxY, width: visible.width, height: visible.height)
+    }
+
     /// A canvas rectangle (top-left origin, growing down) in the stage view's coordinates.
     private func rect(_ canvas: CGRect, in view: NSView) -> CGRect {
         CGRect(x: canvas.minX, y: view.bounds.height - canvas.maxY, width: canvas.width, height: canvas.height)

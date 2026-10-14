@@ -1068,8 +1068,9 @@ import MosaicCore
         guard let plan = tilePlanner?(displayOrder) else { return }
         dragTile(id, translation: translation, plan: plan)
     }
-    /// The pointer moved with a tile held. The tile follows the pointer exactly; when it crosses
-    /// into another tile's place, the tiles between spring to their new places.
+    /// The pointer moved with a tile held. The tile follows the pointer, inside the tile area (it
+    /// stops at the area's edges while the pointer goes on); when the pointer takes it into
+    /// another tile's place, the tiles between spring to their new places.
     func dragTile(_ id: String, translation: CGSize, plan: TilePlan) {
         guard layout != .focus, let frame = plan.frames[id] else { return }
         // Only one tile can be held. A session for another tile is stale (its release was never reported).
@@ -1085,7 +1086,8 @@ import MosaicCore
         }
         guard var drag = tileDrag else { return }
         let before = drag.order
-        drag.update(translation: translation, plan: plan)
+        // Columns scroll sideways: the tile is kept in the part of them in view.
+        drag.update(translation: translation, plan: plan, visible: layout == .columns ? dragStage.visibleArea : nil)
         let springs = drag.order == before ? [:] : springOffsets(from: before, to: drag.order, except: id)
         instantly {
             tileDrag = drag
@@ -1100,7 +1102,9 @@ import MosaicCore
         let order = displayOrder
         var springs: [String: CGSize] = [:]
         if tileMotionEnabled(), let end = tilePlanner?(order).frames[drag.id] {
-            springs[drag.id] = CGSize(width: drag.frame.minX - end.minX, height: drag.frame.minY - end.minY)
+            // From where it is drawn (kept inside the tile area), not where the pointer let go.
+            let dropped = drag.shownFrame
+            springs[drag.id] = CGSize(width: dropped.minX - end.minX, height: dropped.minY - end.minY)
         }
         instantly {
             if openIDs != order { openIDs = order }
@@ -1149,8 +1153,10 @@ import MosaicCore
             heldTile = held
         }
         if let drag = tileDrag {
-            if stagedDrag == drag.id { dragStage.move(to: drag.frame.origin) }
-            else if dragMotion.origin != drag.frame.origin { dragMotion.origin = drag.frame.origin }
+            // Drawn inside the tile area, wherever the pointer is.
+            let origin = drag.shownFrame.origin
+            if stagedDrag == drag.id { dragStage.move(to: origin) }
+            else if dragMotion.origin != origin { dragMotion.origin = origin }
         } else {
             // The tile shows again where its picture is, and the picture goes.
             if stagedDrag != nil { stagedDrag = nil; dragStage.end() }

@@ -132,6 +132,30 @@ final class WorkspaceInteractionTests: XCTestCase {
         XCTAssertNil(store.liftedTile)
     }
 
+    /// Dragged past the tile area's edge (over the sidebar, past the window's top), the tile stops
+    /// at the edge while the pointer goes on, goes to the place it is drawn over, and lands from
+    /// where it was drawn.
+    @MainActor func testHeldTileStaysInsideTheTileAreaAndLandsFromWhereItIsDrawn() throws {
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)
+        let ids = store.workspace.openIDs
+        let viewport = CGSize(width: 1000, height: 820)
+        store.tilePlanner = { TileLayout.plan(order: $0, viewport: viewport, layout: .grid) }
+        store.tileMotionEnabled = { true }
+        let plan = TileLayout.plan(order: ids, viewport: viewport, layout: .grid)
+        let d = try XCTUnwrap(plan.frames[ids[3]])
+
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100), plan: plan)
+        XCTAssertEqual(store.dragMotion.origin, CGPoint(x: plan.area.minX, y: d.minY - 100), "stopped at the tile area's left edge")
+        XCTAssertEqual(store.displayOrder, [ids[0], ids[1], ids[3], ids[2]], "goes to the place it is drawn over")
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -2000), plan: plan)
+        XCTAssertEqual(store.dragMotion.origin, plan.area.origin, "and at its top")
+
+        store.dragTile(ids[3], translation: CGSize(width: -2000, height: -100), plan: plan)
+        store.finishTileDrag()
+        XCTAssertEqual(store.workspace.openIDs, [ids[0], ids[1], ids[3], ids[2]])
+        XCTAssertEqual(store.tileSprings[ids[3]], CGSize(width: 0, height: -100), "lands from where it was drawn, not from the pointer")
+    }
+
     /// With Reduce Motion, tiles move in one step: no springs, and nothing stays lifted.
     @MainActor func testTileDragWithoutMotionMovesInOneStep() throws {
         let store = WorkspaceStore(defaults: UserDefaults(suiteName: "MosaicTest-\(UUID())")!, forceDemo: true)

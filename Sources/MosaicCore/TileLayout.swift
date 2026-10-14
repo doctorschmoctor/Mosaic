@@ -18,6 +18,9 @@ public struct TilePlan {
     public let dividers: [TileDivider]
     public let rowSizes: [CGFloat]
     public let columnSizes: [CGFloat]
+    /// The tile area: the space the tiles fill together, from the outer edge of the first to the
+    /// outer edge of the last. A held tile is drawn inside it (`TileDragSession.shownFrame`).
+    public let area: CGRect
 }
 
 public enum TileLayout {
@@ -77,7 +80,7 @@ public enum TileLayout {
                 }
             }
         } else if let first = order.first { frames[first] = bounds }
-        return TilePlan(size: size, order: order, frames: frames, dividers: dividers, rowSizes: rowSizes, columnSizes: columnSizes)
+        return TilePlan(size: size, order: order, frames: frames, dividers: dividers, rowSizes: rowSizes, columnSizes: columnSizes, area: bounds)
     }
 
     /// Preserve proportions while guaranteeing minimum sizes after a window resize.
@@ -185,17 +188,47 @@ public struct TileDragSession: Equatable {
     public let origin: CGRect
     public var translation: CGSize = .zero
     public private(set) var order: [String]
+    /// Where the pointer has the tile: its place when picked up, moved as far as the pointer has
+    /// moved since. It may be anywhere, past the tile area's edges too (the pointer may be).
     public var frame: CGRect { origin.offsetBy(dx: translation.width, dy: translation.height) }
+    /// The space the held tile is drawn in: the plan's tile area, or the part of it in view
+    /// (`update`).
+    public private(set) var bounds: CGRect = .null
+    /// Where the held tile is drawn: where the pointer has it, kept inside the tile area, so it
+    /// never goes over the sidebar or past the window's edges. A tile larger than the area one
+    /// way (a held tile keeps its size, the area may have shrunk) keeps to its leading edge.
+    public var shownFrame: CGRect {
+        var shown = frame
+        guard !bounds.isNull, !bounds.isEmpty else { return shown }
+        shown.origin.x = min(max(shown.minX, bounds.minX), max(bounds.minX, bounds.maxX - shown.width))
+        shown.origin.y = min(max(shown.minY, bounds.minY), max(bounds.minY, bounds.maxY - shown.height))
+        return shown
+    }
     public init(id: String, origin: CGRect, order: [String]) { self.id = id; self.origin = origin; self.order = order }
-    public mutating func update(translation: CGSize, plan: TilePlan) {
+    /// The pointer moved: the held tile goes to the place under the middle of where the pointer has
+    /// it. That middle may be past the place the tile is drawn (kept inside the tile area), so a
+    /// tile as wide as the area, which cannot be drawn further sideways, still goes into a half of
+    /// a row. When the pointer is past every place, the tile goes to the place it is drawn over,
+    /// so a quick throw past the area's edge lands where the tile is seen. `visible` is the part
+    /// of the tile area in view, when it scrolls (Columns): the tile is drawn there, or no further
+    /// out than it was when picked up.
+    public mutating func update(translation: CGSize, plan: TilePlan, visible: CGRect? = nil) {
         self.translation = translation
-        let center = CGPoint(x: frame.midX, y: frame.midY)
-        // A smaller landing area avoids jitter when crossing gaps or tile edges.
-        guard let target = order.first(where: { candidate in
-            guard let rect = plan.frames[candidate] else { return false }
-            return rect.insetBy(dx: min(30, rect.width * 0.12), dy: min(30, rect.height * 0.12)).contains(center)
-        }), target != id, let sourceIndex = order.firstIndex(of: id), let targetIndex = order.firstIndex(of: target) else { return }
+        bounds = plan.area
+        if let visible, !visible.isEmpty, bounds.intersects(visible) { bounds = bounds.intersection(visible).union(origin) }
+        let shown = shownFrame
+        guard let next = place(at: CGPoint(x: frame.midX, y: frame.midY), in: plan)
+                ?? place(at: CGPoint(x: shown.midX, y: shown.midY), in: plan),
+              next != id, let sourceIndex = order.firstIndex(of: id), let targetIndex = order.firstIndex(of: next) else { return }
         order.remove(at: sourceIndex)
         order.insert(id, at: targetIndex)
+    }
+    /// The tile whose place holds `point`. A smaller landing area avoids jitter when crossing gaps
+    /// or tile edges.
+    private func place(at point: CGPoint, in plan: TilePlan) -> String? {
+        order.first { candidate in
+            guard let rect = plan.frames[candidate] else { return false }
+            return rect.insetBy(dx: min(30, rect.width * 0.12), dy: min(30, rect.height * 0.12)).contains(point)
+        }
     }
 }

@@ -45,6 +45,65 @@ final class TileLayoutTests: XCTestCase {
         XCTAssertEqual(drag.order, ["b", "c", "d", "a"])
         XCTAssertEqual(drag.frame.midX, d.midX, accuracy: 0.01)
     }
+    func testTheTileAreaIsWhereTheTilesAre() throws {
+        for layout in [WorkspaceLayout.grid, .columns] {
+            for count in 1...5 {
+                let ids = (0..<count).map { "t\($0)" }
+                let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 820), layout: layout)
+                let union = plan.frames.values.reduce(CGRect.null) { $0.union($1) }
+                XCTAssertEqual(union.minX, plan.area.minX, accuracy: 0.01); XCTAssertEqual(union.maxX, plan.area.maxX, accuracy: 0.01)
+                XCTAssertEqual(union.minY, plan.area.minY, accuracy: 0.01); XCTAssertEqual(union.maxY, plan.area.maxY, accuracy: 0.01)
+            }
+        }
+    }
+    func testHeldTileIsDrawnInsideTheTileAreaWhileThePointerGoesPastIt() throws {
+        let ids = ["a", "b", "c", "d"]
+        let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 820), layout: .grid)
+        let area = plan.area, b = try XCTUnwrap(plan.frames["b"])
+        var drag = TileDragSession(id: "b", origin: b, order: ids)
+        // Far past the window's top right: drawn in the tile area's corner, which is its own place.
+        drag.update(translation: CGSize(width: 400, height: -300), plan: plan)
+        XCTAssertEqual(drag.frame, b.offsetBy(dx: 400, dy: -300), "the pointer's place is kept")
+        XCTAssertEqual(drag.shownFrame, CGRect(x: area.maxX - b.width, y: area.minY, width: b.width, height: b.height))
+        XCTAssertEqual(drag.order, ids)
+        // Thrown over the sidebar in one move: drawn at the area's left edge, over a's place, and goes there.
+        drag.update(translation: CGSize(width: -1500, height: 0), plan: plan)
+        XCTAssertEqual(drag.shownFrame.origin, CGPoint(x: area.minX, y: b.minY))
+        XCTAssertEqual(drag.order, ["b", "a", "c", "d"])
+        // Inside the area, it is drawn where the pointer has it.
+        drag.update(translation: CGSize(width: -20, height: 30), plan: plan)
+        XCTAssertEqual(drag.shownFrame, drag.frame)
+    }
+    func testInScrolledColumnsTheHeldTileStaysInView() throws {
+        let ids = ["a", "b", "c", "d", "e"]
+        let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 820), layout: .columns)
+        let b = try XCTUnwrap(plan.frames["b"]), d = try XCTUnwrap(plan.frames["d"])
+        // Scrolled so that b is in view and d only partly.
+        let visible = CGRect(x: b.minX - 300, y: 0, width: 1000, height: 820)
+        XCTAssertTrue(visible.contains(b) && visible.maxX > d.minX && visible.maxX < d.maxX)
+        var drag = TileDragSession(id: "b", origin: b, order: ids)
+        drag.update(translation: CGSize(width: 2000, height: 0), plan: plan, visible: visible)
+        XCTAssertEqual(drag.shownFrame.maxX, visible.maxX, accuracy: 0.01, "stops at the edge of the view")
+        drag.update(translation: CGSize(width: -2000, height: 0), plan: plan, visible: visible)
+        XCTAssertEqual(drag.shownFrame.minX, visible.minX, accuracy: 0.01)
+        // A tile picked up partly out of view may stay where it was, and go no further out.
+        var partly = TileDragSession(id: "d", origin: d, order: ids)
+        partly.update(translation: CGSize(width: 5, height: 0), plan: plan, visible: visible)
+        XCTAssertEqual(partly.shownFrame.minX, d.minX, accuracy: 0.01)
+        partly.update(translation: CGSize(width: -5, height: 0), plan: plan, visible: visible)
+        XCTAssertEqual(partly.shownFrame.minX, d.minX - 5, accuracy: 0.01)
+    }
+    func testATileAsWideAsTheAreaStillGoesIntoAHalfOfARow() throws {
+        let ids = ["a", "b", "c"]
+        let plan = TileLayout.plan(order: ids, viewport: CGSize(width: 1000, height: 820), layout: .grid)
+        let a = try XCTUnwrap(plan.frames["a"]), c = try XCTUnwrap(plan.frames["c"])
+        XCTAssertEqual(c.width, plan.area.width, accuracy: 0.01)
+        var drag = TileDragSession(id: "c", origin: c, order: ids)
+        drag.update(translation: CGSize(width: a.midX - c.midX, height: a.midY - c.midY), plan: plan)
+        XCTAssertEqual(drag.shownFrame.minX, c.minX, accuracy: 0.01, "it cannot be drawn further sideways")
+        XCTAssertEqual(drag.shownFrame.minY, a.minY, accuracy: 0.01)
+        XCTAssertEqual(drag.order, ["c", "a", "b"])
+    }
     func testResizeKeepsMinimumsAndOnlyChangesTheAdjacentPair() {
         XCTAssertEqual(TileLayout.resizedPair([350, 450, 400], at: 0, delta: 1000, minimum: 300), [500, 300, 400])
         let shrunk = TileLayout.distribute(total: 910, count: 3, minimum: 300, weights: [800, 300, 300])

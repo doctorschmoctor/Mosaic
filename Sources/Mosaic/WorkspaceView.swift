@@ -847,7 +847,8 @@ struct TileWorkspace: View {
             ScrollViewReader { scroller in
                 ScrollView(.horizontal, showsIndicators: layout == .columns) { canvas(plan, chipRow: layout == .focus, viewFrame: viewFrame) }
                     .scrollDisabled(layout != .columns)
-                    // Grid and Focus never scroll, so a dragged tile may draw over the margins.
+                    // Grid and Focus never scroll, so a held tile's lift and shadow may draw over the margins
+                    // (the tile itself stays inside the tile area: `TileDragSession.shownFrame`).
                     .scrollClipDisabled(layout != .columns)
                     .onChange(of: store.focusToken) { _, _ in
                         guard layout == .columns, let id = store.focusTarget else { return }
