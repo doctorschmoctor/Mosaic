@@ -437,6 +437,18 @@ struct ThreadStack: Layout {
 /// A thread row's message, for the row registry.
 struct ThreadRowID: LayoutValueKey { static let defaultValue: String? = nil }
 
+/// Starts a scroll view at its end (macOS 15), for a thread's first frame.
+struct OpensAtNewest: ViewModifier {
+    let enabled: Bool
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            if enabled { content.defaultScrollAnchor(.bottom, for: .initialOffset) } else { content }
+        } else {
+            content
+        }
+    }
+}
+
 /// A tile's thread, with what the store knows of its loading (how deep it goes, whether older
 /// messages are on their way, what was seen). A view of its own: those are kept in collections
 /// for every tile, and reading them in the tile made each tile draw again — header, composer
@@ -659,6 +671,9 @@ struct MessageList: View, Equatable {
             }
         }
         .onAppear { if startsAt == nil, let id = findCurrent { DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) } } }
+        // A thread opens on its newest message from its very first frame (the pinner, which
+        // keeps it there, attaches a moment later); a window into older history opens on its row.
+        .modifier(OpensAtNewest(enabled: startsAt == nil))
         }
         .overlay(alignment: .bottomTrailing) {
             if !isNearBottom && showsLatestButton {

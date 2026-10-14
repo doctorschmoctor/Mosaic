@@ -884,8 +884,16 @@ struct TileWorkspace: View {
                     .zIndex(3)
                     .tileFrame(CGRect(x: 0, y: 0, width: plan.size.width, height: FocusChipBar.height))
             }
+            // In Focus, the conversations not shown stay built, hidden under the one that is (in its
+            // place and at its size), so choosing one shows it as it was left — drawn, on its
+            // newest message or where it was read to — instead of building it afresh, which drew
+            // its first frames unscrolled. One branch for both, so a tile is never rebuilt when it
+            // is shown or hidden.
+            let focusSlot = layout == .focus ? store.focused.flatMap { plan.frames[$0.id] } : nil
             ForEach(store.tiles) { chat in
-                if let slot = plan.frames[chat.id] { tile(chat, slot: slot, plan: plan, viewFrame: viewFrame) }
+                if let slot = plan.frames[chat.id] ?? focusSlot {
+                    tile(chat, slot: slot, plan: plan, viewFrame: viewFrame, hidden: plan.frames[chat.id] == nil)
+                }
             }
             // The held tile's picture moves here, above every tile (TileDragStage).
             TileStage(stage: store.dragStage)
@@ -905,7 +913,7 @@ struct TileWorkspace: View {
         .coordinateSpace(name: TileCanvas.space)
     }
 
-    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, viewFrame: CGRect) -> some View {
+    @ViewBuilder private func tile(_ chat: Conversation, slot: CGRect, plan: TilePlan, viewFrame: CGRect, hidden: Bool = false) -> some View {
         let held = store.heldTile?.id == chat.id ? store.heldTile : nil
         // A held tile keeps its size; its place in the layout is the slot a release would give
         // it, and it is drawn where the pointer has it (`TileMotion`).
@@ -924,7 +932,11 @@ struct TileWorkspace: View {
                 .equatable()
                 .frame(width: frame.width, height: frame.height)
         }
-        .opacity(staged ? 0 : 1)
+        .opacity(staged || hidden ? 0 : 1)
+        // A tile kept hidden in Focus takes no clicks and is not read out; it is never "seen"
+        // (the store counts only the focused tile as on screen in Focus).
+        .allowsHitTesting(!hidden)
+        .accessibilityHidden(hidden)
         // Whether the tile is within the workspace's view (Columns can scroll tiles out of it): a
         // tile out of view does not count as read.
         .onGeometryChange(for: Bool.self) { proxy in
@@ -932,7 +944,7 @@ struct TileWorkspace: View {
             return frame.width <= 0 || frame.intersection(viewFrame).width >= frame.width * 0.8
         } action: { [store, id = chat.id] inView in store.setTileInView(id, inView) }
         .id(chat.id)
-        .zIndex(raised ? 100 : 1)
+        .zIndex(hidden ? 0 : raised ? 100 : 1)
         .tileFrame(frame)
     }
 

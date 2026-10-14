@@ -98,6 +98,42 @@ final class TileCloseTests: XCTestCase {
     }
 }
 
+/// In Focus, every open conversation stays built, hidden under the one shown: choosing another
+/// shows its tile as it was (drawn, scrolled, loaded) instead of building it afresh, whose first
+/// frames showed it unscrolled — the blink between conversations. Fictional conversations only.
+final class FocusSwitchTests: XCTestCase {
+    @MainActor func testChoosingAConversationShowsItsTileAsItWas() async throws {
+        _ = NSApplication.shared
+        let name = "MosaicTest-\(UUID())"
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: name)!, forceDemo: true)
+        store.setLayout(.focus)
+        let ids = store.openIDs
+        XCTAssertGreaterThan(ids.count, 2)
+        let hosting = NSHostingView(rootView: AnyView(WorkspaceView().environment(store).frame(width: 1320, height: 860)))
+        let window = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 1320, height: 860),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderFront(nil)
+        defer { hosting.rootView = AnyView(EmptyView()); window.close() }
+        let end = Date().addingTimeInterval(1)
+        while Date() < end { hosting.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(10)) }
+
+        let built = ids.compactMap { id in DraftTextView.editor(for: id).map { (id, $0) } }
+        XCTAssertEqual(built.count, ids.count, "every open conversation is built in Focus")
+        XCTAssertTrue(built.allSatisfy { $0.1.window != nil })
+        let next = try XCTUnwrap(ids.first { $0 != store.focused?.id })
+        store.requestComposerFocus(next)
+        for _ in 0..<20 { hosting.layoutSubtreeIfNeeded(); try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(store.focused?.id, next)
+        XCTAssertTrue(DraftTextView.editor(for: next) === built.first { $0.0 == next }?.1, "shown as it was, not built afresh")
+        // The one shown before is still built, hidden, for when it is chosen again.
+        let previous = try XCTUnwrap(built.first { $0.0 != next })
+        XCTAssertTrue(DraftTextView.editor(for: previous.0) === previous.1)
+    }
+}
+
 /// The menus read `store.menu`, which follows the store once a change is done — on the next turn
 /// of the main queue, never inside the change (MenuState says why).
 final class MenuStateTests: XCTestCase {
