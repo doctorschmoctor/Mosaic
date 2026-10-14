@@ -889,7 +889,7 @@ struct TileWorkspace: View {
             // newest message or where it was read to — instead of building it afresh, which drew
             // its first frames unscrolled. One branch for both, so a tile is never rebuilt when it
             // is shown or hidden.
-            let focusSlot = layout == .focus ? store.focused.flatMap { plan.frames[$0.id] } : nil
+            let focusSlot = store.layout == .focus ? store.focused.flatMap { plan.frames[$0.id] } : nil
             ForEach(store.tiles) { chat in
                 if let slot = plan.frames[chat.id] ?? focusSlot {
                     tile(chat, slot: slot, plan: plan, viewFrame: viewFrame, hidden: plan.frames[chat.id] == nil)
