@@ -215,6 +215,8 @@ public final class MessagesReader: @unchecked Sendable {
         /// `chat_message_join`'s columns: Messages keeps each message's date there too, indexed
         /// with the chat, which lets a whole-history read go in date order without sorting.
         var chatJoin: Set<String> = []
+        /// `chat`'s columns: `properties` (a property list) names the group's current photo.
+        var chat: Set<String> = []
         var joinHasDates: Bool { chatJoin.contains("message_date") }
         func col(_ name: String, prefix: String = "m", fallback: String = "0") -> String { message.contains(name) ? "\(prefix).\(name)" : fallback }
     }
@@ -694,7 +696,8 @@ public final class MessagesReader: @unchecked Sendable {
         guard message.contains("is_from_me"), message.contains("date"), message.contains("text") else { throw DatabaseError.unsupportedSchema }
         let probed = Schema(message: message, attachment: try tableColumns(db, table: "attachment"),
                             attachmentJoin: try tableColumns(db, table: "message_attachment_join"),
-                            chatJoin: try tableColumns(db, table: "chat_message_join"))
+                            chatJoin: try tableColumns(db, table: "chat_message_join"),
+                            chat: try tableColumns(db, table: "chat"))
         schema = probed
         return probed
     }
@@ -799,13 +802,20 @@ public final class MessagesReader: @unchecked Sendable {
         return DatabaseSnapshot(conversations: conversations.filter { !$0.id.isEmpty }, token: token)
     }
 
-    /// A group's photo: the file attached to its latest photo change (an announcement row,
-    /// `item_type` 3). The latest change without a file means the photo was removed. Never fails
-    /// a load: a schema without these columns, or a missing file, gives no photo. Without
-    /// `lookUp`, only a photo already looked up is given (the list shown first at launch).
+    /// A group's photo. Messages names the current one in the chat's properties
+    /// (`groupPhotoGuid`, an attachment's GUID); a chat without that key, or whose named file is
+    /// not on this Mac, falls back to the file attached to its latest photo change (an
+    /// announcement row, `item_type` 3), where a change without a file means the photo was
+    /// removed. Never fails a load: a schema without these columns, or a missing file, gives no
+    /// photo. Without `lookUp`, only a photo already looked up is given (the list shown first).
     private func groupPhoto(_ db: OpaquePointer, chatID: Int64, lastID: Int64, schema: Schema, lookUp: Bool = true) -> String? {
         if let known = groupPhotos[chatID], known.lastID == lastID { return known.path }
-        guard lookUp, schema.message.contains("item_type"), schema.attachment.contains("filename"),
+        guard lookUp else { return nil }
+        if let named = namedGroupPhoto(db, chatID: chatID, schema: schema) {
+            groupPhotos[chatID] = (lastID, named)
+            return named
+        }
+        guard schema.message.contains("item_type"), schema.attachment.contains("filename"),
               schema.attachmentJoin.contains("attachment_id"), schema.attachmentJoin.contains("message_id"),
               let statement = try? cached(db, """
                 SELECT a.filename FROM message m
@@ -824,6 +834,25 @@ public final class MessagesReader: @unchecked Sendable {
         }
         groupPhotos[chatID] = (lastID, path)
         return path
+    }
+    /// The file of the photo the chat's properties name (`groupPhotoGuid`), when it is on this Mac.
+    private func namedGroupPhoto(_ db: OpaquePointer, chatID: Int64, schema: Schema) -> String? {
+        guard schema.chat.contains("properties"), schema.attachment.contains("guid"), schema.attachment.contains("filename"),
+              let statement = try? cached(db, "SELECT properties FROM chat WHERE ROWID = ?") else { return nil }
+        sqlite3_bind_int64(statement, 1, chatID)
+        var guid: String?
+        if sqlite3_step(statement) == SQLITE_ROW, let bytes = sqlite3_column_blob(statement, 0) {
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            let properties = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+            guid = (properties?["groupPhotoGuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        recycle(statement)
+        guard let guid, let lookup = try? cached(db, "SELECT filename FROM attachment WHERE guid = ? LIMIT 1") else { return nil }
+        defer { recycle(lookup) }
+        bind(lookup, 1, guid)
+        guard sqlite3_step(lookup) == SQLITE_ROW, let raw = string(lookup, 0),
+              let resolved = MessagesDatabase.resolve(raw, home: database.home), FileManager.default.fileExists(atPath: resolved) else { return nil }
+        return resolved
     }
 
     /// One conversation's loaded page: its messages, the reactions on them, and the messages its

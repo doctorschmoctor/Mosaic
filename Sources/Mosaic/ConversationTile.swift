@@ -531,6 +531,7 @@ struct MessageList: View, Equatable {
                         if let day = row.dayLabel ?? (row.id == shown.first?.id ? MessageText.day(row.message.date) : nil) {
                             Text(day).font(.system(size: 10 * zoom, weight: .medium))
                                 .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
+                                .allowsHitTesting(false)
                         }
                         if row.id == firstUnread { UnreadDivider() }
                         MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
@@ -569,8 +570,17 @@ struct MessageList: View, Equatable {
             .environment(\.threadAttachments, attachmentFiles)
             .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry, startRow: startsAt,
                                              onNearTop: { [presentation] in
-                // Near the top of what is laid out: older loaded rows first, then older history.
-                if presentation.expand(rows) { windowRevision += 1 } else if canLoadMore { onLoadMore() }
+                // Near the top of what is laid out: a few more of the older loaded rows, and once
+                // few are left above, the next page of history is read — in good time, well
+                // before the reader gets there.
+                if presentation.expand(rows) {
+                    TileTrace.note("thread window grows")
+                    windowRevision += 1
+                }
+                if canLoadMore, presentation.rowsAbove(rows) < ThreadPresentation.step * 2 {
+                    TileTrace.note("older page asked")
+                    onLoadMore()
+                }
             }) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
@@ -744,47 +754,45 @@ struct MessageRow: Identifiable, Equatable {
 
     // MARK: The rows laid out
 
-    /// How many rows a thread lays out at least (and adds each time the reader nears the top of
-    /// them): far more than a tile shows, far fewer than a long history.
+    /// How many rows a thread lays out at least: far more than a tile shows, far fewer than a
+    /// long history.
     static let windowSize = 80
-    /// The first row laid out last time, and whether that was the very first row.
+    /// How many older rows are added each time the reader nears the top of what is laid out: a
+    /// few views' worth, so each addition is small (laying out a whole page at once held a frame up).
+    static let step = 40
+    /// The first row laid out last time.
     private var windowFirst: String?
-    private var windowCoversAll = false
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
     /// the newest message does not drop them until the reader is back there.
     private var holdsOlder = false
 
     /// The rows to lay out: the newest `windowSize` while following the newest message; else from
-    /// where the window began (every row, once it reached the first — so older pages that load
-    /// above appear), so nothing in view moves when rows arrive below.
+    /// where the window began, so nothing in view moves when rows arrive below, and an older page
+    /// that loads above waits there until the reader nears it (`expand`).
     func window(_ rows: [MessageRow], following: Bool) -> ArraySlice<MessageRow> {
-        guard rows.count > Self.windowSize else {
-            windowFirst = rows.first?.id
-            windowCoversAll = true
-            return rows[...]
-        }
+        guard !rows.isEmpty else { windowFirst = nil; return rows[...] }
         let start: Int
         if following && !holdsOlder {
-            start = rows.count - Self.windowSize
-        } else if windowCoversAll {
-            start = 0
+            start = max(0, rows.count - Self.windowSize)
         } else if let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }) {
             start = index
         } else {
-            start = rows.count - Self.windowSize
+            start = max(0, rows.count - Self.windowSize)
         }
         windowFirst = rows[start].id
-        windowCoversAll = start == 0
         return rows[start...]
     }
-    /// Lays out more of the older loaded rows. False when every row is laid out already.
+    /// Lays out `step` more of the older loaded rows. False when every row is laid out already.
     func expand(_ rows: [MessageRow]) -> Bool {
-        guard !windowCoversAll, let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }), index > 0 else { return false }
-        let start = max(0, index - Self.windowSize)
+        guard let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }), index > 0 else { return false }
+        let start = max(0, index - Self.step)
         windowFirst = rows[start].id
-        windowCoversAll = start == 0
         holdsOlder = true
         return true
+    }
+    /// How many loaded rows are above what is laid out.
+    func rowsAbove(_ rows: [MessageRow]) -> Int {
+        windowFirst.flatMap { first in rows.firstIndex { $0.id == first } } ?? 0
     }
     /// Makes sure a row is laid out, with a few above it. True when the window had to grow.
     func include(_ id: String, in rows: [MessageRow]) -> Bool {
@@ -794,7 +802,6 @@ struct MessageRow: Identifiable, Equatable {
         guard index < current + 3, current > 0 else { return false }
         let start = max(0, index - 10)
         windowFirst = rows[start].id
-        windowCoversAll = start == 0
         return true
     }
     /// Back at the newest message: the window may shrink to the newest rows again. True when it held older ones.
@@ -1044,7 +1051,10 @@ struct MessageBubble: View, Equatable {
                         }
                     }
                 }.font(.system(size: 9 * zoom)).foregroundStyle(.tertiary).padding(.horizontal, 3 * zoom)
-                .contextMenu { failedSendActions }
+                // Only a refused send has anything to offer here; elsewhere the line takes no
+                // clicks, which keeps the pointer's hit-testing over a long thread light.
+                .applying(message.sendState?.isFailed == true) { $0.contextMenu { failedSendActions } }
+                .allowsHitTesting(message.sendState?.isFailed == true)
             }
         }
         .frame(maxWidth: .infinity, alignment: fromMe ? .trailing : .leading)

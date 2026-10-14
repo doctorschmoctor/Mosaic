@@ -14,6 +14,9 @@ status=0
 # The demo workspace, then a synthetic live account (polling, new messages arriving).
 .build/MosaicAppCheck --demo || status=1
 .build/MosaicAppCheck --isolated --live || status=1
+# What scrolling a long thread costs with parts of each message switched off (for comparison).
+.build/MosaicAppCheck --isolated --live --scroll-only --no-row-geometry || true
+.build/MosaicAppCheck --isolated --live --scroll-only --no-context-menus || true
 # The Workspace menu as it was before MenuState, reading the store: expected to fail.
 for mode in "--demo" "--isolated --live"; do
     # shellcheck disable=SC2086

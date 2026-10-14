@@ -172,15 +172,16 @@ final class ThreadWindowTests: XCTestCase {
     @MainActor func testTheWindowGrowsUpwardAndShrinksBackAtTheNewest() {
         let all = rows(300)
         let presentation = ThreadPresentation()
-        let size = ThreadPresentation.windowSize
+        let size = ThreadPresentation.windowSize, step = ThreadPresentation.step
         XCTAssertEqual(presentation.window(all, following: true).count, size, "following the newest: the newest rows only")
         XCTAssertEqual(presentation.window(all, following: true).last?.id, "300")
+        XCTAssertEqual(presentation.rowsAbove(all), 300 - size)
         XCTAssertTrue(presentation.expand(all))
-        XCTAssertEqual(presentation.window(all, following: false).count, size * 2, "near the top: more older rows")
-        XCTAssertEqual(presentation.window(all, following: true).count, size * 2, "kept while the reader is up there")
+        XCTAssertEqual(presentation.window(all, following: false).count, size + step, "near the top: a step of older rows")
+        XCTAssertEqual(presentation.window(all, following: true).count, size + step, "kept while the reader is up there")
         // New rows arrive below while reading: the window keeps its start.
         let more = all + rows(5, from: 301)
-        XCTAssertEqual(presentation.window(more, following: false).first?.id, all[300 - size * 2].id)
+        XCTAssertEqual(presentation.window(more, following: false).first?.id, all[300 - size - step].id)
         // Back at the newest message: it shrinks again.
         XCTAssertTrue(presentation.release())
         XCTAssertEqual(presentation.window(more, following: true).count, size)
@@ -189,10 +190,17 @@ final class ThreadWindowTests: XCTestCase {
         let window = presentation.window(more, following: true)
         XCTAssertEqual(window.first?.id, "5")
         XCTAssertFalse(presentation.include("200", in: more), "already laid out")
-        // Once the window reaches the first row, every row stays laid out (older pages appear above).
         XCTAssertTrue(presentation.include("3", in: more))
-        XCTAssertEqual(presentation.window(more, following: false).count, more.count)
-        XCTAssertFalse(presentation.expand(more))
+        XCTAssertEqual(presentation.window(more, following: false).count, more.count, "every loaded row")
+        // An older page loading above waits until the reader nears it, then comes a step at a time.
+        let paged = rows(50, from: -49) + more
+        XCTAssertEqual(presentation.window(paged, following: false).first?.id, "1", "the new page is not laid out at once")
+        XCTAssertEqual(presentation.rowsAbove(paged), 50)
+        XCTAssertTrue(presentation.expand(paged))
+        XCTAssertEqual(presentation.window(paged, following: false).count, more.count + step)
+        XCTAssertTrue(presentation.expand(paged))
+        XCTAssertEqual(presentation.window(paged, following: false).count, paged.count)
+        XCTAssertFalse(presentation.expand(paged), "every row is laid out")
         // A short thread is laid out whole.
         let short = rows(40)
         XCTAssertEqual(ThreadPresentation().window(short, following: true).count, 40)

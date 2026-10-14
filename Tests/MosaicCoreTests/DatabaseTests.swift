@@ -138,6 +138,37 @@ final class DatabaseTests: XCTestCase {
         XCTAssertNil(removed.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, "the photo was removed")
     }
 
+    /// Messages names a group's current photo in the chat's properties (`groupPhotoGuid`): that
+    /// file is the photo, even when the group's photo-change rows carry none. Without the key,
+    /// or with its file missing, the latest photo change still decides.
+    func testGroupPhotoNamedInTheChatsProperties() throws {
+        let photo = directory.appendingPathComponent("GroupPhotoImage.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: photo)
+        let properties = try PropertyListSerialization.data(fromPropertyList: ["groupPhotoGuid": "at_0_PHOTO", "shouldForceToSMS": false],
+                                                            format: .binary, options: 0)
+        let hex = properties.map { String(format: "%02X", $0) }.joined()
+        execute("""
+        ALTER TABLE chat ADD COLUMN properties BLOB;
+        CREATE TABLE attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT,
+          is_sticker INTEGER DEFAULT 0, hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        INSERT INTO message VALUES (NULL,NULL,700000003000000000,1,0,0,0,0,0,0,3,0);
+        INSERT INTO chat_message_join VALUES (2, 4);
+        INSERT INTO attachment (guid, filename, mime_type) VALUES ('at_0_PHOTO', '\(photo.path)', 'image/png');
+        UPDATE chat SET properties = X'\(hex)' WHERE ROWID = 2;
+        """)
+        let reader = MessagesReader(database: MessagesDatabase(path: path))
+        let named = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: []), unlessUnchangedFrom: nil))
+        XCTAssertEqual(named.conversations.first { $0.id == "iMessage;+;group" }?.photoPath, photo.path,
+                       "the photo the chat names, though its photo change has no file")
+        XCTAssertNil(named.conversations.first { $0.id == alex }?.photoPath)
+        // The named file is gone from this Mac: the photo changes decide (the latest has no file).
+        try FileManager.default.removeItem(at: photo)
+        execute("INSERT INTO message VALUES ('Hi',NULL,700000004000000000,1,0,0,0,0,0,0,0,0); INSERT INTO chat_message_join VALUES (2, 5);")
+        let missing = try XCTUnwrap(try reader.loadSync(LoadRequest(openIDs: []), unlessUnchangedFrom: named.token))
+        XCTAssertNil(missing.conversations.first { $0.id == "iMessage;+;group" }?.photoPath)
+    }
+
     /// The list on its own (what launch shows first): every conversation with its name, members,
     /// preview and unread count, the open ones outside the list too, and no history; group photos
     /// only as already looked up. It is a different request from the full load, so the full load

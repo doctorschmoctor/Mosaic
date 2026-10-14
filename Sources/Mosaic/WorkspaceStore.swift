@@ -1790,6 +1790,7 @@ import MosaicCore
         let knownReactions = Set(conversation.reactions.map(\.id))
         conversation.reactions = page.reactions.filter { !knownReactions.contains($0.id) } + conversation.reactions
         conversation.referencedMessages.merge(page.referencedMessages) { current, _ in current }
+        TileTrace.note("older page arrives")
         instantly { conversations[index] = conversation }
     }
     /// What a load needs to know of the earlier messages open tiles show above their newest page:

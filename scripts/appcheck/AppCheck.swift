@@ -37,7 +37,12 @@ import CSQLite
 }
 
 struct CheckApp: App {
-    @State private var store = Harness.makeStore()
+    @State private var store: WorkspaceStore = {
+        // Parts of each message switched off, to see what scrolling costs with them (the app check script compares).
+        if CommandLine.arguments.contains("--no-row-geometry") { ThreadRenderingProbe.rowGeometry = false }
+        if CommandLine.arguments.contains("--no-context-menus") { ThreadRenderingProbe.contextMenus = false }
+        return Harness.makeStore()
+    }()
     @NSApplicationDelegateAdaptor(CheckDelegate.self) private var delegate
 
     var body: some Scene {
@@ -205,6 +210,12 @@ enum SyntheticMessages {
         let longest = store.tiles.map(\.messages.count).max() ?? 0
         print("App check (\(Harness.mode)): \(store.openIDs.count) tiles open (up to \(longest) messages loaded), \(store.conversations.count) conversations, a \(Int(window.frame.width))×\(Int(window.frame.height)) window")
         await expectInPlace(store, window, "at launch")
+
+        // A fast scroll up a long thread, measured (live only: the demo's threads are short).
+        if Harness.live && !CommandLine.arguments.contains("--store-menus") {
+            await ScrollBenchmark.run(store, window)
+            if CommandLine.arguments.contains("--scroll-only") { return finish(nil) }
+        }
 
         // A fast drag around the grid, measured.
         if !CommandLine.arguments.contains("--store-menus") {
@@ -535,4 +546,90 @@ enum SyntheticMessages {
     private(set) var longest: Double = 0
     func add(_ seconds: Double) { count += 1; total += seconds; longest = max(longest, seconds) }
     var average: Double { count == 0 ? 0 : total / Double(count) }
+}
+
+
+/// A fast scroll up the first long thread — 24 points every 1/120 s, about 2,900 points a second,
+/// for five seconds, from the newest message up through what is loaded and the pages that load
+/// above it. Prints how the frames kept up, how often more rows were laid out or read, and how
+/// long the thread sat at the top of what was loaded with the reader still scrolling up (the
+/// wait for older history).
+@MainActor enum ScrollBenchmark {
+    static func threads(in view: NSView?) -> [NSScrollView] {
+        guard let view else { return [] }
+        var found: [NSScrollView] = []
+        if let scroll = view as? NSScrollView, let document = scroll.documentView, !(document is NSTableView),
+           scroll.frame.height > 100, document.frame.height > scroll.frame.height + 500 {
+            found.append(scroll)
+        }
+        return found + view.subviews.flatMap { threads(in: $0) }
+    }
+
+    static func run(_ store: WorkspaceStore, _ window: NSWindow) async {
+        guard let scroll = threads(in: window.contentView).max(by: { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }),
+              let document = scroll.documentView, let content = window.contentView else { print("Scroll benchmark: no long thread found"); return }
+        let clip = scroll.contentView
+        let variant = CommandLine.arguments.contains("--no-row-geometry") ? ", rows not reporting their frames"
+            : CommandLine.arguments.contains("--no-context-menus") ? ", no context menus" : ""
+        let loadedBefore = store.tiles.map(\.messages.count).reduce(0, +)
+        let kinds = ["thread window grows", "older page asked", "older page arrives", "refresh applies", "tile body"]
+        var notes: [(time: CFTimeInterval, kind: String)] = []
+        TileTrace.sink = { message in notes.append((CACurrentMediaTime(), kinds.first { message.hasPrefix($0) } ?? "other")) }
+        let recorder = FrameRecorder()
+        recorder.start(in: content)
+        await Check.pause(0.3)
+        let total = 5.0
+        let begin = CACurrentMediaTime()
+        var stuck: Double = 0
+        var last = begin
+        var travelled: CGFloat = 0
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now(), repeating: .nanoseconds(8_333_333), leeway: .nanoseconds(0))
+            timer.setEventHandler {
+                MainActor.assumeIsolated {
+                    let now = CACurrentMediaTime()
+                    defer { last = now }
+                    guard now - begin < total else { timer.cancel(); done.resume(); return }
+                    let y = clip.bounds.origin.y
+                    let maximum = max(0, document.frame.height - clip.bounds.height)
+                    // Up the thread: toward the start of the document (its top).
+                    let atTop = document.isFlipped ? y <= 0.5 : y >= maximum - 0.5
+                    if atTop { stuck += now - last }
+                    let target = document.isFlipped ? max(0, y - 24) : min(maximum, y + 24)
+                    travelled += abs(target - y)
+                    clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+                    scroll.reflectScrolledClipView(clip)
+                }
+            }
+            timer.resume()
+        }
+        let end = CACurrentMediaTime()
+        await Check.pause(0.5)
+        recorder.stop()
+        TileTrace.sink = nil
+        let frames = recorder.frames(from: begin, to: end)
+        let stretches = recorder.busy.filter { $0.start >= begin && $0.end <= end && $0.end - $0.start > frames.interval * 1.05 }
+        let busy = recorder.busy.filter { $0.start >= begin && $0.end <= end }.reduce(0) { $0 + ($1.end - $1.start) } / (end - begin)
+        func ms(_ seconds: Double) -> String { String(format: "%.1f ms", seconds * 1000) }
+        var counts: [String: Int] = [:]
+        for note in notes where note.time >= begin && note.time <= end { counts[note.kind, default: 0] += 1 }
+        let loadedAfter = store.tiles.map(\.messages.count).reduce(0, +)
+        print("Scroll benchmark (\(Harness.mode)\(variant)): \(Int(travelled)) points in \(String(format: "%.1f", end - begin)) s; at the top of what was loaded, still scrolling, for \(ms(stuck))")
+        print("  frames: \(frames.count) of \(ms(frames.interval)), \(frames.missed) missed, longest gap \(ms(frames.longest)); the main thread was busy \(Int(busy * 100))% of the time, longer than a frame \(stretches.count) times")
+        print("  " + kinds.map { "\($0) \(counts[$0] ?? 0)" }.joined(separator: ", ") + "; messages loaded in the tiles \(loadedBefore) → \(loadedAfter)")
+        func tally(_ from: CFTimeInterval, _ to: CFTimeInterval) -> String {
+            var counts: [String: Int] = [:]
+            for note in notes where note.time >= from && note.time <= to { counts[note.kind, default: 0] += 1 }
+            return kinds.compactMap { kind in counts[kind].map { "\(kind) \($0)" } }.joined(separator: ", ")
+        }
+        for stretch in stretches.sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(6) {
+            print("  stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - begin) * 1000)) ms: " + tally(stretch.start, stretch.end))
+        }
+        // Back to the newest message for what follows.
+        let maximum = max(0, document.frame.height - clip.bounds.height)
+        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: document.isFlipped ? maximum : 0))
+        scroll.reflectScrolledClipView(clip)
+        await Check.pause(0.5)
+    }
 }

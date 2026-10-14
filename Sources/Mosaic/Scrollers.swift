@@ -147,10 +147,17 @@ final class ScrollPinner: NSObject {
     static let nearBottomTolerance: CGFloat = 24
     private(set) weak var scrollView: NSScrollView?
     var onNearBottomChanged: ((Bool) -> Void)?
-    /// The reader scrolled to within `nearTopDistance` of the top of what is loaded: time to load
-    /// earlier messages. Called for scrolls only (not for content changes), on the next turn.
+    /// The reader scrolled to within `nearTopDistance` of the top of what is laid out: time to lay
+    /// out (or load) earlier messages. Called for scrolls only (not for content changes), on the
+    /// next turn, and not again until the content has grown (or a moment has passed).
     var onNearTop: (() -> Void)?
-    static let nearTopDistance: CGFloat = 600
+    /// How far from the top earlier messages are brought in: three views' worth, and never less
+    /// than 2,400 points, so they are there before the reader is (a fast scroll covers a few
+    /// thousand points a second).
+    static let minimumNearTopDistance: CGFloat = 2400
+    var nearTopDistance: CGFloat { max(Self.minimumNearTopDistance, (scrollView?.contentView.bounds.height ?? 0) * 3) }
+    /// An `onNearTop` was sent and its rows have not arrived yet.
+    private var nearTopPending = false
     private(set) var distanceFromBottom: CGFloat = 0
     /// The distance between the visible area's top edge and the content's top.
     private(set) var distanceFromTop: CGFloat = 0
@@ -294,6 +301,8 @@ final class ScrollPinner: NSObject {
         guard !adjusting, let geometry else { return }
         let (clip, documentHeight, flipped) = geometry
         let documentGrewOrShrank = abs(documentHeight - lastDocumentSize.height) > 0.5
+        // The rows asked for arrived: the next scroll may ask for more.
+        if documentGrewOrShrank { nearTopPending = false }
         let widthChanged = abs(clip.bounds.width - lastClipSize.width) > 0.5
         let change = pendingContent.map { Self.classify(from: content, to: $0) } ?? ContentChange.none
         if let pendingContent { content = pendingContent; self.pendingContent = nil }
@@ -350,8 +359,11 @@ final class ScrollPinner: NSObject {
         distanceFromBottom = distance
         distanceFromTop = currentTop() ?? 0
         isNearBottom = distance <= Self.nearBottomTolerance
-        if distanceFromTop <= Self.nearTopDistance, !isNearBottom, let onNearTop {
+        if distanceFromTop <= nearTopDistance, !isNearBottom, !nearTopPending, let onNearTop {
+            nearTopPending = true
             DispatchQueue.main.async { onNearTop() }
+            // Asked again on a later scroll if nothing came of it (a page still loading).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.nearTopPending = false }
         }
         // The row under the view's top edge, for putting the same message back after a reflow.
         if !isNearBottom, let registry, let top = currentTop(), let row = registry.row(at: top) {
