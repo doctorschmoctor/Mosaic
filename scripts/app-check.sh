@@ -19,7 +19,9 @@ rm -f .build/scroll-sample.txt
 .build/MosaicAppCheck --isolated --live --scroll-only --sample || true
 if [[ -f .build/scroll-sample.txt ]]; then
     echo "Scroll sample: the main thread's heaviest paths"
-    awk '/^ *[0-9]+ Thread_[0-9]+.*Main Thread/ { main = 1; next } /^ *[0-9]+ Thread_/ { main = 0 } main' .build/scroll-sample.txt \
+    head -c 600 .build/scroll-sample.txt; echo
+    # The first thread in the call graph is the main thread.
+    awk '/^Call graph:/ { graph = 1; next } graph && /Thread_[0-9]+/ { if (seen) exit; seen = 1; next } graph && seen' .build/scroll-sample.txt \
         | sed -E 's/  \[0x[0-9a-f,.]+\]//; s/\(in ([^)]+)\) \+ [0-9]+/(\1)/; s/ +[a-zA-Z_]+\.swift:[0-9]+//' \
         | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 40) print substr($0, 1, 220) }' | head -260
 fi
