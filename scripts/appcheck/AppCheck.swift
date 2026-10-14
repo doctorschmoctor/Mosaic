@@ -579,6 +579,15 @@ enum SyntheticMessages {
         recorder.start(in: content)
         await Check.pause(0.3)
         let total = 5.0
+        // With --sample, the system's sampler records this process's threads while it scrolls
+        // (the script prints the main thread's heaviest paths).
+        if CommandLine.arguments.contains("--sample") {
+            let sampler = Process()
+            sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+            sampler.arguments = ["\(ProcessInfo.processInfo.processIdentifier)", "4", "-file", FileManager.default.currentDirectoryPath + "/.build/scroll-sample.txt"]
+            try? sampler.run()
+            await Check.pause(0.2)
+        }
         let begin = CACurrentMediaTime()
         var stuck: Double = 0
         var last = begin
