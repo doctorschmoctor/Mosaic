@@ -198,7 +198,9 @@ final class ThreadWindowTests: XCTestCase {
         XCTAssertEqual(presentation.rowsAbove(paged), 50)
         XCTAssertTrue(presentation.expand(paged))
         XCTAssertEqual(presentation.window(paged, following: false).count, more.count + step)
-        XCTAssertTrue(presentation.expand(paged))
+        var steps = 1
+        while presentation.expand(paged) { steps += 1 }
+        XCTAssertEqual(steps, (50 + step - 1) / step, "a few rows at a time")
         XCTAssertEqual(presentation.window(paged, following: false).count, paged.count)
         XCTAssertFalse(presentation.expand(paged), "every row is laid out")
         // A short thread is laid out whole.

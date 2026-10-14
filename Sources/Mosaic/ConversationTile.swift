@@ -634,7 +634,7 @@ struct MessageList: View, Equatable {
                     TileTrace.note("thread window grows")
                     windowRevision += 1
                 }
-                if canLoadMore, presentation.rowsAbove(rows) < ThreadPresentation.step * 2 {
+                if canLoadMore, presentation.rowsAbove(rows) < ThreadPresentation.prefetchRows {
                     TileTrace.note("older page asked")
                     onLoadMore()
                 }
@@ -814,9 +814,13 @@ struct MessageRow: Identifiable, Equatable {
     /// How many rows a thread lays out at least: far more than a tile shows, far fewer than a
     /// long history.
     static let windowSize = 80
-    /// How many older rows are added each time the reader nears the top of what is laid out: a
-    /// few views' worth, so each addition is small (laying out a whole page at once held a frame up).
-    static let step = 25
+    /// How many older rows are added each time the reader nears the top of what is laid out. A
+    /// few at a time: the thread asks again on the next scroll step while still near the top, so
+    /// rows come a handful per frame — never a page at once, which held frames up.
+    static let step = 8
+    /// How few loaded rows may be left above what is laid out before the next page of history is
+    /// read: a few views' worth, so it has arrived before the reader gets there.
+    static let prefetchRows = 60
     /// The first row laid out last time.
     private var windowFirst: String?
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
