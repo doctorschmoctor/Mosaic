@@ -568,8 +568,9 @@ struct MessageScrollSupport: NSViewRepresentable {
 /// When a thread was last scrolled by the reader. While one is moving (and a moment after), what
 /// a refresh brings waits (`WorkspaceStore.waitWhileTilesMove`): drawing it mid-scroll held
 /// frames up for tens of milliseconds.
-@MainActor enum ScrollActivity {
-    private(set) static var lastScroll: CFTimeInterval = 0
+enum ScrollActivity {
+    /// Set and read on the main thread only (scroll notifications, the store).
+    nonisolated(unsafe) private(set) static var lastScroll: CFTimeInterval = 0
     static func noteScroll() { lastScroll = CACurrentMediaTime() }
     /// Scrolled within the last `quiet` seconds.
     static func isScrolling(quiet: CFTimeInterval = 0.35) -> Bool { CACurrentMediaTime() - lastScroll < quiet }
