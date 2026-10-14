@@ -393,6 +393,45 @@ struct ConversationTile: View, Equatable {
     }
 }
 
+/// The thread's rows one under another, leading-aligned (as a VStack lays them out), telling the
+/// row registry where it put each one. The registry used to hear from every row through a
+/// geometry observer, and SwiftUI asks every such observer again on each scroll step (the rows'
+/// place in the window changes, even though their place in the thread does not): a thread of a
+/// few hundred rows spent most of each scroll step there. Layout runs only when the content or
+/// the tile's size changes.
+struct ThreadStack: Layout {
+    var spacing: CGFloat
+    let registry: ThreadRowRegistry
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        var height: CGFloat = 0
+        var width: CGFloat = 0
+        for (index, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
+            height += size.height + (index > 0 ? spacing : 0)
+            width = max(width, size.width)
+        }
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        let reports = ThreadRenderingProbe.rowGeometry
+        for (index, subview) in subviews.enumerated() {
+            if index > 0 { y += spacing }
+            let size = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            subview.place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: size.height))
+            if reports, let id = subview[ThreadRowID.self] {
+                registry.update(id, CGRect(x: 0, y: y - bounds.minY, width: bounds.width, height: size.height))
+            }
+            y += size.height
+        }
+    }
+    func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+}
+/// A thread row's message, for the row registry.
+struct ThreadRowID: LayoutValueKey { static let defaultValue: String? = nil }
+
 /// A tile's thread, with what the store knows of its loading (how deep it goes, whether older
 /// messages are on their way, what was seen). A view of its own: those are kept in collections
 /// for every tile, and reading them in the tile made each tile draw again — header, composer
@@ -525,9 +564,10 @@ struct MessageList: View, Equatable {
         let attachmentFiles = prepared.attachmentFiles
         ScrollViewReader { proxy in
         ScrollView {
-            // A plain VStack: a lazy stack inserts and removes rows while a tile grows or shrinks,
-            // which made rows jump.
-            VStack(alignment: .leading, spacing: 10 * zoom) {
+            // A plain stack, not a lazy one: a lazy stack inserts and removes rows while a tile
+            // grows or shrinks, which made rows jump. It tells the row registry where each row is
+            // as it places them (ThreadStack).
+            ThreadStack(spacing: 10 * zoom, registry: registry) {
                 // Earlier messages load by themselves as the reader nears the top; a small spinner
                 // shows while they come.
                 if historyCeiling && showsStart {
@@ -578,13 +618,8 @@ struct MessageList: View, Equatable {
                     // A row that just arrived at the tail settles in once; everything else is still.
                     .modifier(NewMessageEffect(animated: freshIDs.contains(row.id),
                                                incoming: !row.message.isFromMe, reduceMotion: reduceMotion))
-                    // The row's place within the thread, reported as layout places it (not as it
-                    // scrolls: the thread's own space does not move with the scroll).
-                    .applying(ThreadRenderingProbe.rowGeometry) {
-                        $0.onGeometryChange(for: CGRect.self) { proxy in proxy.frame(in: .named("thread")) } action: { frame in
-                            registry.update(row.id, frame)
-                        }
-                    }
+                    // Which row this is, for the registry (ThreadStack reports where it placed it).
+                    .layoutValue(key: ThreadRowID.self, value: row.id)
                 }
             }
             .coordinateSpace(name: "thread")
