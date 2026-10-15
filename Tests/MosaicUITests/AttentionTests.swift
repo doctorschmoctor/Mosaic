@@ -69,8 +69,9 @@ final class AttentionTests: XCTestCase {
         }
         XCTAssertTrue(store.openIDs.contains(crew) && store.openIDs.contains(alex))
 
-        store.tailSeen(crew)
+        store.tailSeen(crew); store.tailSeen(alex)
         XCTAssertEqual(unread(crew), 2, "open, on screen and at its newest message, but the reader is not in it")
+        XCTAssertEqual(unread(alex), 1)
         XCTAssertTrue(store.unreadConversations.contains { $0.id == crew }, "so it is in the Unread list")
         store.composerTookKeyboard(crew)
         XCTAssertEqual(unread(crew), 0, "clicked or tabbed into: read")
