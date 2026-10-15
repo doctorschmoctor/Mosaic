@@ -155,10 +155,11 @@ extension TileLayout {
             let row = index / 2
             guard row * 2 + 1 < plan.order.count, let first = plan.frames[plan.order[row * 2]] else { return nil }
             // The row's split is the first tile's width: the second tile grows as the first shrinks.
-            let delta = (index % 2 == 0) == grows ? amount : -amount
+            let firstGrows = (index % 2 == 0) == grows
             let available = plan.size.width - inset * 2 - gap
             guard available > minimumWidth * 2 else { return nil }
-            let width = min(max(first.width + delta, minimumWidth), available - minimumWidth)
+            let target = stepped(first.width, even: available / 2, grows: firstGrows, amount: amount)
+            let width = min(max(target, minimumWidth), available - minimumWidth)
             guard abs(width - first.width) > 0.5 else { return nil }
             // Back at the middle: the row is split evenly again, exactly.
             result.gridFractions[row] = abs(width - available / 2) < 0.5 ? nil : width / available
@@ -180,17 +181,49 @@ extension TileLayout {
         return []
     }
 
+    /// The size one keyboard step gives. Steps land on the even size and whole steps from it, so a
+    /// size between them — a divider dragged by hand, a step cut short at the smallest size — goes
+    /// to the next one that way, and the even split can always be reached again: from anywhere,
+    /// the steps back towards it end on it.
+    static func stepped(_ size: CGFloat, even: CGFloat, grows: Bool, amount: CGFloat) -> CGFloat {
+        let steps = (size - even) / amount
+        let next = grows ? (steps + 0.001).rounded(.down) + 1 : (steps - 0.001).rounded(.up) - 1
+        return even + next * amount
+    }
+
+    /// How close to an even split a divider dragged by hand settles on it.
+    public static let evenSnap: CGFloat = 8
+    /// A grid row's split for its first tile's `width` dragged by hand: none — an even split —
+    /// within `evenSnap` of the middle.
+    public static func gridFraction(width: CGFloat, available: CGFloat) -> CGFloat? {
+        abs(width - available / 2) < evenSnap ? nil : width / available
+    }
+    /// Sizes after the divider between `index` and the next was dragged by hand: the two settle on
+    /// an even split within `evenSnap` of it, and when every size is even there are no weights.
+    public static func snapped(_ sizes: [CGFloat], pairAt index: Int) -> [CGFloat] {
+        guard sizes.indices.contains(index), sizes.indices.contains(index + 1) else { return sizes }
+        var result = sizes
+        let middle = (sizes[index] + sizes[index + 1]) / 2
+        if abs(sizes[index] - middle) < evenSnap { result[index] = middle; result[index + 1] = middle }
+        return evened(result)
+    }
+
     /// One size in a row of sizes taking `amount` from, or giving it to, the next one (the one
     /// before, for the last); nil when neither can change.
     private static func steppedPair(_ sizes: [CGFloat], at index: Int, grows: Bool, amount: CGFloat, minimum: CGFloat) -> [CGFloat]? {
         guard sizes.count > 1, sizes.indices.contains(index) else { return nil }
         let pair = index + 1 < sizes.count ? index : index - 1
         // `resizedPair` moves the first of the pair; the tile is the second when it is the last.
-        let delta = (pair == index) == grows ? amount : -amount
+        let firstGrows = (pair == index) == grows
+        let total = sizes[pair] + sizes[pair + 1]
+        // On the steps from the pair's even split (`stepped`).
+        let target = stepped(sizes[pair], even: total / 2, grows: firstGrows, amount: amount)
         // Squeezed below the usual minimum (many grid rows in a short window): neither may get smaller than half the pair.
-        let floor = min(minimum, (sizes[pair] + sizes[pair + 1]) / 2)
-        let result = resizedPair(sizes, at: pair, delta: delta, minimum: floor)
+        let floor = min(minimum, total / 2)
+        var result = resizedPair(sizes, at: pair, delta: target - sizes[pair], minimum: floor)
         guard abs(result[pair] - sizes[pair]) > 0.5 else { return nil }
+        // Back at the even split: exactly.
+        if abs(result[pair] - total / 2) < 0.5 { result[pair] = total / 2; result[pair + 1] = total / 2 }
         return result
     }
 }

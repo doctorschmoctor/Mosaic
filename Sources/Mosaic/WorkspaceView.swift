@@ -957,11 +957,15 @@ struct TileWorkspace: View {
         case .gridColumn(let row):
             guard start.order.indices.contains(row * 2), let first = start.frames[start.order[row * 2]] else { return }
             let available = start.size.width - TileLayout.inset * 2 - TileLayout.gap
-            gridFractions[row] = min(max(first.width + translation.width, TileLayout.minimumWidth), available - TileLayout.minimumWidth) / available
+            let width = min(max(first.width + translation.width, TileLayout.minimumWidth), available - TileLayout.minimumWidth)
+            // Near the middle the divider settles on it, so an even split is easy to find again by hand.
+            gridFractions[row] = TileLayout.gridFraction(width: width, available: available)
         case .row(let index):
-            rowWeights = TileLayout.resizedPair(start.rowSizes, at: index, delta: translation.height, minimum: TileLayout.minimumHeight)
+            rowWeights = TileLayout.snapped(TileLayout.resizedPair(start.rowSizes, at: index, delta: translation.height,
+                                                                   minimum: TileLayout.minimumHeight), pairAt: index)
         case .column(let index):
-            columnWeights = TileLayout.resizedPair(start.columnSizes, at: index, delta: translation.width, minimum: 300)
+            columnWeights = TileLayout.snapped(TileLayout.resizedPair(start.columnSizes, at: index, delta: translation.width, minimum: 300),
+                                               pairAt: index)
         }
     }
 }

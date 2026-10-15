@@ -215,6 +215,45 @@ final class TileLayoutTests: XCTestCase {
         XCTAssertEqual(TileLayout.resized("b", .narrower, in: columns, layout: .columns, proportions: wide), .equal)
     }
 
+    /// Steps land on the even split and whole steps from it: from a split dragged off them by hand,
+    /// or a step cut short at the smallest size, a step goes to the next one — so the middle can
+    /// always be reached again.
+    func testKeyboardStepsLandOnStepsFromTheMiddle() throws {
+        let order = ["a", "b", "c", "d"]
+        let start = plan(order, .grid)
+        let available = start.size.width - TileLayout.inset * 2 - TileLayout.gap
+        // Dragged 10 points off the middle by hand: one step back is the middle.
+        let dragged = TileProportions(gridFractions: [1: (available / 2 + 10) / available])
+        XCTAssertEqual(TileLayout.resized("c", .narrower, in: start, layout: .grid, proportions: dragged), .equal)
+        XCTAssertEqual(TileLayout.resized("d", .wider, in: start, layout: .grid, proportions: dragged), .equal)
+        let on = try XCTUnwrap(TileLayout.resized("c", .wider, in: start, layout: .grid, proportions: dragged))
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, on).frames["c"]).width, available / 2 + TileLayout.keyboardStep, accuracy: 0.5)
+        // Narrowed down to the smallest size (the last step cut short), and widened as many times.
+        var proportions = TileProportions.equal
+        var steps = 0
+        while let next = TileLayout.resized("c", .narrower, in: start, layout: .grid, proportions: proportions) {
+            proportions = next
+            steps += 1
+            XCTAssertLessThan(steps, 50)
+        }
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, proportions).frames["c"]).width, TileLayout.minimumWidth, accuracy: 0.5)
+        for _ in 0..<steps { proportions = try XCTUnwrap(TileLayout.resized("c", .wider, in: start, layout: .grid, proportions: proportions)) }
+        XCTAssertEqual(proportions, .equal, "back in the middle")
+        // Rows: dragged off by hand, one step back is even.
+        let rows = start.rowSizes
+        let off = TileProportions(rowWeights: [rows[0] + 10, rows[1] - 10])
+        XCTAssertEqual(TileLayout.resized("a", .shorter, in: start, layout: .grid, proportions: off), .equal)
+    }
+
+    /// A divider dragged by hand to near the even split settles on it.
+    func testADividerDraggedNearTheMiddleSettlesOnIt() throws {
+        XCTAssertNil(TileLayout.gridFraction(width: 495, available: 983), "3.5 points off: the middle")
+        XCTAssertEqual(try XCTUnwrap(TileLayout.gridFraction(width: 520, available: 983)), 520 / 983, accuracy: 0.0001)
+        XCTAssertEqual(TileLayout.snapped([405, 398], pairAt: 0), [], "both rows even again: no weights")
+        XCTAssertEqual(TileLayout.snapped([300, 405, 398], pairAt: 1), [300, 401.5, 401.5])
+        XCTAssertEqual(TileLayout.snapped([450, 353], pairAt: 0), [450, 353])
+    }
+
     /// In Columns a tile trades width with the next column (the one before, for the last);
     /// height and Focus have nothing to change.
     func testKeyboardStepsInColumnsAndFocus() throws {
