@@ -22,6 +22,11 @@ import MosaicCore
         var canZoomOut = true
         var isActualSize = true
         var zoomLabel = "100%"
+        /// Which of the focused tile's edges the keyboard moves (`WorkspaceStore.resizeEdges`):
+        /// its left edge (the last tile in its row) rather than its right, its top (a tile in the
+        /// last grid row) rather than its bottom.
+        var movesLeftEdge = false
+        var movesTopEdge = false
     }
     private(set) var values = Values()
     /// One change when anything differs, none otherwise.
@@ -69,20 +74,23 @@ struct WorkspaceCommands: Commands {
             Button("Focus Layout") { store.setLayout(.focus) }.keyboardShortcut("3", modifiers: [.command, .option])
             Divider()
             // The focused tile from the keyboard: its place, and its size (taken from the tile
-            // beside it, as dragging the divider between them would).
+            // beside it, as dragging the divider between them would). An arrow moves the tile's
+            // edge its way: a tile with a neighbour on its right grows with → and shrinks with ←;
+            // the last in its row, whose edge is on its left, grows with ← and shrinks with →
+            // (and the same with ↓ and ↑ for a tile in the last grid row).
             Group {
                 Button("Move Tile Left") { if !store.moveFocusedTile(by: -1) { NSSound.beep() } }
                     .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
                 Button("Move Tile Right") { if !store.moveFocusedTile(by: 1) { NSSound.beep() } }
                     .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
                 Button("Make Tile Wider") { store.resizeFocusedTile(.wider) }
-                    .keyboardShortcut(.rightArrow, modifiers: [.command, .option, .control])
+                    .keyboardShortcut(menu.movesLeftEdge ? .leftArrow : .rightArrow, modifiers: [.command, .option, .control])
                 Button("Make Tile Narrower") { store.resizeFocusedTile(.narrower) }
-                    .keyboardShortcut(.leftArrow, modifiers: [.command, .option, .control])
+                    .keyboardShortcut(menu.movesLeftEdge ? .rightArrow : .leftArrow, modifiers: [.command, .option, .control])
                 Button("Make Tile Taller") { store.resizeFocusedTile(.taller) }
-                    .keyboardShortcut(.downArrow, modifiers: [.command, .option, .control])
+                    .keyboardShortcut(menu.movesTopEdge ? .upArrow : .downArrow, modifiers: [.command, .option, .control])
                 Button("Make Tile Shorter") { store.resizeFocusedTile(.shorter) }
-                    .keyboardShortcut(.upArrow, modifiers: [.command, .option, .control])
+                    .keyboardShortcut(menu.movesTopEdge ? .downArrow : .upArrow, modifiers: [.command, .option, .control])
                 Button("Equal Tile Sizes") { store.equalizeTiles() }
             }
             .disabled(!menu.canArrangeTiles)

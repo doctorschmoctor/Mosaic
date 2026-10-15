@@ -167,6 +167,59 @@ final class MenuStateTests: XCTestCase {
     }
 }
 
+/// The arrows resize the focused tile by moving its edge their way: Make Tile Wider is → for a
+/// tile with a neighbour on its right and ← for the last in its row, and the same for Taller
+/// with ↓ and ↑ — so the edge always moves the way the arrow points.
+final class ResizeKeyTests: XCTestCase {
+    @MainActor func testTheArrowsMoveTheFocusedTilesEdgeTheirWay() async throws {
+        let name = "MosaicTest-\(UUID())"
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let store = WorkspaceStore(defaults: UserDefaults(suiteName: name)!, forceDemo: true)
+        for layout in [WorkspaceLayout.grid, .columns] {
+            // Wide enough for four columns to grow and shrink (they are at least 300 points).
+            let viewport = CGSize(width: layout == .columns ? 1600 : 1000, height: 820)
+            store.setLayout(layout)
+            let ids = store.openIDs
+            XCTAssertEqual(ids.count, 4)
+            let plan = TileLayout.plan(order: ids, viewport: viewport, layout: layout)
+            for id in ids {
+                store.focus(id)
+                let edges = store.resizeEdges
+                let before = try XCTUnwrap(plan.frames[id])
+                // Wider: the edge that moves goes left (←) or right (→), as its key says.
+                let wider = try XCTUnwrap(TileLayout.resized(id, .wider, in: plan, layout: layout, proportions: .equal), "\(layout) \(id)")
+                let after = try XCTUnwrap(TileLayout.plan(order: ids, viewport: viewport, layout: layout, gridFractions: wider.gridFractions,
+                                                          rowWeights: wider.rowWeights, columnWeights: wider.columnWeights).frames[id])
+                if edges.left {
+                    XCTAssertLessThan(after.minX, before.minX, "\(layout) \(id): ← moves its left edge left")
+                    XCTAssertEqual(after.maxX, before.maxX, accuracy: 0.5)
+                } else {
+                    XCTAssertGreaterThan(after.maxX, before.maxX, "\(layout) \(id): → moves its right edge right")
+                    XCTAssertEqual(after.minX, before.minX, accuracy: 0.5)
+                }
+                guard layout == .grid else { XCTAssertFalse(edges.top); continue }
+                let taller = try XCTUnwrap(TileLayout.resized(id, .taller, in: plan, layout: layout, proportions: .equal))
+                let higher = try XCTUnwrap(TileLayout.plan(order: ids, viewport: viewport, layout: layout, gridFractions: taller.gridFractions,
+                                                           rowWeights: taller.rowWeights, columnWeights: taller.columnWeights).frames[id])
+                if edges.top {
+                    XCTAssertLessThan(higher.minY, before.minY, "\(id): ↑ moves its top edge up")
+                } else {
+                    XCTAssertGreaterThan(higher.maxY, before.maxY, "\(id): ↓ moves its bottom edge down")
+                }
+            }
+            // The keys in the menu follow the focused tile.
+            store.focus(ids[3])
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertTrue(store.menu.values.movesLeftEdge, "\(layout): the last tile grows with ←")
+            XCTAssertEqual(store.menu.values.movesTopEdge, layout == .grid)
+            store.focus(ids[0])
+            try await Task.sleep(for: .milliseconds(50))
+            XCTAssertFalse(store.menu.values.movesLeftEdge)
+            XCTAssertFalse(store.menu.values.movesTopEdge)
+        }
+    }
+}
+
 /// A window into older history opens on the message it is around, not on its newest one.
 final class StartRowTests: XCTestCase {
     final class Flipped: NSView { override var isFlipped: Bool { true } }

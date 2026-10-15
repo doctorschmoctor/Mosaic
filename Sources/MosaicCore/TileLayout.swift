@@ -142,6 +142,11 @@ extension TileLayout {
     /// can be.
     public static func resized(_ id: String, _ step: TileResizeStep, in plan: TilePlan, layout: WorkspaceLayout,
                                proportions: TileProportions, amount: CGFloat = keyboardStep) -> TileProportions? {
+        // From the sizes the proportions give now, not those of the plan last drawn: a step taken
+        // before the workspace is drawn again (a quick press back, a held key) starts where the
+        // step before it ended, so one step each way always comes back to where it began.
+        let plan = TileLayout.plan(order: plan.order, viewport: plan.size, layout: layout, gridFractions: proportions.gridFractions,
+                                   rowWeights: proportions.rowWeights, columnWeights: proportions.columnWeights)
         guard let index = plan.order.firstIndex(of: id) else { return nil }
         let grows = step == .wider || step == .taller
         var result = proportions
@@ -155,17 +160,24 @@ extension TileLayout {
             guard available > minimumWidth * 2 else { return nil }
             let width = min(max(first.width + delta, minimumWidth), available - minimumWidth)
             guard abs(width - first.width) > 0.5 else { return nil }
-            result.gridFractions[row] = width / available
+            // Back at the middle: the row is split evenly again, exactly.
+            result.gridFractions[row] = abs(width - available / 2) < 0.5 ? nil : width / available
         case (.grid, .taller), (.grid, .shorter):
             guard let sizes = steppedPair(plan.rowSizes, at: index / 2, grows: grows, amount: amount, minimum: minimumHeight) else { return nil }
-            result.rowWeights = sizes
+            result.rowWeights = evened(sizes)
         case (.columns, .wider), (.columns, .narrower):
             guard let sizes = steppedPair(plan.columnSizes, at: index, grows: grows, amount: amount, minimum: 300) else { return nil }
-            result.columnWeights = sizes
+            result.columnWeights = evened(sizes)
         default:
             return nil
         }
         return result
+    }
+
+    /// Sizes all back to the same: no weights (equal sizes, exactly).
+    private static func evened(_ sizes: [CGFloat]) -> [CGFloat] {
+        guard let low = sizes.min(), let high = sizes.max(), high - low < 1 else { return sizes }
+        return []
     }
 
     /// One size in a row of sizes taking `amount` from, or giving it to, the next one (the one

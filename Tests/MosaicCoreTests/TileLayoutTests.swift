@@ -187,6 +187,34 @@ final class TileLayoutTests: XCTestCase {
         XCTAssertNil(TileLayout.resized("a", .taller, in: plan(["a", "b"], .grid), layout: .grid, proportions: .equal), "one row")
     }
 
+    /// A step starts where the step before it ended, even when it is given the plan drawn before
+    /// that step (a quick press back, a held key): a step one way and one the other come back to
+    /// an even split, exactly.
+    func testKeyboardStepsEachWayComeBackToTheMiddle() throws {
+        let order = ["a", "b", "c", "d"]
+        let start = plan(order, .grid)
+        for (id, step, back) in [("a", TileResizeStep.wider, TileResizeStep.narrower), ("b", .wider, .narrower),
+                                 ("a", .taller, .shorter), ("d", .taller, .shorter)] {
+            // Both steps are given the plan drawn before either.
+            let one = try XCTUnwrap(TileLayout.resized(id, step, in: start, layout: .grid, proportions: .equal))
+            XCTAssertNotEqual(one, .equal)
+            let two = try XCTUnwrap(TileLayout.resized(id, back, in: start, layout: .grid, proportions: one))
+            XCTAssertEqual(two, .equal, "\(id) \(step) then \(back): an even split again")
+            XCTAssertEqual(plan(order, .grid, two).frames, start.frames)
+        }
+        // Three steps one way, each given the first plan, and three back.
+        var proportions = TileProportions.equal
+        for _ in 0..<3 { proportions = try XCTUnwrap(TileLayout.resized("b", .wider, in: start, layout: .grid, proportions: proportions)) }
+        XCTAssertEqual(try XCTUnwrap(plan(order, .grid, proportions).frames["b"]).width,
+                       try XCTUnwrap(start.frames["b"]).width + 3 * TileLayout.keyboardStep, accuracy: 0.5)
+        for _ in 0..<3 { proportions = try XCTUnwrap(TileLayout.resized("b", .narrower, in: start, layout: .grid, proportions: proportions)) }
+        XCTAssertEqual(proportions, .equal)
+        // Columns too.
+        let columns = plan(["a", "b", "c"], .columns, viewport: CGSize(width: 1400, height: 820))
+        let wide = try XCTUnwrap(TileLayout.resized("b", .wider, in: columns, layout: .columns, proportions: .equal))
+        XCTAssertEqual(TileLayout.resized("b", .narrower, in: columns, layout: .columns, proportions: wide), .equal)
+    }
+
     /// In Columns a tile trades width with the next column (the one before, for the last);
     /// height and Focus have nothing to change.
     func testKeyboardStepsInColumnsAndFocus() throws {

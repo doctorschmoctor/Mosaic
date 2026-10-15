@@ -118,7 +118,8 @@ import MosaicCore
         let values = withObservationTracking {
             // `heldTile` follows the unobserved drag, so a drag starting or ending is seen here.
             MenuState.Values(canArrangeTiles: heldTile == nil && canArrangeTiles, canReopenClosedTile: canReopenClosedTile, sidebarFilter: sidebarFilter,
-                             canZoomIn: canZoomIn, canZoomOut: canZoomOut, isActualSize: zoom == 1, zoomLabel: zoomLabel)
+                             canZoomIn: canZoomIn, canZoomOut: canZoomOut, isActualSize: zoom == 1, zoomLabel: zoomLabel,
+                             movesLeftEdge: resizeEdges.left, movesTopEdge: resizeEdges.top)
         } onChange: { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.trackMenu() } }
         }
@@ -932,6 +933,23 @@ import MosaicCore
 
     /// Whether the focused tile can move or change size (not in Focus, not alone, not held).
     var canArrangeTiles: Bool { layout != .focus && openIDs.count > 1 && tileDrag == nil }
+    /// Which of the focused tile's edges Make Tile Wider (or Taller) moves, as `TileLayout.resized`
+    /// does: the edge it shares with the tile after it — its right, or its bottom — or, for the
+    /// last tile in its row (the second of a grid row, the last column), its left, and for a tile
+    /// in the last grid row its top. The arrow keys move that edge their way.
+    var resizeEdges: (left: Bool, top: Bool) {
+        guard let id = focusedID.flatMap({ openIDs.contains($0) ? $0 : nil }) ?? openIDs.first,
+              let index = openIDs.firstIndex(of: id) else { return (false, false) }
+        switch layout {
+        case .grid:
+            let rows = (openIDs.count + 1) / 2
+            return (index % 2 == 1, rows > 1 && index / 2 == rows - 1)
+        case .columns:
+            return (openIDs.count > 1 && index == openIDs.count - 1, false)
+        case .focus:
+            return (false, false)
+        }
+    }
     /// Moves the focused tile one place earlier or later (Workspace › Move Tile Left / Right): it
     /// trades places with the tile there, which springs over as when dragging. The keyboard stays
     /// where it was. False (the menu beeps) when there is no place that way.
