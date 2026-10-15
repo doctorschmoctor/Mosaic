@@ -31,7 +31,9 @@ struct ComposerEditor: NSViewRepresentable {
     /// The shared conversation zoom; the font and margins follow it, in place.
     var zoom: CGFloat = 1
     var height: Binding<CGFloat>? = nil
+    /// The field took the keyboard, and when it let it go again.
     let onFocus: () -> Void
+    var onBlur: () -> Void = {}
     let onSend: () -> Void
     var onTab: (Bool) -> Void = { _ in }
     /// Esc, when the field has a use for it (closing a new-message tile).
@@ -127,6 +129,7 @@ struct ComposerEditor: NSViewRepresentable {
             editor.reportHeight()
         }
         editor.onFocus = onFocus
+        editor.onBlur = onBlur
         editor.onSend = onSend
         editor.onTab = onTab
         editor.onCancel = onCancel
@@ -188,6 +191,7 @@ final class PinnedClipView: NSClipView {
 
 final class DraftTextView: NSTextView {
     var onFocus: (() -> Void)?
+    var onBlur: (() -> Void)?
     var onSend: (() -> Void)?
     var onTab: ((Bool) -> Void)?
     var onCancel: (() -> Void)?
@@ -236,6 +240,16 @@ final class DraftTextView: NSTextView {
         let accepted = super.becomeFirstResponder()
         if accepted { onFocus?() }
         return accepted
+    }
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        if accepted { onBlur?() }
+        return accepted
+    }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        // Leaving the window with the keyboard (its tile closed, or was replaced): it has it no more.
+        if newWindow == nil, let window, window.firstResponder === self { onBlur?() }
+        super.viewWillMove(toWindow: newWindow)
     }
     override func keyDown(with event: NSEvent) {
         if (event.keyCode == 36 || event.keyCode == 76), !hasMarkedText() {

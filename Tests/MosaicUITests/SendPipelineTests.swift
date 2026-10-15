@@ -389,6 +389,57 @@ final class SendPipelineTests: XCTestCase {
         XCTAssertNil(store.historyLimits[Self.alex])
     }
 
+    /// A conversation read while a load is under way stays read when the load is shown: the load
+    /// counted its unread messages from where it had been read to when it began. What arrived
+    /// after the reading still counts.
+    @MainActor func testReadingWhileALoadIsUnderWayIsNotUndoneByIt() async throws {
+        let (store, path) = try await liveStore(transport: RecordingTransport())
+        store.tileMotionEnabled = { false }
+        XCTAssertTrue(store.openIDs.contains(Self.alex))
+        receive("one", at: path); receive("two", at: path)
+        await store.refresh()
+        XCTAssertEqual(store.conversations[0].unreadCount, 2)
+        // The unread count as each load that brought "three" is shown, before anything after it.
+        final class Shown { var counts: [Int] = [] }
+        let shown = Shown()
+        TileTrace.sink = { note in
+            guard note == "refresh ends" else { return }
+            MainActor.assumeIsolated {
+                if store.conversations[0].messages.contains(where: { $0.text == "three" }) { shown.counts.append(store.conversations[0].unreadCount) }
+            }
+        }
+        defer { TileTrace.sink = nil }
+        // A held tile keeps a load that has read the database from being shown.
+        let plan = TileLayout.plan(order: store.openIDs, viewport: CGSize(width: 1000, height: 800), layout: .grid)
+        store.dragTile(Self.alex, translation: CGSize(width: 4, height: 4), plan: plan)
+        receive("three", at: path)
+        let loading = Task { await store.refresh() }
+        for _ in 0..<400 where store.loadsWaitingForTiles == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(store.loadsWaitingForTiles, 1, "a load waits for the tile to be let go")
+        // Meanwhile the reader reads it, up to "two", the newest message shown.
+        store.markSeen(Self.alex)
+        XCTAssertEqual(store.conversations[0].unreadCount, 0)
+        store.finishTileDrag()
+        await loading.value
+        for _ in 0..<200 where shown.counts.isEmpty { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(shown.counts.first, 1, "only \"three\": not the three the load counted from before the reading")
+        XCTAssertEqual(store.conversations[0].unreadCount, 1)
+    }
+
+    /// What is unread in a loaded conversation, counted again from where it is read to: incoming
+    /// messages only, and nothing when the loaded messages do not reach back that far.
+    func testUnreadIsCountedAgainFromWhereAConversationIsReadTo() {
+        func message(_ row: Int, fromMe: Bool = false, kind: Message.Kind = .message, unsent: Bool = false) -> Message {
+            Message(id: String(row), text: "m\(row)", date: Date(), isFromMe: fromMe, kind: kind, dateRetracted: unsent ? Date() : nil)
+        }
+        let conversation = Conversation(id: "c", name: "C", participants: [],
+            messages: [message(10), message(11), message(12, fromMe: true), message(13, kind: .activity), message(14, unsent: true), message(15)],
+            lastMessageID: 15)
+        XCTAssertEqual(WorkspaceStore.unreadCount(in: conversation, after: 15), 0)
+        XCTAssertEqual(WorkspaceStore.unreadCount(in: conversation, after: 10), 2, "11 and 15: not mine, the activity or the unsent one")
+        XCTAssertNil(WorkspaceStore.unreadCount(in: conversation, after: 5), "the loaded messages may not reach back that far")
+    }
+
     /// A tile opens on its messages at once: the most recent conversations are fetched ahead after
     /// the first load, a closed tile's history stays cached in memory, and a cached history is
     /// brought up to date by the load that follows.

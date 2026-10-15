@@ -353,7 +353,10 @@ struct ConversationTile: View, Equatable {
                         focus: store.composerFocus,
                         zoom: zoom,
                         height: $composerHeight,
-                        onFocus: { store.focus(conversation.id) },
+                        // The reader is in this tile while its field has the keyboard: what it
+                        // shows of its newest messages is read (`WorkspaceStore.canRead`).
+                        onFocus: { store.composerTookKeyboard(conversation.id) },
+                        onBlur: { store.composerLostKeyboard(conversation.id) },
                         onSend: { Task { await store.send(conversation.id) } },
                         onTab: { forward in store.moveFocus(forward: forward, from: conversation.id) },
                         onCancel: conversation.isComposeDraft ? { store.close(conversation.id) } : nil,

@@ -224,6 +224,8 @@ import MosaicCore
     @ObservationIgnored var isRefreshing = false
     @ObservationIgnored private(set) var lastRefreshed: Date?
     @ObservationIgnored private var refreshRequestedWhileBusy = false
+    /// Loads that have read the database and wait to be shown until no tile moves (tests).
+    @ObservationIgnored private(set) var loadsWaitingForTiles = 0
     /// Callers waiting for the load that follows the running one.
     @ObservationIgnored private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
     /// Transient read failures (Messages writing to the database) keep the last good data; the
@@ -748,7 +750,17 @@ import MosaicCore
         if detailsTile == id { detailsTile = nil }
         tilesOutOfView.remove(id)
         tailsInView.remove(id)
+        if keyboardTile == id { keyboardTile = nil }
         if tilesWithNews.contains(id) { tilesWithNews.remove(id) }
+    }
+    /// How many messages are unread in a loaded conversation after row `boundary`, counted as the
+    /// reader counts them (incoming messages, not activity or unsent ones, up to 99); nil when its
+    /// loaded messages may not reach back to the boundary.
+    nonisolated static func unreadCount(in conversation: Conversation, after boundary: Int64) -> Int? {
+        if conversation.lastMessageID <= boundary { return 0 }
+        let rows = conversation.messages.compactMap { message in message.sendState == nil ? Int64(message.id).map { (message, $0) } : nil }
+        guard let oldest = rows.map(\.1).min(), oldest <= boundary else { return nil }
+        return min(99, rows.filter { !$0.0.isFromMe && $0.0.kind == .message && !$0.0.isUnsent && $0.1 > boundary }.count)
     }
     /// The newest database row among `messages` (bubbles still being sent are not rows yet).
     static func newestRow(in messages: [Message]) -> Int64? {
@@ -882,7 +894,7 @@ import MosaicCore
         if focusedID != id {
             instantly { focusedID = id }
             // In Focus the focused tile is the one on screen.
-            if layout == .focus { markSeenIfVisible(id) }
+            if layout == .focus { readIfReading(id) }
         }
         // Focusing a tile scrolled up in history does not read what is below.
         noteUse(id)
@@ -1010,17 +1022,34 @@ import MosaicCore
     /// keyboard back in the field (the second press gave it to the list).
     func pressRow(_ id: String, clickCount: Int = 1) {
         if clickCount >= 2, let start = rowClickStart, start.id == id {
-            if clickCount == 2, start.wasOpen, openIDs.contains(id) { close(id) }
+            if clickCount == 2, start.wasOpen, openIDs.contains(id) {
+                close(id)
+                // Closing reads nothing: what the first click read is unread again.
+                restoreUnread(id, to: start.unread)
+            }
             else if openIDs.contains(id) { requestComposerFocus(id) }
             return
         }
-        rowClickStart = (id, openIDs.contains(id))
+        rowClickStart = (id, openIDs.contains(id), unreadState(of: id))
         // While the list has the keyboard, a click also moves the keyboard's row here.
         if sidebarSelection != nil { selectSidebarRow(id) }
         openAndType(id)
     }
-    /// The row a click sequence began on, and whether its tile was open then.
-    @ObservationIgnored private var rowClickStart: (id: String, wasOpen: Bool)?
+    /// The row a click sequence began on, whether its tile was open then, and what was unread in it.
+    @ObservationIgnored private var rowClickStart: (id: String, wasOpen: Bool, unread: UnreadState)?
+    /// Where a conversation was read to, and how many messages after that were unread.
+    struct UnreadState { let seen: String?; let count: Int }
+    private func unreadState(of id: String) -> UnreadState {
+        UnreadState(seen: seenMessageIDs[id], count: conversations.first { $0.id == id }?.unreadCount ?? 0)
+    }
+    /// Puts back what was unread in a conversation (nothing to put back when nothing was).
+    private func restoreUnread(_ id: String, to state: UnreadState) {
+        guard state.count > 0, let index = conversations.firstIndex(where: { $0.id == id }) else { return }
+        instantly {
+            if seenMessageIDs[id] != state.seen { seenMessageIDs[id] = state.seen }
+            if conversations[index].unreadCount != state.count { conversations[index].unreadCount = state.count }
+        }
+    }
     /// Opening a conversation from the list (a click, Return, a drag onto a tile, the menu): it
     /// gets a tile — free space, or the place of the tile used longest ago — or its tile is
     /// found, and the cursor goes into that tile's message field, ready to type.
@@ -1028,9 +1057,15 @@ import MosaicCore
         instantly { openAndTypeNow(id) }
     }
     private func openAndTypeNow(_ id: String) {
-        if !openIDs.contains(id) { open(id, thenType: true) }
+        let wasOpen = openIDs.contains(id)
+        if !wasOpen { open(id, thenType: true) }
         // Every tile is protected: the reader chooses which closes first (`chooseReplacement`).
         guard openIDs.contains(id) else { return }
+        // Opening a conversation is reading it: a new tile opens on its newest messages, and an
+        // open one is read when it shows them (one scrolled up in history is read once the reader
+        // is back at the newest). Read now, not once the keyboard reaches its field: in a quick
+        // run of openings each takes the keyboard from the one before, perhaps before it arrived.
+        if !wasOpen || tailsInView.contains(id) { markSeen(id) }
         // A New Message with no one to send to yet starts in its To field, which takes the keyboard itself.
         if let draft = composeDrafts[id], !draft.hasRecipients { focus(id); return }
         requestComposerFocus(id)
@@ -1425,42 +1460,67 @@ import MosaicCore
         return shared
     }
 
-    // MARK: Seeing the newest message
+    // MARK: Reading the newest messages
 
     /// Threads showing their newest message right now (reported by the thread as it scrolls).
     @ObservationIgnored private var tailsInView: Set<String> = []
     /// Open tiles scrolled out of the workspace's view (Columns can be wider than the window).
     @ObservationIgnored private var tilesOutOfView: Set<String> = []
+    /// The tile the reader is in: the one whose message field has the keyboard (it is the
+    /// workspace window's first responder). Reported by the field itself.
+    @ObservationIgnored private(set) var keyboardTile: String?
     /// Whether the workspace window is on screen: not minimized and not fully covered.
     @ObservationIgnored private(set) var windowVisible = true
+    /// Whether the workspace window is the key window (a sheet or another window can have the
+    /// keyboard instead).
+    @ObservationIgnored private(set) var windowKey = true
     @ObservationIgnored private var windowObservers: [NSObjectProtocol] = []
     @ObservationIgnored private weak var window: NSWindow?
 
-    /// A thread shows its newest message: everything up to it is seen — once the reader can
-    /// actually see it: Mosaic is the active app, its window is on screen, and the tile is in view.
-    /// Until then it waits (`seeingMayHaveChanged`), so nothing is marked seen behind the reader's back.
+    /// A thread shows its newest message: everything up to it is read — once the reader is in
+    /// its tile (`canRead`). A tile that is only open, however visible, counts what arrives in it
+    /// as unread until the reader clicks or tabs into it; a tail shown meanwhile waits, so nothing
+    /// is read behind the reader's back.
     func tailSeen(_ id: String) {
         tailsInView.insert(id)
-        markSeenIfVisible(id)
+        readIfReading(id)
     }
     /// A thread no longer shows its newest message (scrolled up, closed, or out of the layout).
     func tailLeft(_ id: String) { tailsInView.remove(id) }
-    /// Whether the reader could be looking at this tile now.
+    /// Whether the reader could be looking at this tile now: Mosaic is the active app, its window
+    /// is on screen, and the tile is in view. A conversation the reader can see never notifies.
     func canSee(_ id: String) -> Bool {
         guard appActive, windowVisible, openIDs.contains(id), !tilesOutOfView.contains(id) else { return false }
         return layout != .focus || focused?.id == id
     }
-    private func markSeenIfVisible(_ id: String) {
-        guard tailsInView.contains(id), canSee(id) else { return }
+    /// Whether the reader is reading this tile: they can see it, and they are in it — its message
+    /// field has the keyboard, in the key window (they clicked or tabbed into it, or opened it).
+    func canRead(_ id: String) -> Bool {
+        keyboardTile == id && windowKey && canSee(id)
+    }
+    private func readIfReading(_ id: String) {
+        guard tailsInView.contains(id), canRead(id) else { return }
         markSeen(id)
     }
-    /// Something that decides what the reader can see changed: waiting threads are seen now.
+    /// Something that decides what the reader can see or read changed: the tile they are in is
+    /// read now, if it shows its newest message.
     func seeingMayHaveChanged() {
-        for id in tailsInView { markSeenIfVisible(id) }
+        if let id = keyboardTile { readIfReading(id) }
+    }
+    /// A tile's message field took the keyboard: a click or Tab into the tile, or the workspace
+    /// handing it over (opening a conversation). The reader is in that tile now.
+    func composerTookKeyboard(_ id: String) {
+        keyboardTile = id
+        focus(id)
+        readIfReading(id)
+    }
+    /// A tile's message field let the keyboard go (to another tile, the list, the search field).
+    func composerLostKeyboard(_ id: String) {
+        if keyboardTile == id { keyboardTile = nil }
     }
     /// A tile came into the workspace's view or left it (Columns).
     func setTileInView(_ id: String, _ inView: Bool) {
-        if inView { if tilesOutOfView.remove(id) != nil { markSeenIfVisible(id) } }
+        if inView { if tilesOutOfView.remove(id) != nil { readIfReading(id) } }
         else { tilesOutOfView.insert(id) }
     }
     /// The workspace window (from the view that hosts it): the keyboard hand-over works in it, and
@@ -1471,7 +1531,8 @@ import MosaicCore
         self.window = window
         for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
         let center = NotificationCenter.default
-        windowObservers = [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification]
+        windowObservers = [NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification, NSWindow.didChangeOcclusionStateNotification,
+                           NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification]
             .map { name in
                 center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated { self?.windowVisibilityChanged() }
@@ -1483,6 +1544,7 @@ import MosaicCore
         guard let window else { return }
         let visible = !window.isMiniaturized && window.occlusionState.contains(.visible)
         setWindowVisible(visible)
+        setWindowKey(window.isKeyWindow)
     }
     /// Whether the workspace window is on screen (tests set it directly).
     func setWindowVisible(_ visible: Bool) {
@@ -1490,10 +1552,16 @@ import MosaicCore
         windowVisible = visible
         if visible { seeingMayHaveChanged() }
     }
+    /// Whether the workspace window is the key window (tests set it directly).
+    func setWindowKey(_ key: Bool) {
+        guard windowKey != key else { return }
+        windowKey = key
+        if key { seeingMayHaveChanged() }
+    }
 
     /// Everything in the conversation up to its newest row has been seen: the unread count clears
-    /// and the seen boundary moves to that row. Called when a thread's newest message is in view,
-    /// and after sending (sending is reading).
+    /// and the seen boundary moves to that row. Called when the reader opens a conversation, when
+    /// the tile they are in shows its newest message, and after sending (sending is reading).
     func markSeen(_ id: String) {
         // Read now: its notifications have done their job.
         if notifiedConversations.remove(id) != nil { notifier.withdraw(conversationID: id) }
@@ -1515,7 +1583,7 @@ import MosaicCore
         persistNow(); generation += 1; isLive = live; connectedBefore = false; consecutiveLoadFailures = 0; lastLoad = nil
         connectionError = nil; sendErrors = [:]; pending = [:]; search = ""; tileDrag = nil; originalTitles = [:]
         focusTarget = nil; composeDrafts = [:]; recentlyClosed = []; showHiddenConversations = false; replacementChoice = nil
-        tailsInView = []; tilesOutOfView = []
+        tailsInView = []; tilesOutOfView = []; keyboardTile = nil
         for task in searchTasks.values { task.cancel() }
         searchTasks = [:]; searchTaskGenerations = [:]; historySearches = [:]; contextWindows = [:]; activeFindTile = nil
         // A new connection's first load is a new starting point: nothing in it is notified.
@@ -1595,7 +1663,9 @@ import MosaicCore
             startWatchingDatabase()
             guard let snapshot else { return } // unchanged since the last load
             // A tile being moved, or settling into place, is not held up by a re-render.
+            loadsWaitingForTiles += 1
             await waitWhileTilesMove()
+            loadsWaitingForTiles -= 1
             guard generation == requestGeneration, isLive else { return }
             lastLoad = snapshot.token
             let ids = request.openIDs
@@ -1603,6 +1673,7 @@ import MosaicCore
             let previousByID = Dictionary(conversations.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             var newBoundaries: [String: String] = [:]
             var arrivals = Set<String>()
+            var countAgain = false
             for index in loaded.indices {
                 let id = loaded[index].id
                 originalTitles[id] = loaded[index].name
@@ -1636,6 +1707,15 @@ import MosaicCore
                    Self.receivedMessage(in: loaded[index].messages, after: newest) {
                     arrivals.insert(id)
                 }
+                // Read while this load was under way (opened, or the tile the reader is in showed
+                // its newest message): the load counted what is unread from where it had been read
+                // to when it began, and would bring back what was just read. Counted again from
+                // where it is read to now, from the newest messages an open tile has — or, when
+                // they do not reach back that far, by the load that follows.
+                if let boundary = seenBoundary(id), boundary != request.seenBoundaries[id] {
+                    if let count = Self.unreadCount(in: loaded[index], after: boundary) { loaded[index].unreadCount = count }
+                    else { countAgain = true }
+                }
                 // Unread counts are counted by the reader from the seen boundary: every incoming
                 // message after it, repeated texts and files included. A conversation seen for the
                 // first time starts with its newest row as seen (Messages keeps its own unread state).
@@ -1645,6 +1725,7 @@ import MosaicCore
                 }
             }
             if !newBoundaries.isEmpty { seenMessageIDs.merge(newBoundaries) { current, _ in current } }
+            if countAgain { refreshRequestedWhileBusy = true }
             if !arrivals.subtracting(tilesWithNews).isEmpty { tilesWithNews.formUnion(arrivals) }
             // Publishing identical data re-rendered every tile; only publish real changes.
             TileTrace.note("refresh applies")
