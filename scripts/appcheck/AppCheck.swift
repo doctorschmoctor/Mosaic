@@ -626,6 +626,9 @@ enum SyntheticMessages {
         // back down by something other than the scroll.
         var lastFromEnd: CGFloat?
         var lastHeight: CGFloat = 0
+        var wheelSign: Int32 = 1
+        var wheelChecked = false
+        var usesWheel = true
         var drops: [(time: Double, from: CGFloat, to: CGFloat, heights: (CGFloat, CGFloat))] = []
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -649,12 +652,33 @@ enum SyntheticMessages {
                     // Up the thread: toward the start of the document (its top).
                     let atTop = document.isFlipped ? y <= 0.5 : y >= maximum - 0.5
                     if atTop { stuck += now - last }
-                    let target = document.isFlipped ? max(0, y - stride) : min(maximum, y + stride)
-                    travelled += abs(target - y)
-                    clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
-                    scroll.reflectScrolledClipView(clip)
+                    // A scroll wheel's step, as a trackpad sends it (moving the clip view directly
+                    // is not a scroll to SwiftUI: on the next change of size it put its own
+                    // position back). Which way a positive step goes is found on the first.
+                    let fromEndBefore = fromEnd
+                    if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                                           wheel1: Int32(stride) * wheelSign, wheel2: 0, wheel3: 0) {
+                        event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                        if let wheel = NSEvent(cgEvent: event) { scroll.scrollWheel(with: wheel) }
+                    }
                     let newMaximum = max(0, document.frame.height - clip.bounds.height)
-                    lastFromEnd = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
+                    var fromEndAfter = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
+                    if !wheelChecked {
+                        wheelChecked = true
+                        if fromEndAfter < fromEndBefore - 0.5 { wheelSign = -wheelSign }
+                        if abs(fromEndAfter - fromEndBefore) < 0.5 {
+                            // No wheel here: the clip view is moved instead.
+                            usesWheel = false
+                        }
+                    }
+                    if !usesWheel {
+                        let target = document.isFlipped ? max(0, clip.bounds.origin.y - stride) : min(newMaximum, clip.bounds.origin.y + stride)
+                        clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
+                        scroll.reflectScrolledClipView(clip)
+                        fromEndAfter = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
+                    }
+                    travelled += max(0, fromEndAfter - fromEndBefore)
+                    lastFromEnd = fromEndAfter
                 }
             }
             timer.resume()
@@ -683,7 +707,7 @@ enum SyntheticMessages {
                 "at +\(String(format: "%.1f", $0.time)) s from \(Int($0.from)) to \(Int($0.to)) points from the end (thread \(Int($0.heights.0)) → \(Int($0.heights.1)) tall)"
             }.joined(separator: "; "))
         }
-        print("  the thread is \(Int(document.frame.height)) points tall; the view is \(Int(document.isFlipped ? max(0, document.frame.height - clip.bounds.height) - clip.bounds.origin.y : clip.bounds.origin.y)) points from its end")
+        print("  scrolled with \(usesWheel ? "scroll wheel events" : "the clip view moved directly"); the thread is \(Int(document.frame.height)) points tall; the view is \(Int(document.isFlipped ? max(0, document.frame.height - clip.bounds.height) - clip.bounds.origin.y : clip.bounds.origin.y)) points from its end")
         if Harness.deep {
             // How it goes the further back it is: each stretch of the scroll on its own.
             func rowsLaidOut(_ from: CFTimeInterval, _ to: CFTimeInterval) -> (most: Int, sizing: Double, passes: Int) {
