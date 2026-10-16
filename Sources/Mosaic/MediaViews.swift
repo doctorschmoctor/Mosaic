@@ -216,12 +216,12 @@ struct AttachmentView: View {
     private var visual: some View {
         let sticker = attachment.isSticker
         // Decoded already (a bubble laid out again): shown from the first frame, not after a spinner.
-        let image = self.image ?? attachment.path.flatMap { ThumbnailCache.shared.decoded(path: $0, tier: thumbnailTier) }
+        let shown = image ?? attachment.path.flatMap { ThumbnailCache.shared.decoded(path: $0, tier: thumbnailTier) }
         return AspectBox(ratio: ratio, maxWidth: (sticker ? 110 : 240) * zoom, maxHeight: (sticker ? 110 : 300) * zoom) {
             Rectangle().fill(sticker ? Color.clear : Palette.incoming)
                 .overlay {
-                    if let image {
-                        Image(nsImage: image).resizable().interpolation(.high)
+                    if let shown {
+                        Image(nsImage: shown).resizable().interpolation(.high)
                             .aspectRatio(contentMode: sticker ? .fit : .fill)
                     } else if failed || attachment.path == nil {
                         VStack(spacing: 5) {
@@ -233,7 +233,7 @@ struct AttachmentView: View {
                     }
                 }
                 .overlay {
-                    if attachment.kind == .video, image != nil {
+                    if attachment.kind == .video, shown != nil {
                         Image(systemName: "play.circle.fill").font(.system(size: 34)).symbolRenderingMode(.palette)
                             .foregroundStyle(.white, .black.opacity(0.35)).shadow(radius: 3)
                     }

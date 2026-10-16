@@ -983,7 +983,7 @@ struct MessageRow: Identifiable, Equatable {
     /// How many of the newest rows are laid out while following the newest message: `windowSize`,
     /// or fewer when that many were not laid out when the reader came back (they are not laid out
     /// all at once then; more come as the reader goes up again).
-    private var followingCount = windowSize
+    private var followingCount = ThreadPresentation.windowSize
     /// How many rows the last window laid out.
     private var laidOutCount = 0
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
