@@ -744,9 +744,8 @@ struct MessageList: View, Equatable {
             }, onNearSpaceBelow: { [presentation, registry] in
                 // Among the newest rows, below the space (the scroller dragged down to them): those
                 // are the rows laid out now, as back at the newest message.
-                if let visible = registry.visible, let spaceTop = registry.spaceTop,
-                   visible.lowerBound >= spaceTop + presentation.spaceBelow {
-                    if presentation.release() { windowRevision += 1 }
+                if amongNewestRows {
+                    letGoOfOlderRows()
                     return
                 }
                 // Back down towards the rows left out below: some are laid out again.
@@ -785,9 +784,8 @@ struct MessageList: View, Equatable {
         .overlay(alignment: .bottomTrailing) {
             if !isNearBottom && showsLatestButton {
                 Button {
-                    // The newest rows laid out first, so the way down shows them, not the space
-                    // standing in for rows left out below.
-                    if presentation.release() { windowRevision += 1 }
+                    // The newest rows are laid out already (`ThreadPresentation.tail`): the thread
+                    // goes to them, and lets go of the rows on the way up once it is there.
                     latestRequest += 1
                 } label: {
                     Label(conversation.unreadCount > 0 ? "\(conversation.unreadCount) new" : "Latest", systemImage: "arrow.down")
@@ -802,7 +800,7 @@ struct MessageList: View, Equatable {
             if near {
                 onTailSeen()
                 // Back at the newest message: the older rows laid out on the way up can go.
-                if presentation.release() { windowRevision += 1 }
+                letGoOfOlderRows()
             } else { onTailLeft() }
         }
         .onChange(of: ids) { old, new in
@@ -812,6 +810,29 @@ struct MessageList: View, Equatable {
             freshIDs = animateNew ? Self.freshTailIDs(old: old, new: new) : []
             if isNearBottom { onTailSeen() }
         }
+    }
+
+    /// The view is below the space standing in for the rows left out, among the newest rows.
+    private var amongNewestRows: Bool {
+        guard let visible = registry.visible, let spaceTop = registry.spaceTop else { return false }
+        return visible.lowerBound >= spaceTop + presentation.spaceBelow
+    }
+    /// Back at the newest message (or among the newest rows): the older rows laid out on the way
+    /// up go, a few at a time (`ThreadPresentation.shed`), while the reader stays there.
+    private func letGoOfOlderRows() {
+        guard !presentation.shedding else { return }
+        presentation.shedding = true
+        letGoOfSomeOlderRows()
+    }
+    private func letGoOfSomeOlderRows() {
+        guard isNearBottom || amongNewestRows else { presentation.shedding = false; return }
+        if presentation.shed() {
+            windowRevision += 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + ThreadPresentation.shedInterval) { letGoOfSomeOlderRows() }
+            return
+        }
+        presentation.shedding = false
+        if presentation.release() { windowRevision += 1 }
     }
 
     /// What a reply answers: a message in the page, one above it, or nothing Mosaic can find.
@@ -1181,6 +1202,24 @@ struct MessageRow: Identifiable, Equatable {
     /// How many rows below a row brought into view from among those left out are laid out with it
     /// (`include`): enough for it to sit in the middle of a tall tile.
     static let belowIncluded = 20
+    /// Back at the newest message, the rows laid out above the newest ones go `shedStep` at a time,
+    /// `shedInterval` apart (`shed`), before `release` lets go of the rest: taking a long way's
+    /// rows away at once held up the frame the reader arrived on.
+    static let shedStep = 24
+    static let shedInterval: TimeInterval = 0.05
+    /// Rows are being let go of (`shed`), a step at a time.
+    var shedding = false
+    /// Lets go of the oldest `shedStep` rows laid out above the newest ones (those down to the
+    /// space while rows are left out, else to the newest `windowSize`), from the rows of the last
+    /// build. False when no more than that many are left: `release` lets go of them.
+    func shed() -> Bool {
+        guard holdsOlder, let rows = cached?.rows, let first = windowFirst, let start = position(of: first, in: rows) else { return false }
+        let end = windowLast.flatMap { position(of: $0, in: rows) }.map { $0 + 1 } ?? rows.count - Self.windowSize
+        guard end - start > Self.shedStep else { return false }
+        windowFirst = rows[start + Self.shedStep].id
+        TileTrace.note("rows let go above: \(Self.shedStep)")
+        return true
+    }
 
     /// The rows whose text has the find bar's words, worked out once per query and build.
     func findMatches(_ query: String) -> Set<String> {

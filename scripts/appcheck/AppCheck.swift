@@ -795,17 +795,24 @@ enum SyntheticMessages {
         let ended = CACurrentMediaTime()
         recorder.stop()
         TileTrace.sink = nil
-        let frames = recorder.frames(from: pressed - 0.05, to: ended)
-        var most = 0, passes = 0
-        for note in notes where note.time >= pressed && note.text.hasPrefix("thread stack sized ") {
-            let words = note.text.split(separator: " ")
-            if words.count > 3, let rows = Int(words[3]) { most = max(most, rows); passes += 1 }
-        }
-        let laidOutAgain = notes.filter { $0.time >= pressed && $0.text.hasPrefix("rows laid out again") }.count
         guard let arrived else {
             print("Latest from \(Int(back)) points back: not at the newest message 10 s after the press (\(Int(fromEnd())) points from it) — the button was not where it was pressed?")
             return
         }
-        print("Latest from \(Int(back)) points back: at the newest message after \(ms(arrived - pressed)); frames from the press to 0.8 s after: \(frames.missed) missed, longest gap \(ms(frames.longest)); up to \(most) rows laid out in \(passes) sizing passes\(laidOutAgain > 0 ? ", rows laid out again below \(laidOutAgain) times" : ""); the thread is \(Int(document.frame.height)) points tall")
+        let before = recorder.frames(from: pressed - 0.05, to: arrived)
+        let after = recorder.frames(from: arrived, to: ended)
+        var sized: [Int] = []
+        for note in notes where note.time >= pressed && note.text.hasPrefix("thread stack sized ") {
+            let words = note.text.split(separator: " ")
+            if words.count > 3, let rows = Int(words[3]) { sized.append(rows) }
+        }
+        let letGo = notes.filter { $0.time >= pressed && $0.text.hasPrefix("rows let go above") }.count
+        let laidOutAgain = notes.filter { $0.time >= pressed && $0.text.hasPrefix("rows laid out again") }.count
+        print("Latest from \(Int(back)) points back: at the newest message after \(ms(arrived - pressed)) (longest gap on the way \(ms(before.longest))); in the 0.8 s after: \(after.missed) frames missed, longest gap \(ms(after.longest)); rows let go of above \(letGo) times before the rest\(laidOutAgain > 0 ? ", rows laid out again below \(laidOutAgain) times" : ""); rows laid out in each pass: \(sized.prefix(16).map(String.init).joined(separator: " → ")); the thread is \(Int(document.frame.height)) points tall")
+        let interval = after.interval > 0 ? after.interval : 1.0 / 60
+        for stretch in recorder.busy.filter({ $0.start >= pressed - 0.05 && $0.end <= ended && $0.end - $0.start > interval * 1.05 })
+            .sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(4) {
+            print("  stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - pressed) * 1000)) ms: " + notes.filter { $0.time >= stretch.start && $0.time <= stretch.end }.prefix(6).map { $0.text }.joined(separator: "; "))
+        }
     }
 }

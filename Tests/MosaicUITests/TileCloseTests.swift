@@ -458,10 +458,13 @@ final class ThreadWindowTests: XCTestCase {
     }
 
     /// Back at the newest message after a long way back — Latest, or scrolled there — the newest
-    /// rows shown are those kept laid out all along: nothing between is laid out on the way.
+    /// rows shown are those kept laid out all along: nothing is laid out on the way, and the rows
+    /// above them go a step at a time.
     @MainActor func testGoingBackToTheNewestLaysOutNothingNew() {
-        let all = rows(600)
+        let day = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        let messages = (1...600).map { Message(id: "\($0)", text: "note \($0)", date: day + Double($0) * 60, isFromMe: $0 % 2 == 0) }
         let presentation = ThreadPresentation()
+        let all = presentation.prepared(for: Conversation(id: "c", name: "Alex", participants: ["a@example.test"], messages: messages)).rows
         let registry = ThreadRowRegistry()
         func show(_ following: Bool = false) -> ArraySlice<MessageRow> {
             let window = presentation.window(all, following: following, registry: registry, spacing: 10)
@@ -483,25 +486,39 @@ final class ThreadWindowTests: XCTestCase {
         XCTAssertGreaterThan(presentation.spaceBelow, 0)
         let newest = presentation.tail.map(\.id)
         XCTAssertEqual(newest, all.suffix(ThreadPresentation.tailKept).map(\.id))
-        // Latest (the reader is still far up when it is pressed).
+        // At the newest message: the rows above it go, a step at a time; nothing new is laid out.
+        var laidOut = Set(window.map(\.id) + newest)
+        var steps = 0
+        while presentation.shed() {
+            steps += 1
+            window = show(true)
+            let now = Set(window.map(\.id) + presentation.tail.map(\.id))
+            XCTAssertTrue(now.isSubset(of: laidOut), "nothing new laid out")
+            XCTAssertEqual(laidOut.count - now.count, ThreadPresentation.shedStep)
+            XCTAssertEqual(presentation.tail.map(\.id), newest)
+            laidOut = now
+        }
+        XCTAssertGreaterThan(steps, 0)
         XCTAssertTrue(presentation.release())
-        window = show(false)
+        window = show(true)
         XCTAssertEqual(window.map(\.id), newest, "the newest rows, laid out already, and no others")
         XCTAssertEqual(presentation.spaceBelow, 0)
         XCTAssertTrue(presentation.tail.isEmpty)
-        XCTAssertEqual(show(true).map(\.id), newest, "and the same once it follows the newest message")
         XCTAssertFalse(presentation.release(), "nothing more to let go of")
+        XCTAssertFalse(presentation.shed())
         // New messages while following: the newest rows, as many as before.
         let more = all + rows(3, from: 601)
         XCTAssertEqual(presentation.window(more, following: true).last?.id, "603")
         XCTAssertEqual(presentation.window(more, following: true).count, ThreadPresentation.tailKept)
 
-        // Up a little — nothing left out — and back: the rows laid out stay, up to `windowSize`.
+        // Up a little — nothing left out — and back: the rows above the newest `windowSize` go.
         let other = ThreadPresentation()
-        _ = other.window(all, following: true)
-        XCTAssertTrue(other.expand(all))
-        XCTAssertEqual(other.window(all, following: false).count, ThreadPresentation.windowSize + ThreadPresentation.step)
+        let rows600 = other.prepared(for: Conversation(id: "c", name: "Alex", participants: ["a@example.test"], messages: messages)).rows
+        _ = other.window(rows600, following: true)
+        for _ in 0..<10 { _ = other.expand(rows600) }
+        XCTAssertEqual(other.window(rows600, following: true).count, ThreadPresentation.windowSize + 10 * ThreadPresentation.step)
+        while other.shed() { _ = other.window(rows600, following: true) }
         XCTAssertTrue(other.release())
-        XCTAssertEqual(other.window(all, following: true).count, ThreadPresentation.windowSize)
+        XCTAssertEqual(other.window(rows600, following: true).count, ThreadPresentation.windowSize)
     }
 }
