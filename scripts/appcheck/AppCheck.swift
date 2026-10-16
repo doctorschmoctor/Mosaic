@@ -621,6 +621,12 @@ enum SyntheticMessages {
         var stuck: Double = 0
         var last = begin
         var travelled: CGFloat = 0
+        // Where the view is in the thread before each step: how far from its end, and how tall it
+        // is. Scrolling up, the distance from the end only grows; a drop is the view being taken
+        // back down by something other than the scroll.
+        var lastFromEnd: CGFloat?
+        var lastHeight: CGFloat = 0
+        var drops: [(time: Double, from: CGFloat, to: CGFloat, heights: (CGFloat, CGFloat))] = []
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             let timer = DispatchSource.makeTimerSource(queue: .main)
             timer.schedule(deadline: .now(), repeating: .nanoseconds(8_333_333), leeway: .nanoseconds(0))
@@ -635,6 +641,11 @@ enum SyntheticMessages {
                     }
                     let y = clip.bounds.origin.y
                     let maximum = max(0, document.frame.height - clip.bounds.height)
+                    let fromEnd = document.isFlipped ? maximum - y : y
+                    if let before = lastFromEnd, fromEnd < before - 100 {
+                        drops.append((now - begin, before, fromEnd, (lastHeight, document.frame.height)))
+                    }
+                    lastHeight = document.frame.height
                     // Up the thread: toward the start of the document (its top).
                     let atTop = document.isFlipped ? y <= 0.5 : y >= maximum - 0.5
                     if atTop { stuck += now - last }
@@ -642,6 +653,8 @@ enum SyntheticMessages {
                     travelled += abs(target - y)
                     clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
                     scroll.reflectScrolledClipView(clip)
+                    let newMaximum = max(0, document.frame.height - clip.bounds.height)
+                    lastFromEnd = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
                 }
             }
             timer.resume()
@@ -665,6 +678,12 @@ enum SyntheticMessages {
             for note in notes where note.time >= from && note.time <= to { counts[note.kind, default: 0] += 1 }
             return kinds.compactMap { kind in counts[kind].map { "\(kind) \($0)" } }.joined(separator: ", ")
         }
+        if !drops.isEmpty {
+            print("  the view was taken back towards the newest message \(drops.count) times while scrolling up: " + drops.prefix(8).map {
+                "at +\(String(format: "%.1f", $0.time)) s from \(Int($0.from)) to \(Int($0.to)) points from the end (thread \(Int($0.heights.0)) → \(Int($0.heights.1)) tall)"
+            }.joined(separator: "; "))
+        }
+        print("  the thread is \(Int(document.frame.height)) points tall; the view is \(Int(document.isFlipped ? max(0, document.frame.height - clip.bounds.height) - clip.bounds.origin.y : clip.bounds.origin.y)) points from its end")
         if Harness.deep {
             // How it goes the further back it is: each stretch of the scroll on its own.
             func rowsLaidOut(_ from: CFTimeInterval, _ to: CFTimeInterval) -> (most: Int, sizing: Double, passes: Int) {
