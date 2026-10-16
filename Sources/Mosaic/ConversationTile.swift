@@ -424,6 +424,8 @@ struct ThreadStack: Layout {
         defer { TileTrace.note("thread stack placed \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms") }
         var y = bounds.minY
         let reports = ThreadRenderingProbe.rowGeometry
+        if reports { registry.beginPass() }
+        var spaceTop: CGFloat?
         for (index, subview) in subviews.enumerated() {
             if index > 0 { y += spacing }
             let size = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
@@ -431,14 +433,18 @@ struct ThreadStack: Layout {
             if reports, let id = subview[ThreadRowID.self] {
                 registry.update(id, CGRect(x: 0, y: y - bounds.minY, width: bounds.width, height: size.height))
             }
+            if subview[ThreadSpace.self] { spaceTop = y - bounds.minY }
             y += size.height
         }
+        registry.spaceTop = spaceTop
     }
     func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
     func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
 }
 /// A thread row's message, for the row registry.
 struct ThreadRowID: LayoutValueKey { static let defaultValue: String? = nil }
+/// The space standing in for rows left out below (`ThreadPresentation.window`).
+struct ThreadSpace: LayoutValueKey { static let defaultValue = false }
 
 /// Starts a scroll view at its end (macOS 15), for a thread's first frame.
 struct OpensAtNewest: ViewModifier {
@@ -568,7 +574,10 @@ struct MessageList: View, Equatable {
         // a match or a reply's original is shown), so resizing, moving or opening a tile lays out
         // what can be seen and a little more — not every loaded message.
         let _ = windowRevision
-        let shown = presentation.window(rows, following: isNearBottom)
+        let spacing = 10 * zoom
+        let shown = presentation.window(rows, following: isNearBottom, registry: registry, spacing: spacing, zoom: zoom)
+        // Standing in for the rows left out below, as tall as they were (none while following).
+        let spaceBelow = presentation.spaceBelow
         let showsStart = shown.startIndex == 0
         // Only the matching bubbles are given the find bar's words: a new query redraws those
         // alone, never the whole thread.
@@ -587,7 +596,7 @@ struct MessageList: View, Equatable {
             // A plain stack, not a lazy one: a lazy stack inserts and removes rows while a tile
             // grows or shrinks, which made rows jump. It tells the row registry where each row is
             // as it places them (ThreadStack).
-            ThreadStack(spacing: 10 * zoom, registry: registry) {
+            ThreadStack(spacing: spacing, registry: registry) {
                 // Earlier messages load by themselves as the reader nears the top; a small spinner
                 // shows while they come.
                 if historyCeiling && showsStart {
@@ -641,16 +650,19 @@ struct MessageList: View, Equatable {
                     // Which row this is, for the registry (ThreadStack reports where it placed it).
                     .layoutValue(key: ThreadRowID.self, value: row.id)
                 }
+                if spaceBelow > 0 {
+                    Color.clear.frame(height: spaceBelow).accessibilityHidden(true).layoutValue(key: ThreadSpace.self, value: true)
+                }
             }
             .coordinateSpace(name: "thread")
             .padding(16 * zoom)
             .environment(\.threadAttachments, attachmentFiles)
             .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry, startRow: startsAt,
-                                             onNearTop: { [presentation] in
-                // Near the top of what is laid out: a few more of the older loaded rows, and once
-                // few are left above, the next page of history is read — in good time, well
-                // before the reader gets there.
-                if presentation.expand(rows) {
+                                             onNearTop: { [presentation, registry] in
+                // Near the top of what is laid out: a few more of the older loaded rows (and rows
+                // far below the view left out), and once few are left above, the next page of
+                // history is read — in good time, well before the reader gets there.
+                if presentation.expand(rows, registry: registry, zoom: zoom) {
                     TileTrace.note("thread window grows")
                     windowRevision += 1
                 }
@@ -658,6 +670,17 @@ struct MessageList: View, Equatable {
                     TileTrace.note("older page asked")
                     onLoadMore()
                 }
+            }, onNearSpaceBelow: { [presentation, registry] in
+                // Back down towards the rows left out below: some are laid out again.
+                if presentation.nearSpaceBelow(rows, registry: registry) { windowRevision += 1 }
+            }, onScrollIdle: { [presentation, registry] distanceFromTop in
+                // Stopped a long way back: older rows are laid out ahead while nothing moves.
+                guard distanceFromTop < ThreadPresentation.idleAhead else { return }
+                if presentation.expand(rows, by: ThreadPresentation.idleStep, registry: registry, zoom: zoom) {
+                    TileTrace.note("thread window grows while still")
+                    windowRevision += 1
+                }
+                if canLoadMore, presentation.rowsAbove(rows) < ThreadPresentation.prefetchRows { onLoadMore() }
             }) { near in
                 if isNearBottom != near { isNearBottom = near }
             })
@@ -680,7 +703,12 @@ struct MessageList: View, Equatable {
         }
         .overlay(alignment: .bottomTrailing) {
             if !isNearBottom && showsLatestButton {
-                Button { latestRequest += 1 } label: {
+                Button {
+                    // The newest rows laid out first, so the way down shows them, not the space
+                    // standing in for rows left out below.
+                    if presentation.release() { windowRevision += 1 }
+                    latestRequest += 1
+                } label: {
                     Label(conversation.unreadCount > 0 ? "\(conversation.unreadCount) new" : "Latest", systemImage: "arrow.down")
                         .font(.caption).padding(8).background(.regularMaterial, in: Capsule())
                 }.buttonStyle(.plain).padding(12)
@@ -815,6 +843,8 @@ struct MessageRow: Identifiable, Equatable {
     struct Prepared {
         let rows: [MessageRow]
         let ids: [String]
+        /// Each row's place in `rows`, by its id.
+        let index: [String: Int]
         let reactions: [String: [ReactionSummary]]
         let byGUID: [String: Message]
         let attachmentFiles: [URL]
@@ -841,57 +871,159 @@ struct MessageRow: Identifiable, Equatable {
     /// few at a time: the thread asks again on the next scroll step while still near the top, so
     /// rows come a handful per frame — never a page at once, which held frames up.
     static let step = 8
+    /// How many are added at once when the reader stops scrolling a long way back
+    /// (`idleAhead`): while nothing moves, so the next stretch up needs few added on the way.
+    static let idleStep = 32
+    /// How far above the view rows are laid out ahead of the reader when they stop scrolling.
+    static let idleAhead: CGFloat = 6000
+    /// How far beyond the view (points) laid-out rows are kept. Rows further below are left out,
+    /// a space as tall as they were standing in for them, and rows further above are left out
+    /// while the reader goes back down: however far back the reader goes, about the same number
+    /// of rows are laid out, and adding the next ones costs the same.
+    static let keptBeyondView: CGFloat = 3200
     /// How few loaded rows may be left above what is laid out before the next page of history is
-    /// read: a few views' worth, so it has arrived before the reader gets there.
-    static let prefetchRows = 60
+    /// read: a page and a half, so it has arrived long before the reader gets there.
+    static let prefetchRows = 150
     /// The first row laid out last time.
     private var windowFirst: String?
+    /// The last row laid out, when the rows below it are left out; nil when every row down to the
+    /// newest is laid out.
+    private var windowLast: String?
+    /// The width and zoom the rows left out below were laid out at: they are as tall as that then.
+    private var leftOutAt: (width: CGFloat, zoom: CGFloat)?
+    /// How tall the space standing in for the rows left out below is (0: there is none).
+    private(set) var spaceBelow: CGFloat = 0
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
     /// the newest message does not drop them until the reader is back there.
     private var holdsOlder = false
 
+    /// A row's place in `rows` (the rows of the last build, looked up at once).
+    private func position(of id: String, in rows: [MessageRow]) -> Int? {
+        if let cached, cached.rows.count == rows.count, let at = cached.index[id], rows[at].id == id { return at }
+        return rows.firstIndex { $0.id == id }
+    }
+    /// One past the last row laid out.
+    private func windowEnd(_ rows: [MessageRow]) -> Int {
+        windowLast.flatMap { position(of: $0, in: rows) }.map { $0 + 1 } ?? rows.count
+    }
+
     /// The rows to lay out: the newest `windowSize` while following the newest message; else from
     /// where the window began, so nothing in view moves when rows arrive below, and an older page
-    /// that loads above waits there until the reader nears it (`expand`).
-    func window(_ rows: [MessageRow], following: Bool) -> ArraySlice<MessageRow> {
-        guard !rows.isEmpty else { windowFirst = nil; return rows[...] }
+    /// that loads above waits there until the reader nears it (`expand`). Rows left out below stop
+    /// it short (`spaceBelow` stands in for them) while they are as tall as when they were laid
+    /// out — same width, same zoom.
+    func window(_ rows: [MessageRow], following: Bool, registry: ThreadRowRegistry? = nil, spacing: CGFloat = 0, zoom: CGFloat = 1) -> ArraySlice<MessageRow> {
+        spaceBelow = 0
+        guard !rows.isEmpty else { windowFirst = nil; windowLast = nil; return rows[...] }
         let start: Int
         if following && !holdsOlder {
             start = max(0, rows.count - Self.windowSize)
-        } else if let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }) {
+            windowLast = nil
+        } else if let first = windowFirst, let index = position(of: first, in: rows) {
             start = index
         } else {
             start = max(0, rows.count - Self.windowSize)
         }
         windowFirst = rows[start].id
-        return rows[start...]
+        var end = rows.count
+        if let last = windowLast, let index = position(of: last, in: rows), index >= start, index + 1 < rows.count,
+           let registry, let leftOutAt, leftOutAt.zoom == zoom, abs(leftOutAt.width - registry.width) < 0.5 {
+            end = index + 1
+            spaceBelow = Self.height(of: rows[end...], registry: registry, spacing: spacing)
+        } else {
+            windowLast = nil
+        }
+        return rows[start..<end]
     }
-    /// Lays out `step` more of the older loaded rows. False when every row is laid out already.
-    func expand(_ rows: [MessageRow]) -> Bool {
-        guard let first = windowFirst, let index = rows.firstIndex(where: { $0.id == first }), index > 0 else { return false }
-        let start = max(0, index - Self.step)
+    /// How tall rows were when last laid out, with the gaps between them. Rows never laid out (new
+    /// messages that arrived while the reader was a long way back) take no room until they are.
+    static func height(of rows: ArraySlice<MessageRow>, registry: ThreadRowRegistry, spacing: CGFloat) -> CGFloat {
+        var total: CGFloat = 0
+        var known = 0
+        for row in rows {
+            guard let height = registry.heights[row.id] else { continue }
+            total += height
+            known += 1
+        }
+        return known == 0 ? 0 : total + spacing * CGFloat(known - 1)
+    }
+    /// Lays out `count` more of the older loaded rows, and leaves out the rows more than
+    /// `keptBeyondView` below the view. False when every row is laid out already.
+    func expand(_ rows: [MessageRow], by count: Int = ThreadPresentation.step, registry: ThreadRowRegistry? = nil, zoom: CGFloat = 1) -> Bool {
+        guard let first = windowFirst, let index = position(of: first, in: rows), index > 0 else { return false }
+        let start = max(0, index - count)
         windowFirst = rows[start].id
         holdsOlder = true
+        if let registry { leaveOutBelow(rows, from: start, registry: registry, zoom: zoom) }
+        return true
+    }
+    /// Leaves out the laid-out rows wholly more than `keptBeyondView` below the view: they were
+    /// just laid out, so the space standing in for them is exactly as tall as they are, and nothing
+    /// in view moves.
+    private func leaveOutBelow(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry, zoom: CGFloat) {
+        guard let visible = registry.visible else { return }
+        let end = windowEnd(rows)
+        guard end - start > Self.windowSize else { return }
+        let limit = visible.upperBound + Self.keptBeyondView
+        var newEnd = end
+        while newEnd - 1 > start, let frame = registry.frames[rows[newEnd - 1].id], frame.minY >= limit { newEnd -= 1 }
+        guard newEnd < end else { return }
+        windowLast = rows[newEnd - 1].id
+        leftOutAt = (registry.width, zoom)
+        TileTrace.note("rows left out below: \(end - newEnd)")
+    }
+    /// The reader nears the space standing in for the rows left out below. If many rows are laid
+    /// out, those wholly more than `keptBeyondView` above the view are left out first (rows above
+    /// the view leaving is the same as rows arriving there: the view keeps its place); otherwise
+    /// `count` of the rows below are laid out again, as tall as they were, so nothing in view moves.
+    /// False when nothing changed.
+    func nearSpaceBelow(_ rows: [MessageRow], by count: Int = ThreadPresentation.step, registry: ThreadRowRegistry) -> Bool {
+        guard let last = windowLast, let lastIndex = position(of: last, in: rows),
+              let first = windowFirst, let start = position(of: first, in: rows) else { return false }
+        let end = lastIndex + 1
+        if end - start > Self.windowSize, let visible = registry.visible {
+            let limit = visible.lowerBound - Self.keptBeyondView
+            var newStart = start
+            while newStart + 1 < end, let frame = registry.frames[rows[newStart].id], frame.maxY <= limit { newStart += 1 }
+            if newStart > start {
+                windowFirst = rows[newStart].id
+                TileTrace.note("rows left out above: \(newStart - start)")
+                return true
+            }
+        }
+        let newEnd = min(rows.count, end + count)
+        windowLast = newEnd < rows.count ? rows[newEnd - 1].id : nil
+        if windowLast == nil { leftOutAt = nil }
+        TileTrace.note("rows laid out again below: \(newEnd - end)")
         return true
     }
     /// How many loaded rows are above what is laid out.
     func rowsAbove(_ rows: [MessageRow]) -> Int {
-        windowFirst.flatMap { first in rows.firstIndex { $0.id == first } } ?? 0
+        windowFirst.flatMap { position(of: $0, in: rows) } ?? 0
     }
     /// Makes sure a row is laid out, with a few above it. True when the window had to grow.
     func include(_ id: String, in rows: [MessageRow]) -> Bool {
-        guard let index = rows.firstIndex(where: { $0.id == id }) else { return false }
-        let current = windowFirst.flatMap { first in rows.firstIndex { $0.id == first } } ?? max(0, rows.count - Self.windowSize)
+        guard let index = position(of: id, in: rows) else { return false }
         holdsOlder = true
+        // Among the rows left out below: they are all laid out again.
+        if windowLast != nil, index >= windowEnd(rows) - 3 {
+            windowLast = nil
+            leftOutAt = nil
+            return true
+        }
+        let current = windowFirst.flatMap { position(of: $0, in: rows) } ?? max(0, rows.count - Self.windowSize)
         guard index < current + 3, current > 0 else { return false }
         let start = max(0, index - 10)
         windowFirst = rows[start].id
         return true
     }
-    /// Back at the newest message: the window may shrink to the newest rows again. True when it held older ones.
+    /// Back at the newest message: the window may shrink to the newest rows again, every row
+    /// down to the newest laid out. True when it held older ones or left rows out below.
     func release() -> Bool {
-        guard holdsOlder else { return false }
+        guard holdsOlder || windowLast != nil else { return false }
         holdsOlder = false
+        windowLast = nil
+        leftOutAt = nil
         return true
     }
 
@@ -911,7 +1043,9 @@ struct MessageRow: Identifiable, Equatable {
         if let cached, now == inputs { return cached }
         buildCount += 1
         let rows = MessageRow.rows(for: conversation)
-        let prepared = Prepared(rows: rows, ids: rows.map(\.id), reactions: Reactions.reduce(conversation.reactions),
+        let ids = rows.map(\.id)
+        let prepared = Prepared(rows: rows, ids: ids, index: Dictionary(ids.enumerated().map { ($1, $0) }, uniquingKeysWith: { first, _ in first }),
+            reactions: Reactions.reduce(conversation.reactions),
             byGUID: Dictionary(conversation.messages.compactMap { message in message.guid.map { ($0, message) } }, uniquingKeysWith: { first, _ in first }),
             attachmentFiles: conversation.messages.flatMap(\.attachments).compactMap { $0.path.map(URL.init(fileURLWithPath:)) })
         inputs = now

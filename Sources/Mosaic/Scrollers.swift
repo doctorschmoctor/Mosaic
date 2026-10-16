@@ -122,8 +122,23 @@ struct ThreadContent: Equatable {
 /// nothing observes this class, so updates cost no view invalidation. The pinner uses it to put
 /// the same message back at the same place after a reflow (a width change, a zoom change).
 final class ThreadRowRegistry {
+    /// Where each row laid out in the last layout pass is.
     private(set) var frames: [String: CGRect] = [:]
-    func update(_ id: String, _ frame: CGRect) { frames[id] = frame }
+    /// How tall each row was when it was last laid out — kept for rows left out since, which a
+    /// space as tall stands in for (`ThreadPresentation.window`) — and the width of that layout.
+    private(set) var heights: [String: CGFloat] = [:]
+    private(set) var width: CGFloat = 0
+    /// What is in view (content coordinates), as the scroll view last showed it.
+    var visible: ClosedRange<CGFloat>?
+    /// Where the space standing in for rows left out below begins, while there is one.
+    var spaceTop: CGFloat?
+    /// A layout pass places the rows: only those it places are anywhere now.
+    func beginPass() { frames.removeAll(keepingCapacity: true) }
+    func update(_ id: String, _ frame: CGRect) {
+        frames[id] = frame
+        heights[id] = frame.height
+        width = frame.width
+    }
     /// The row at this offset from the content's top, else the nearest one below it.
     func row(at y: CGFloat) -> (id: String, frame: CGRect)? {
         var below: (id: String, frame: CGRect)?
@@ -159,6 +174,14 @@ final class ScrollPinner: NSObject {
     var nearTopDistance: CGFloat { max(Self.minimumNearTopDistance, (scrollView?.contentView.bounds.height ?? 0) * 3) }
     /// An `onNearTop` was sent and its rows have not arrived yet.
     private var nearTopPending = false
+    /// The reader scrolled to within `nearTopDistance` of the space standing in for rows left out
+    /// below (`ThreadRowRegistry.spaceTop`): time to lay some of them out again. As `onNearTop`.
+    var onNearSpaceBelow: (() -> Void)?
+    private var nearSpacePending = false
+    /// The reader stopped scrolling, this far below the top of what is laid out: a moment to lay
+    /// out older rows ahead of them, while nothing moves.
+    var onScrollIdle: ((CGFloat) -> Void)?
+    private var idleGeneration = 0
     private(set) var distanceFromBottom: CGFloat = 0
     /// The distance between the visible area's top edge and the content's top.
     private(set) var distanceFromTop: CGFloat = 0
@@ -303,7 +326,8 @@ final class ScrollPinner: NSObject {
         let (clip, documentHeight, flipped) = geometry
         let documentGrewOrShrank = abs(documentHeight - lastDocumentSize.height) > 0.5
         // The rows asked for arrived: the next scroll may ask for more.
-        if documentGrewOrShrank { nearTopPending = false }
+        if documentGrewOrShrank { nearTopPending = false; nearSpacePending = false }
+        defer { noteVisible() }
         let widthChanged = abs(clip.bounds.width - lastClipSize.width) > 0.5
         let change = pendingContent.map { Self.classify(from: content, to: $0) } ?? ContentChange.none
         if let pendingContent { content = pendingContent; self.pendingContent = nil }
@@ -367,12 +391,32 @@ final class ScrollPinner: NSObject {
             // Asked again on a later scroll if nothing came of it (a page still loading).
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.nearTopPending = false }
         }
+        noteVisible()
+        if let spaceTop = registry?.spaceTop, let clip = scrollView?.contentView, !isNearBottom, !nearSpacePending,
+           let onNearSpaceBelow, spaceTop - (distanceFromTop + clip.bounds.height) <= nearTopDistance {
+            nearSpacePending = true
+            DispatchQueue.main.async { onNearSpaceBelow() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.nearSpacePending = false }
+        }
+        if onScrollIdle != nil, !isNearBottom {
+            idleGeneration += 1
+            let generation = idleGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+                guard let self, generation == self.idleGeneration, !self.isNearBottom else { return }
+                self.onScrollIdle?(self.distanceFromTop)
+            }
+        }
         // The row under the view's top edge, for putting the same message back after a reflow.
         if !isNearBottom, let registry, let top = currentTop(), let row = registry.row(at: top) {
             anchor = (row.id, top - row.frame.minY)
         } else if isNearBottom {
             anchor = nil
         }
+    }
+    /// Tells the row registry what is in view, for leaving out rows far from it.
+    private func noteVisible() {
+        guard let registry, let clip = scrollView?.contentView, let top = currentTop() else { return }
+        registry.visible = top...(top + clip.bounds.height)
     }
     /// After a reflow, put the remembered message back where it was. Runs one turn after the
     /// synchronous adjustment, once SwiftUI layout has reported the new row frames.
@@ -506,6 +550,9 @@ struct MessageScrollSupport: NSViewRepresentable {
     var startRow: String? = nil
     /// Scrolled near the top of what is loaded (see `ScrollPinner.onNearTop`).
     var onNearTop: (() -> Void)? = nil
+    /// Scrolled near the rows left out below, and stopped scrolling (see `ScrollPinner`).
+    var onNearSpaceBelow: (() -> Void)? = nil
+    var onScrollIdle: ((CGFloat) -> Void)? = nil
     var onNearBottomChanged: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -515,6 +562,8 @@ struct MessageScrollSupport: NSViewRepresentable {
         view.pinner = context.coordinator.pinner
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
         context.coordinator.pinner.onNearTop = onNearTop
+        context.coordinator.pinner.onNearSpaceBelow = onNearSpaceBelow
+        context.coordinator.pinner.onScrollIdle = onScrollIdle
         context.coordinator.pinner.registry = registry
         context.coordinator.pinner.expect(content)
         context.coordinator.request = scrollToBottomRequest
@@ -523,6 +572,8 @@ struct MessageScrollSupport: NSViewRepresentable {
     func updateNSView(_ view: InstallerView, context: Context) {
         context.coordinator.pinner.onNearBottomChanged = onNearBottomChanged
         context.coordinator.pinner.onNearTop = onNearTop
+        context.coordinator.pinner.onNearSpaceBelow = onNearSpaceBelow
+        context.coordinator.pinner.onScrollIdle = onScrollIdle
         context.coordinator.pinner.registry = registry
         // SwiftUI updates run before the document is laid out for the new content, so the pinner
         // knows what the coming size change means before it arrives.

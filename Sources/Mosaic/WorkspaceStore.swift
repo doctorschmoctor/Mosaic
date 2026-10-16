@@ -1871,6 +1871,13 @@ import MosaicCore
         let requestGeneration = generation
         Task {
             let page = try? await reader.earlierPage(forChat: id, before: rowID, date: oldest.date, limit: step)
+            // Asked for well ahead of the reader (`ThreadPresentation.prefetchRows`): shown once the
+            // threads are still, or soon after, so a page joining never holds up a scroll frame.
+            var waited = 0
+            while ScrollActivity.isScrolling(), waited < 12 {
+                try? await Task.sleep(for: .milliseconds(50))
+                waited += 1
+            }
             loadingMore.remove(id)
             // The tile closed (or was replaced) meanwhile: its depth started over, and the page goes.
             guard generation == requestGeneration, openIDs.contains(id), historyLimits[id] == depth + step else { return }
