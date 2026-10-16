@@ -441,7 +441,7 @@ struct ThreadStack: Layout {
         var width: CGFloat?
         var measured = false
         var sizes: [CGSize] = []
-        mutating func of(_ subviews: Subviews, width: CGFloat?) -> [CGSize] {
+        mutating func of(_ subviews: LayoutSubviews, width: CGFloat?) -> [CGSize] {
             if measured, self.width == width, sizes.count == subviews.count { return sizes }
             let proposal = ProposedViewSize(width: width, height: nil)
             sizes = subviews.map { $0.sizeThatFits(proposal) }
@@ -707,6 +707,12 @@ struct MessageList: View, Equatable {
             .environment(\.threadAttachments, attachmentFiles)
             .background(MessageScrollSupport(scrollToBottomRequest: latestRequest, content: content, registry: registry, startRow: startsAt,
                                              onNearTop: { [presentation, registry] in
+                // In the empty room above the rows (a jump with the scroller): the rows come into
+                // view first.
+                if let visible = registry.visible, visible.upperBound < registry.rowsTop - 1 {
+                    if presentation.suspendRoom() { windowRevision += 1 }
+                    return
+                }
                 // Near the top of what is laid out: a few more of the older loaded rows (and rows
                 // far below the view left out), and once few are left above, the next page of
                 // history is read — in good time, well before the reader gets there.
@@ -947,7 +953,15 @@ struct MessageRow: Identifiable, Equatable {
     /// Whether room is kept above the rows (`ThreadStack.roomAbove`): while the reader reads back
     /// from the newest message and there is more above to lay out — not at the start of the
     /// conversation, or at the most a tile shows, so the reader never scrolls into empty room.
-    func keepsRoomAbove(moreAbove: Bool) -> Bool { holdsOlder && moreAbove }
+    func keepsRoomAbove(moreAbove: Bool) -> Bool { holdsOlder && moreAbove && !roomSuspended }
+    /// The reader went into the empty room above the rows (dragging the scroller up, say): it
+    /// goes, so the rows are in view, until rows are laid out above again.
+    private var roomSuspended = false
+    func suspendRoom() -> Bool {
+        guard !roomSuspended else { return false }
+        roomSuspended = true
+        return true
+    }
 
     /// A row's place in `rows` (the rows of the last build, looked up at once).
     private func position(of id: String, in rows: [MessageRow]) -> Int? {
@@ -1006,6 +1020,7 @@ struct MessageRow: Identifiable, Equatable {
         let start = max(0, index - count)
         windowFirst = rows[start].id
         holdsOlder = true
+        roomSuspended = false
         if let registry { leaveOutBelow(rows, from: start, registry: registry, zoom: zoom) }
         return true
     }
