@@ -250,6 +250,52 @@ final class StartRowTests: XCTestCase {
     }
 }
 
+/// While the reader reads back, a thread keeps room above its rows: rows added above come into it
+/// and the rows already laid out stay where they are; rows added below make it taller at its end.
+final class ThreadRoomTests: XCTestCase {
+    private struct Rows: View {
+        let ids: [Int]
+        let room: Bool
+        let registry: ThreadRowRegistry
+        var body: some View {
+            ThreadStack(spacing: 10, roomAbove: room, registry: registry) {
+                ForEach(ids, id: \.self) { id in
+                    Color.clear.frame(height: 50).layoutValue(key: ThreadRowID.self, value: "\(id)")
+                }
+            }
+        }
+    }
+
+    @MainActor func testRowsAddedAboveComeIntoRoomAndNothingLaidOutMoves() throws {
+        let registry = ThreadRowRegistry()
+        let host = NSHostingView(rootView: Rows(ids: Array(10..<20), room: false, registry: registry))
+        host.frame = NSRect(x: 0, y: 0, width: 300, height: 600)
+        func show(_ ids: Range<Int>, room: Bool) throws -> (Int) throws -> CGFloat {
+            host.rootView = Rows(ids: Array(ids), room: room, registry: registry)
+            host.needsLayout = true
+            host.layoutSubtreeIfNeeded()
+            return { id in try XCTUnwrap(registry.frames["\(id)"]).minY }
+        }
+        var y = try show(10..<20, room: false)
+        XCTAssertEqual(try y(10), 0, accuracy: 0.5, "no room: the rows start at the top")
+        // Reading back: room is made above the rows, and older rows come into it.
+        y = try show(5..<20, room: true)
+        let anchored = try y(10)
+        XCTAssertEqual(try y(5), anchored - 5 * 60, accuracy: 0.5)
+        XCTAssertGreaterThanOrEqual(try y(5), ThreadStack.room - 1)
+        y = try show(0..<20, room: true)
+        XCTAssertEqual(try y(10), anchored, accuracy: 0.5, "rows added above: nothing laid out moves")
+        XCTAssertEqual(try y(0), anchored - 10 * 60, accuracy: 0.5)
+        // Rows left out above leave room behind; rows added below go at the end.
+        y = try show(3..<25, room: true)
+        XCTAssertEqual(try y(10), anchored, accuracy: 0.5)
+        XCTAssertEqual(try y(24), anchored + 14 * 60, accuracy: 0.5)
+        // No more room needed: the rows start at the top again.
+        y = try show(3..<25, room: false)
+        XCTAssertEqual(try y(3), 0, accuracy: 0.5)
+    }
+}
+
 /// A long thread lays out its newest rows, and older ones only as the reader goes up to them.
 final class ThreadWindowTests: XCTestCase {
     @MainActor private func rows(_ count: Int, from: Int = 1) -> [MessageRow] {
