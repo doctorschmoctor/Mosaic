@@ -675,14 +675,13 @@ enum SyntheticMessages {
                     }
                     let newMaximum = max(0, document.frame.height - clip.bounds.height)
                     var fromEndAfter = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
-                    // Which way the wheel goes, and whether it scrolls the thread at all, from its
-                    // first few steps (a scroll view may follow a step a moment later).
+                    // Which way the wheel goes, from its first few steps (a scroll view may follow
+                    // a step a moment later).
                     wheelSteps += 1
                     if wheelStart == nil { wheelStart = fromEndBefore }
-                    if !wheelChecked, wheelSteps >= 4, let start = wheelStart {
+                    if !wheelChecked, wheelSteps >= 8, let start = wheelStart, abs(fromEndAfter - start) > 0.5 {
                         wheelChecked = true
-                        if fromEndAfter < start - 0.5 { wheelSign = -wheelSign }
-                        if abs(fromEndAfter - start) < 0.5 { usesWheel = false }
+                        if fromEndAfter < start { wheelSign = -wheelSign }
                     }
                     if !usesWheel {
                         let target = document.isFlipped ? max(0, clip.bounds.origin.y - stride) : min(newMaximum, clip.bounds.origin.y + stride)
@@ -690,7 +689,7 @@ enum SyntheticMessages {
                         scroll.reflectScrolledClipView(clip)
                         fromEndAfter = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
                     }
-                    travelled += max(0, fromEndAfter - fromEndBefore)
+                    travelled = max(travelled, fromEndAfter)
                     lastFromEnd = fromEndAfter
                 }
             }
