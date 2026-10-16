@@ -728,10 +728,13 @@ struct MessageList: View, Equatable {
                 // Back down towards the rows left out below: some are laid out again.
                 if presentation.nearSpaceBelow(rows, registry: registry) { windowRevision += 1 }
             }, onScrollIdle: { [presentation, registry] distanceFromTop in
-                // Stopped a long way back: older rows are laid out ahead while nothing moves.
-                guard distanceFromTop < ThreadPresentation.idleAhead else { return }
-                if presentation.expand(rows, by: ThreadPresentation.idleStep, registry: registry, zoom: zoom) {
+                // Stopped a long way back: older rows are laid out ahead while nothing moves, and
+                // rows far below are left out.
+                if distanceFromTop < ThreadPresentation.idleAhead,
+                   presentation.expand(rows, by: ThreadPresentation.idleStep, registry: registry, zoom: zoom, trim: true) {
                     TileTrace.note("thread window grows while still")
+                    windowRevision += 1
+                } else if presentation.leaveOutFarBelow(rows, registry: registry, zoom: zoom) {
                     windowRevision += 1
                 }
                 if canLoadMore, presentation.rowsAbove(rows) < ThreadPresentation.prefetchRows { onLoadMore() }
@@ -1013,24 +1016,36 @@ struct MessageRow: Identifiable, Equatable {
         }
         return known == 0 ? 0 : total + spacing * CGFloat(known - 1)
     }
-    /// Lays out `count` more of the older loaded rows, and leaves out the rows more than
-    /// `keptBeyondView` below the view. False when every row is laid out already.
-    func expand(_ rows: [MessageRow], by count: Int = ThreadPresentation.step, registry: ThreadRowRegistry? = nil, zoom: CGFloat = 1) -> Bool {
+    /// Lays out `count` more of the older loaded rows. Rows far below the view are left out too:
+    /// always when `trim` (the reader has stopped), else once very many are laid out — taking rows
+    /// away costs a frame too, so while the reader scrolls it waits for them to stop. False when
+    /// every row is laid out already.
+    func expand(_ rows: [MessageRow], by count: Int = ThreadPresentation.step, registry: ThreadRowRegistry? = nil,
+                zoom: CGFloat = 1, trim: Bool = false) -> Bool {
         guard let first = windowFirst, let index = position(of: first, in: rows), index > 0 else { return false }
         let start = max(0, index - count)
         windowFirst = rows[start].id
         holdsOlder = true
         roomSuspended = false
-        if let registry { leaveOutBelow(rows, from: start, registry: registry, zoom: zoom) }
+        if let registry { leaveOutBelow(rows, from: start, registry: registry, zoom: zoom, over: trim ? Self.windowSize : Self.mostLaidOut) }
         return true
     }
-    /// Leaves out the laid-out rows wholly more than `keptBeyondView` below the view: they were
-    /// just laid out, so the space standing in for them is exactly as tall as they are, and nothing
-    /// in view moves.
-    private func leaveOutBelow(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry, zoom: CGFloat) {
+    /// How many rows may be laid out while the reader scrolls before those far below are left out.
+    static let mostLaidOut = 160
+    /// The reader stopped: rows far below the view are left out (false when there were none).
+    func leaveOutFarBelow(_ rows: [MessageRow], registry: ThreadRowRegistry, zoom: CGFloat) -> Bool {
+        guard holdsOlder, let first = windowFirst, let start = position(of: first, in: rows) else { return false }
+        let before = windowLast
+        leaveOutBelow(rows, from: start, registry: registry, zoom: zoom, over: Self.windowSize)
+        return windowLast != before
+    }
+    /// Leaves out the laid-out rows wholly more than `keptBeyondView` below the view, when more than
+    /// `over` are laid out: they were just laid out, so the space standing in for them is exactly
+    /// as tall as they are, and nothing in view moves.
+    private func leaveOutBelow(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry, zoom: CGFloat, over: Int) {
         guard let visible = registry.visible else { return }
         let end = windowEnd(rows)
-        guard end - start > Self.windowSize else { return }
+        guard end - start > over else { return }
         let limit = visible.upperBound + Self.keptBeyondView
         var newEnd = end
         while newEnd - 1 > start, let frame = registry.frames[rows[newEnd - 1].id], frame.minY >= limit { newEnd -= 1 }

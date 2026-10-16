@@ -375,7 +375,7 @@ final class ThreadWindowTests: XCTestCase {
         // Up and up, near the top of what is laid out each time.
         for _ in 0..<60 {
             view(0)
-            XCTAssertTrue(presentation.expand(all, registry: registry))
+            XCTAssertTrue(presentation.expand(all, registry: registry, trim: true))
             window = show()
             most = max(most, window.count)
         }
@@ -403,7 +403,7 @@ final class ThreadWindowTests: XCTestCase {
         // are now, so they are laid out again.
         for _ in 0..<20 {
             view(0)
-            _ = presentation.expand(all, registry: registry)
+            _ = presentation.expand(all, registry: registry, trim: true)
             window = show()
         }
         XCTAssertGreaterThan(presentation.spaceBelow, 0)
@@ -415,17 +415,32 @@ final class ThreadWindowTests: XCTestCase {
         window = show()
         for _ in 0..<20 {
             view(0)
-            _ = presentation.expand(all, registry: registry)
+            _ = presentation.expand(all, registry: registry, trim: true)
             window = show()
         }
         XCTAssertGreaterThan(presentation.spaceBelow, 0)
         XCTAssertTrue(presentation.include("590", in: all))
         XCTAssertEqual(show().last?.id, "600")
 
+        // Scrolling on without stopping: rows are left out only once very many are laid out.
+        var scrolling = 0
+        for _ in 0..<40 {
+            view(0)
+            _ = presentation.expand(all, registry: registry)
+            window = show()
+            scrolling = max(scrolling, window.count)
+        }
+        XCTAssertLessThanOrEqual(scrolling, ThreadPresentation.mostLaidOut + ThreadPresentation.step)
+        XCTAssertGreaterThan(scrolling, bound)
+        // Stopped: those far below are left out.
+        view(0)
+        XCTAssertTrue(presentation.leaveOutFarBelow(all, registry: registry, zoom: 1))
+        XCTAssertLessThanOrEqual(show().count, bound)
+
         // Back at the newest message: the newest rows only, nothing left out.
         for _ in 0..<20 {
             view(0)
-            _ = presentation.expand(all, registry: registry)
+            _ = presentation.expand(all, registry: registry, trim: true)
             window = show()
         }
         XCTAssertTrue(presentation.release())
