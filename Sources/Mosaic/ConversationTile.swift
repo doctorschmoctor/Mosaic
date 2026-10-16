@@ -405,30 +405,59 @@ struct ConversationTile: View, Equatable {
 /// the tile's size changes.
 struct ThreadStack: Layout {
     var spacing: CGFloat
+    /// Room is kept above the rows (`ThreadPresentation.keepsRoomAbove`): older rows laid out come
+    /// into it, and nothing already laid out moves.
+    var roomAbove = false
     let registry: ThreadRowRegistry
+    /// How much room is kept above the rows, each time it is made.
+    static let room: CGFloat = 12_000
+
+    /// Where the first row goes. With room kept above the rows, the topmost row that was laid out
+    /// in the last pass stays where it was: rows added above it take room that was there, rows
+    /// added below make the thread taller at its end, rows left out above leave room behind — so
+    /// the scroll view never needs putting back in place for them (each time it did, the whole
+    /// window was laid out twice more) and its scroller does not jump. When the room runs out, it
+    /// is made again (everything moves down once). Without room, the rows start at the top.
+    private func top(_ sizes: [CGSize], _ subviews: Subviews) -> CGFloat {
+        guard roomAbove, ThreadRenderingProbe.rowGeometry else { return 0 }
+        var above: CGFloat = 0
+        for (index, subview) in subviews.enumerated() {
+            if let id = subview[ThreadRowID.self], let frame = registry.frames[id] {
+                let top = frame.minY - above
+                return top >= 0 ? top : Self.room
+            }
+            above += sizes[index].height + spacing
+        }
+        return Self.room
+    }
+    private static func total(_ sizes: [CGSize], spacing: CGFloat) -> CGFloat {
+        sizes.reduce(0) { $0 + $1.height } + spacing * CGFloat(max(0, sizes.count - 1))
+    }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let started = CACurrentMediaTime()
-        var height: CGFloat = 0
-        var width: CGFloat = 0
-        for (index, subview) in subviews.enumerated() {
-            let size = subview.sizeThatFits(ProposedViewSize(width: proposal.width, height: nil))
-            height += size.height + (index > 0 ? spacing : 0)
-            width = max(width, size.width)
-        }
+        let rowProposal = ProposedViewSize(width: proposal.width, height: nil)
+        let sizes = subviews.map { $0.sizeThatFits(rowProposal) }
+        let width = sizes.map(\.width).max() ?? 0
+        let height = top(sizes, subviews) + Self.total(sizes, spacing: spacing)
         TileTrace.note("thread stack sized \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms")
         return CGSize(width: proposal.width ?? width, height: height)
     }
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let started = CACurrentMediaTime()
         defer { TileTrace.note("thread stack placed \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms") }
-        var y = bounds.minY
+        let rowProposal = ProposedViewSize(width: bounds.width, height: nil)
+        let sizes = subviews.map { $0.sizeThatFits(rowProposal) }
+        // Worked out from where rows were in the last pass, before this one records where they are.
+        let top = top(sizes, subviews)
+        registry.rowsTop = top
+        var y = bounds.minY + top
         let reports = ThreadRenderingProbe.rowGeometry
         if reports { registry.beginPass() }
         var spaceTop: CGFloat?
         for (index, subview) in subviews.enumerated() {
             if index > 0 { y += spacing }
-            let size = subview.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+            let size = sizes[index]
             subview.place(at: CGPoint(x: bounds.minX, y: y), anchor: .topLeading, proposal: ProposedViewSize(width: bounds.width, height: size.height))
             if reports, let id = subview[ThreadRowID.self] {
                 registry.update(id, CGRect(x: 0, y: y - bounds.minY, width: bounds.width, height: size.height))
@@ -578,6 +607,8 @@ struct MessageList: View, Equatable {
         let shown = presentation.window(rows, following: isNearBottom, registry: registry, spacing: spacing, zoom: zoom)
         // Standing in for the rows left out below, as tall as they were (none while following).
         let spaceBelow = presentation.spaceBelow
+        // Room above the rows while reading back, for older rows to come into without moving any.
+        let roomAbove = presentation.keepsRoomAbove(moreAbove: shown.startIndex > 0 || canLoadMore)
         let showsStart = shown.startIndex == 0
         // Only the matching bubbles are given the find bar's words: a new query redraws those
         // alone, never the whole thread.
@@ -596,7 +627,7 @@ struct MessageList: View, Equatable {
             // A plain stack, not a lazy one: a lazy stack inserts and removes rows while a tile
             // grows or shrinks, which made rows jump. It tells the row registry where each row is
             // as it places them (ThreadStack).
-            ThreadStack(spacing: spacing, registry: registry) {
+            ThreadStack(spacing: spacing, roomAbove: roomAbove, registry: registry) {
                 // Earlier messages load by themselves as the reader nears the top; a small spinner
                 // shows while they come.
                 if historyCeiling && showsStart {
@@ -896,6 +927,10 @@ struct MessageRow: Identifiable, Equatable {
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
     /// the newest message does not drop them until the reader is back there.
     private var holdsOlder = false
+    /// Whether room is kept above the rows (`ThreadStack.roomAbove`): while the reader reads back
+    /// from the newest message and there is more above to lay out — not at the start of the
+    /// conversation, or at the most a tile shows, so the reader never scrolls into empty room.
+    func keepsRoomAbove(moreAbove: Bool) -> Bool { holdsOlder && moreAbove }
 
     /// A row's place in `rows` (the rows of the last build, looked up at once).
     private func position(of id: String, in rows: [MessageRow]) -> Int? {

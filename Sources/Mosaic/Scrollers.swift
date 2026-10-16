@@ -132,6 +132,8 @@ final class ThreadRowRegistry {
     var visible: ClosedRange<CGFloat>?
     /// Where the space standing in for rows left out below begins, while there is one.
     var spaceTop: CGFloat?
+    /// Where the first row is, below any room kept above the rows (`ThreadStack.roomAbove`).
+    var rowsTop: CGFloat = 0
     /// A layout pass places the rows: only those it places are anywhere now.
     func beginPass() { frames.removeAll(keepingCapacity: true) }
     func update(_ id: String, _ frame: CGRect) {
@@ -185,6 +187,11 @@ final class ScrollPinner: NSObject {
     private(set) var distanceFromBottom: CGFloat = 0
     /// The distance between the visible area's top edge and the content's top.
     private(set) var distanceFromTop: CGFloat = 0
+    /// The distance between the visible area's top edge and the first row laid out (below any
+    /// room kept above the rows).
+    private var distanceFromRows: CGFloat { distanceFromTop - (registry?.rowsTop ?? 0) }
+    private var lastRowsTop: CGFloat = 0
+    private var lastSpaceTop: CGFloat?
     /// Row frames by message, for reflow anchoring; nil outside a message thread.
     var registry: ThreadRowRegistry?
     /// The message at the top of the view and how far into it the view starts, captured whenever
@@ -385,7 +392,13 @@ final class ScrollPinner: NSObject {
         distanceFromBottom = distance
         distanceFromTop = currentTop() ?? 0
         isNearBottom = distance <= Self.nearBottomTolerance
-        if distanceFromTop <= nearTopDistance, !isNearBottom, !nearTopPending, let onNearTop {
+        // Rows came in above or below since the last ask: the next ask may go out at once. (They
+        // can come without the thread growing: into the room kept above the rows.)
+        if let registry {
+            if registry.rowsTop != lastRowsTop { nearTopPending = false; lastRowsTop = registry.rowsTop }
+            if registry.spaceTop != lastSpaceTop { nearSpacePending = false; lastSpaceTop = registry.spaceTop }
+        }
+        if distanceFromRows <= nearTopDistance, !isNearBottom, !nearTopPending, let onNearTop {
             nearTopPending = true
             DispatchQueue.main.async { onNearTop() }
             // Asked again on a later scroll if nothing came of it (a page still loading).
@@ -403,7 +416,7 @@ final class ScrollPinner: NSObject {
             let generation = idleGeneration
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 guard let self, generation == self.idleGeneration, !self.isNearBottom else { return }
-                self.onScrollIdle?(self.distanceFromTop)
+                self.onScrollIdle?(self.distanceFromRows)
             }
         }
         // The row under the view's top edge, for putting the same message back after a reflow.
