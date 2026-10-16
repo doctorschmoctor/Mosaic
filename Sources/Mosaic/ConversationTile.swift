@@ -434,20 +434,37 @@ struct ThreadStack: Layout {
         sizes.reduce(0) { $0 + $1.height } + spacing * CGFloat(max(0, sizes.count - 1))
     }
 
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+    /// The rows' sizes at one width, kept until SwiftUI says the rows changed (`updateCache`). A
+    /// scroll step asks the thread's size again — every step, for the views AppKit draws in it —
+    /// and measuring every row each time was most of what a step cost.
+    struct Sizes {
+        var width: CGFloat?
+        var measured = false
+        var sizes: [CGSize] = []
+        mutating func of(_ subviews: Subviews, width: CGFloat?) -> [CGSize] {
+            if measured, self.width == width, sizes.count == subviews.count { return sizes }
+            let proposal = ProposedViewSize(width: width, height: nil)
+            sizes = subviews.map { $0.sizeThatFits(proposal) }
+            self.width = width
+            measured = true
+            return sizes
+        }
+    }
+    func makeCache(subviews: Subviews) -> Sizes { Sizes() }
+    func updateCache(_ cache: inout Sizes, subviews: Subviews) { cache = Sizes() }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) -> CGSize {
         let started = CACurrentMediaTime()
-        let rowProposal = ProposedViewSize(width: proposal.width, height: nil)
-        let sizes = subviews.map { $0.sizeThatFits(rowProposal) }
+        let sizes = cache.of(subviews, width: proposal.width)
         let width = sizes.map(\.width).max() ?? 0
         let height = top(sizes, subviews) + Self.total(sizes, spacing: spacing)
         TileTrace.note("thread stack sized \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms")
         return CGSize(width: proposal.width ?? width, height: height)
     }
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) {
         let started = CACurrentMediaTime()
         defer { TileTrace.note("thread stack placed \(subviews.count) rows in \(String(format: "%.1f", (CACurrentMediaTime() - started) * 1000)) ms") }
-        let rowProposal = ProposedViewSize(width: bounds.width, height: nil)
-        let sizes = subviews.map { $0.sizeThatFits(rowProposal) }
+        let sizes = cache.of(subviews, width: bounds.width)
         // Worked out from where rows were in the last pass, before this one records where they are.
         let top = top(sizes, subviews)
         registry.rowsTop = top
@@ -467,8 +484,8 @@ struct ThreadStack: Layout {
         }
         registry.spaceTop = spaceTop
     }
-    func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
-    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGFloat? { nil }
+    func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) -> CGFloat? { nil }
+    func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) -> CGFloat? { nil }
 }
 /// A thread row's message, for the row registry.
 struct ThreadRowID: LayoutValueKey { static let defaultValue: String? = nil }
