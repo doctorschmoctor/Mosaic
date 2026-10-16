@@ -457,6 +457,35 @@ final class ThreadWindowTests: XCTestCase {
         XCTAssertLessThanOrEqual(laidOut(show()), bound + tailKept)
     }
 
+    /// A tall tile keeps more of the newest rows laid out while reading back: as many as cover
+    /// it twice over, so going back to them shows rows all the way up.
+    @MainActor func testATallTileKeepsEnoughOfTheNewestRowsToFillIt() {
+        let all = rows(600)
+        let presentation = ThreadPresentation()
+        let registry = ThreadRowRegistry()
+        func show(_ following: Bool = false) -> ArraySlice<MessageRow> {
+            let window = presentation.window(all, following: following, registry: registry, spacing: 10)
+            registry.beginPass()
+            var y: CGFloat = 0
+            for row in window + presentation.tail {
+                registry.update(row.id, CGRect(x: 0, y: y, width: 300, height: 50))
+                y += 60 + (row.id == window.last?.id && presentation.spaceBelow > 0 ? presentation.spaceBelow + 10 : 0)
+            }
+            return window
+        }
+        _ = show(true)
+        for _ in 0..<40 {
+            registry.visible = 0...1500
+            _ = presentation.expand(all, registry: registry, trim: true)
+            _ = show()
+        }
+        XCTAssertGreaterThan(presentation.spaceBelow, 0)
+        XCTAssertEqual(presentation.tail.count, 60, "3,000 points of 50-point rows")
+        XCTAssertEqual(presentation.tail.last?.id, "600")
+        XCTAssertTrue(presentation.release())
+        XCTAssertEqual(show(false).count, 60, "the rows kept, and no others")
+    }
+
     /// Back at the newest message after a long way back — Latest, or scrolled there — the newest
     /// rows shown are those kept laid out all along: nothing is laid out on the way, and the rows
     /// above them go a step at a time.

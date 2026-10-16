@@ -997,10 +997,27 @@ struct MessageRow: Identifiable, Equatable {
     private(set) var spaceBelow: CGFloat = 0
     /// The newest rows stay laid out while the reader reads a long way back, below the space
     /// standing in for the rows left out: going back to the newest message (Latest) shows them at
-    /// once — their pictures loaded — instead of laying out everything between again.
+    /// once — their pictures loaded — instead of laying out everything between again. At least
+    /// this many, and as many more as cover the view twice over (`newestKept`).
     static let tailKept = 24
-    /// The rows laid out below the space while rows are left out (the newest `tailKept`).
+    /// The rows laid out below the space while rows are left out (the newest ones kept).
     private(set) var tail: ArraySlice<MessageRow> = []
+    /// Where the newest rows kept laid out while rows are left out begin: the newest `tailKept`,
+    /// or more — as many as cover the view twice over, by their heights as last laid out, up to
+    /// `windowSize` — so the way back to the newest message shows rows all the way up a tall tile.
+    private func newestKept(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry?) -> Int {
+        var index = max(start, rows.count - Self.tailKept)
+        guard let registry, let visible = registry.visible else { return index }
+        let wanted = 2 * (visible.upperBound - visible.lowerBound)
+        var covered: CGFloat = 0
+        for row in rows[index...] { covered += registry.heights[row.id] ?? 0 }
+        let lowest = max(start, rows.count - Self.windowSize)
+        while covered < wanted, index > lowest {
+            index -= 1
+            covered += registry.heights[rows[index].id] ?? 0
+        }
+        return index
+    }
     /// How many of the newest rows are laid out while following the newest message: `windowSize`,
     /// or fewer when that many were not laid out when the reader came back (they are not laid out
     /// all at once then; more come as the reader goes up again).
@@ -1037,7 +1054,7 @@ struct MessageRow: Identifiable, Equatable {
     /// where the window began, so nothing in view moves when rows arrive below, and an older page
     /// that loads above waits there until the reader nears it (`expand`). Rows left out below stop
     /// it short: `spaceBelow` stands in for them, as tall as they were when last laid out, with the
-    /// newest `tailKept` rows (`tail`; else empty) laid out below it. After a change of width or
+    /// newest rows (`tail`; else empty) laid out below it. After a change of width or
     /// zoom the space is not exact, which moves nothing in view (it is below the view); the rows
     /// are measured again as the reader gets to them.
     func window(_ rows: [MessageRow], following: Bool, registry: ThreadRowRegistry? = nil, spacing: CGFloat = 0, zoom: CGFloat = 1) -> ArraySlice<MessageRow> {
@@ -1057,7 +1074,7 @@ struct MessageRow: Identifiable, Equatable {
         }
         windowFirst = rows[start].id
         var end = rows.count
-        let tailStart = max(start, rows.count - Self.tailKept)
+        let tailStart = newestKept(rows, from: start, registry: registry)
         if let last = windowLast, let index = position(of: last, in: rows), index >= start, index + 1 < tailStart, let registry {
             end = index + 1
             // Left out at another zoom: as tall as they were, scaled to this one.
@@ -1104,8 +1121,8 @@ struct MessageRow: Identifiable, Equatable {
     static let mostLaidOut = 160
     /// How many rows are laid out from `start` to `end`, and below the space (`tail`) when rows
     /// are left out.
-    private func laidOut(_ rows: [MessageRow], start: Int, end: Int) -> Int {
-        end - start + (end < rows.count ? min(Self.tailKept, rows.count - end) : 0)
+    private func laidOut(_ rows: [MessageRow], start: Int, end: Int, registry: ThreadRowRegistry) -> Int {
+        end - start + (end < rows.count ? rows.count - max(end, newestKept(rows, from: start, registry: registry)) : 0)
     }
     /// The reader stopped: rows far below the view are left out (false when there were none).
     func leaveOutFarBelow(_ rows: [MessageRow], registry: ThreadRowRegistry, zoom: CGFloat) -> Bool {
@@ -1120,10 +1137,10 @@ struct MessageRow: Identifiable, Equatable {
     private func leaveOutBelow(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry, zoom: CGFloat, over: Int) {
         guard let visible = registry.visible else { return }
         let end = windowEnd(rows)
-        guard laidOut(rows, start: start, end: end) > over else { return }
+        guard laidOut(rows, start: start, end: end, registry: registry) > over else { return }
         let limit = visible.upperBound + Self.keptBeyondView
-        // The newest rows stay laid out (`tailKept`).
-        let from = min(end, max(start, rows.count - Self.tailKept))
+        // The newest rows stay laid out (`newestKept`).
+        let from = min(end, newestKept(rows, from: start, registry: registry))
         var newEnd = from
         while newEnd - 1 > start, let frame = registry.frames[rows[newEnd - 1].id], frame.minY >= limit { newEnd -= 1 }
         guard newEnd < from else { return }
@@ -1140,7 +1157,7 @@ struct MessageRow: Identifiable, Equatable {
         guard let last = windowLast, let lastIndex = position(of: last, in: rows),
               let first = windowFirst, let start = position(of: first, in: rows) else { return false }
         let end = lastIndex + 1
-        if laidOut(rows, start: start, end: end) > Self.windowSize, let visible = registry.visible {
+        if laidOut(rows, start: start, end: end, registry: registry) > Self.windowSize, let visible = registry.visible {
             let limit = visible.lowerBound - Self.keptBeyondView
             var newStart = start
             while newStart + 1 < end, let frame = registry.frames[rows[newStart].id], frame.maxY <= limit { newStart += 1 }
@@ -1150,7 +1167,7 @@ struct MessageRow: Identifiable, Equatable {
                 return true
             }
         }
-        let tailStart = max(start, rows.count - Self.tailKept)
+        let tailStart = newestKept(rows, from: start, registry: registry)
         let newEnd = min(tailStart, end + count)
         windowLast = newEnd < tailStart ? rows[newEnd - 1].id : nil
         if windowLast == nil { leftOutZoom = nil }
@@ -1166,7 +1183,7 @@ struct MessageRow: Identifiable, Equatable {
         guard let index = position(of: id, in: rows) else { return false }
         holdsOlder = true
         if windowLast != nil {
-            let tailStart = rows.count - Self.tailKept
+            let tailStart = tail.first.flatMap { position(of: $0.id, in: rows) } ?? rows.count - Self.tailKept
             // Among the newest rows, kept laid out: nothing to do.
             if index >= tailStart { return false }
             // Among the rows left out below (or at the end of those above them): the window moves
@@ -1187,12 +1204,12 @@ struct MessageRow: Identifiable, Equatable {
         return true
     }
     /// Back at the newest message — scrolled there, or Latest — the window shrinks to the newest
-    /// rows again, only those already laid out: after a long way back, the newest `tailKept`, kept
-    /// for this; laying out every row between at once was what made going back slow. True when it
+    /// rows again, only those already laid out: after a long way back, the newest ones, kept for
+    /// this; laying out every row between at once was what made going back slow. True when it
     /// held older ones or left rows out below.
     func release() -> Bool {
         guard holdsOlder || windowLast != nil else { return false }
-        followingCount = windowLast != nil ? Self.tailKept : min(Self.windowSize, max(Self.tailKept, laidOutCount))
+        followingCount = windowLast != nil ? max(Self.tailKept, tail.count) : min(Self.windowSize, max(Self.tailKept, laidOutCount))
         holdsOlder = false
         windowFirst = nil
         windowLast = nil
