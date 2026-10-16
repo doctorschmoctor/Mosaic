@@ -23,7 +23,7 @@ if [[ -f .build/scroll-sample.txt ]]; then
     # The first thread in the call graph is the main thread.
     awk '/^Call graph:/ { graph = 1; next } graph && /Thread_[0-9]+/ { if (seen) exit; seen = 1; next } graph && seen' .build/scroll-sample.txt \
         | sed -E 's/  \[0x[0-9a-f,.]+\]//; s/\(in ([^)]+)\) \+ [0-9]+/(\1)/; s/ +[a-zA-Z_]+\.swift:[0-9]+//' \
-        | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 40) print substr($0, 1, 220) }' | head -260
+        | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 40) print substr($0, 1, 220) }' | head -260 || true
 fi
 # A long way back: up through the 1,000 messages a tile shows, of mixed lengths, sampled far back.
 rm -f .build/scroll-sample-deep.txt
@@ -32,7 +32,7 @@ if [[ -f .build/scroll-sample-deep.txt ]]; then
     echo "Deep scroll sample: the main thread's heaviest paths"
     awk '/^Call graph:/ { graph = 1; next } graph && /Thread_[0-9]+/ { if (seen) exit; seen = 1; next } graph && seen' .build/scroll-sample-deep.txt \
         | sed -E 's/  \[0x[0-9a-f,.]+\]//; s/\(in ([^)]+)\) \+ [0-9]+/(\1)/; s/ +[a-zA-Z_]+\.swift:[0-9]+//' \
-        | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 60) print substr($0, 1, 220) }' | head -300
+        | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 60) print substr($0, 1, 220) }' | head -300 || true
 fi
 # The Workspace menu as it was before MenuState, reading the store: expected to fail.
 for mode in "--demo" "--isolated --live"; do

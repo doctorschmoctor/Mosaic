@@ -629,6 +629,12 @@ enum SyntheticMessages {
         var wheelSign: Int32 = 1
         var wheelChecked = false
         var usesWheel = true
+        var wheelPhase: Int64 = 1
+        var wheelSteps = 0
+        var wheelStart: CGFloat?
+        // The middle of the thread, where a trackpad gesture over it is (screen coordinates, from the top).
+        let middle = window.convertPoint(toScreen: scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil))
+        let wheelPoint = CGPoint(x: middle.x, y: (NSScreen.screens.first?.frame.height ?? 0) - middle.y)
         var drops: [(time: Double, from: CGFloat, to: CGFloat, heights: (CGFloat, CGFloat))] = []
         await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
             let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -656,20 +662,27 @@ enum SyntheticMessages {
                     // is not a scroll to SwiftUI: on the next change of size it put its own
                     // position back). Which way a positive step goes is found on the first.
                     let fromEndBefore = fromEnd
-                    if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
+                    if usesWheel, let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1,
                                            wheel1: Int32(stride) * wheelSign, wheel2: 0, wheel3: 0) {
+                        // Over the thread, in the window, as one long trackpad gesture.
                         event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-                        if let wheel = NSEvent(cgEvent: event) { scroll.scrollWheel(with: wheel) }
+                        event.setIntegerValueField(.scrollWheelEventScrollPhase, value: wheelPhase)
+                        wheelPhase = 2
+                        event.location = wheelPoint
+                        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
+                        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
+                        if let wheel = NSEvent(cgEvent: event) { window.sendEvent(wheel) }
                     }
                     let newMaximum = max(0, document.frame.height - clip.bounds.height)
                     var fromEndAfter = document.isFlipped ? newMaximum - clip.bounds.origin.y : clip.bounds.origin.y
-                    if !wheelChecked {
+                    // Which way the wheel goes, and whether it scrolls the thread at all, from its
+                    // first few steps (a scroll view may follow a step a moment later).
+                    wheelSteps += 1
+                    if wheelStart == nil { wheelStart = fromEndBefore }
+                    if !wheelChecked, wheelSteps >= 4, let start = wheelStart {
                         wheelChecked = true
-                        if fromEndAfter < fromEndBefore - 0.5 { wheelSign = -wheelSign }
-                        if abs(fromEndAfter - fromEndBefore) < 0.5 {
-                            // No wheel here: the clip view is moved instead.
-                            usesWheel = false
-                        }
+                        if fromEndAfter < start - 0.5 { wheelSign = -wheelSign }
+                        if abs(fromEndAfter - start) < 0.5 { usesWheel = false }
                     }
                     if !usesWheel {
                         let target = document.isFlipped ? max(0, clip.bounds.origin.y - stride) : min(newMaximum, clip.bounds.origin.y + stride)
