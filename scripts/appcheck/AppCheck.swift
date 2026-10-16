@@ -26,6 +26,9 @@ import CSQLite
 @MainActor enum Harness {
     static let suite = "MosaicAppCheck-\(UUID())"
     static let live = CommandLine.arguments.contains("--live")
+    /// A long way back: the long threads hold more than a tile shows (1,000 messages), of mixed
+    /// lengths, and the scroll benchmark goes up through all of it.
+    static let deep = CommandLine.arguments.contains("--deep")
     static var mode: String {
         (live ? "live" : "demo") + (CommandLine.arguments.contains("--store-menus") ? ", menus that read the store" : "")
     }
@@ -142,19 +145,31 @@ enum SyntheticMessages {
             statements.append("INSERT INTO handle VALUES ('person\(person)@example.test');")
             statements.append("INSERT INTO chat VALUES ('iMessage;-;person\(person)@example.test', '', 'person\(person)@example.test', 'iMessage');")
             statements.append("INSERT INTO chat_handle_join VALUES (\(person), \(person));")
-            let count = person <= longThreads ? 600 : 3
+            let count = person <= longThreads ? (Harness.deep ? 1600 : 600) : 3
             for index in 0..<count {
                 row += 1
                 // The long threads are the most recent conversations, so they lead the sidebar.
                 let date = now - Int64(person) * 86_400_000_000_000 - Int64(count - index) * 60_000_000_000
                 let fromMe = index % 3 == 0
-                statements.append("INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('G\(row)', 'Message \(index) in conversation \(person): a few words that wrap across the bubble when the tile is narrow', \(date), \(fromMe ? 1 : 0), \(fromMe ? 0 : person));")
+                statements.append("INSERT INTO message (guid, text, date, is_from_me, handle_id) VALUES ('G\(row)', '\(text(index, person))', \(date), \(fromMe ? 1 : 0), \(fromMe ? 0 : person));")
                 statements.append("INSERT INTO chat_message_join VALUES (\(person), \(row));")
             }
         }
         statements.append("COMMIT;")
         execute(statements.joined(separator: "\n"))
         return path
+    }
+
+    /// A message's words: the same mid-length message each time, or (deep) short, mid-length and
+    /// long ones in turn, as a real conversation has.
+    static func text(_ index: Int, _ person: Int) -> String {
+        let base = "Message \(index) in conversation \(person): a few words that wrap across the bubble when the tile is narrow"
+        guard Harness.deep else { return base }
+        switch index % 7 {
+        case 0, 3: return "ok \(index)"
+        case 5: return base + ". And then a good deal more, the way people go on when they have something to say: another line or two of it, at least, before they stop."
+        default: return base
+        }
     }
 
     /// A new message from someone whose conversation is not open, as a live account has all the time.
@@ -583,10 +598,19 @@ enum SyntheticMessages {
         let recorder = FrameRecorder()
         recorder.start(in: content)
         await Check.pause(0.3)
-        let total = 5.0
+        // Deep: up through the whole history a tile shows (1,000 messages), at a steady pace.
+        let total = Harness.deep ? 32.0 : 5.0
+        let stride: CGFloat = Harness.deep ? 16 : 24
+        var sampled = false
+        func startSampler(seconds: Int, file: String) {
+            let sampler = Process()
+            sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
+            sampler.arguments = ["\(ProcessInfo.processInfo.processIdentifier)", "\(seconds)", "-file", FileManager.default.currentDirectoryPath + "/.build/" + file]
+            try? sampler.run()
+        }
         // With --sample, the system's sampler records this process's threads while it scrolls
-        // (the script prints the main thread's heaviest paths).
-        if CommandLine.arguments.contains("--sample") {
+        // (the script prints the main thread's heaviest paths); deep, from 20 s in, far back.
+        if CommandLine.arguments.contains("--sample") && !Harness.deep {
             let sampler = Process()
             sampler.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
             sampler.arguments = ["\(ProcessInfo.processInfo.processIdentifier)", "4", "-file", FileManager.default.currentDirectoryPath + "/.build/scroll-sample.txt"]
@@ -605,12 +629,16 @@ enum SyntheticMessages {
                     let now = CACurrentMediaTime()
                     defer { last = now }
                     guard now - begin < total else { timer.cancel(); done.resume(); return }
+                    if Harness.deep, CommandLine.arguments.contains("--sample"), !sampled, now - begin > 20 {
+                        sampled = true
+                        startSampler(seconds: 6, file: "scroll-sample-deep.txt")
+                    }
                     let y = clip.bounds.origin.y
                     let maximum = max(0, document.frame.height - clip.bounds.height)
                     // Up the thread: toward the start of the document (its top).
                     let atTop = document.isFlipped ? y <= 0.5 : y >= maximum - 0.5
                     if atTop { stuck += now - last }
-                    let target = document.isFlipped ? max(0, y - 24) : min(maximum, y + 24)
+                    let target = document.isFlipped ? max(0, y - stride) : min(maximum, y + stride)
                     travelled += abs(target - y)
                     clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
                     scroll.reflectScrolledClipView(clip)
@@ -636,6 +664,27 @@ enum SyntheticMessages {
             var counts: [String: Int] = [:]
             for note in notes where note.time >= from && note.time <= to { counts[note.kind, default: 0] += 1 }
             return kinds.compactMap { kind in counts[kind].map { "\(kind) \($0)" } }.joined(separator: ", ")
+        }
+        if Harness.deep {
+            // How it goes the further back it is: each stretch of the scroll on its own.
+            func rowsLaidOut(_ from: CFTimeInterval, _ to: CFTimeInterval) -> (most: Int, sizing: Double, passes: Int) {
+                var most = 0, sizing = 0.0, passes = 0
+                for note in raw where note.time >= from && note.time <= to && note.text.hasPrefix("thread stack sized ") {
+                    let words = note.text.split(separator: " ")
+                    if words.count > 3, let rows = Int(words[3]) { most = max(most, rows) }
+                    if let ms = words.dropLast().last.flatMap({ Double($0) }) { sizing += ms; passes += 1 }
+                }
+                return (most, sizing, passes)
+            }
+            var from = begin
+            while from < end - 0.5 {
+                let to = min(end, from + 4)
+                let segment = recorder.frames(from: from, to: to)
+                let laidOut = rowsLaidOut(from, to)
+                let busyHere = recorder.busy.filter { $0.start >= from && $0.end <= to }.reduce(0) { $0 + ($1.end - $1.start) } / (to - from)
+                print("  +\(Int(from - begin))–\(Int(to - begin)) s: \(segment.missed) of \(segment.count + segment.missed) frames missed, longest gap \(ms(segment.longest)), busy \(Int(busyHere * 100))%; up to \(laidOut.most) rows laid out, \(laidOut.passes) sizing passes taking \(ms(laidOut.sizing / 1000)) in all; " + tally(from, to))
+                from = to
+            }
         }
         for stretch in stretches.sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(6) {
             print("  stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - begin) * 1000)) ms: " + tally(stretch.start, stretch.end))
