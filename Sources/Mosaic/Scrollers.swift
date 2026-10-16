@@ -114,6 +114,9 @@ final class ThinScroller: NSScroller {
 struct ThreadContent: Equatable {
     var first: String?
     var last: String?
+    /// The last row above the space standing in for rows left out below, while there is one (the
+    /// newest rows, below it, are `last`): rows left out or laid out again there change it.
+    var lastAboveSpace: String? = nil
     var count = 0
 }
 
@@ -125,9 +128,8 @@ final class ThreadRowRegistry {
     /// Where each row laid out in the last layout pass is.
     private(set) var frames: [String: CGRect] = [:]
     /// How tall each row was when it was last laid out — kept for rows left out since, which a
-    /// space as tall stands in for (`ThreadPresentation.window`) — and the width of that layout.
+    /// space as tall stands in for (`ThreadPresentation.window`).
     private(set) var heights: [String: CGFloat] = [:]
-    private(set) var width: CGFloat = 0
     /// What is in view (content coordinates), as the scroll view last showed it.
     var visible: ClosedRange<CGFloat>?
     /// Where the space standing in for rows left out below begins, while there is one.
@@ -139,7 +141,10 @@ final class ThreadRowRegistry {
     func update(_ id: String, _ frame: CGRect) {
         frames[id] = frame
         heights[id] = frame.height
-        width = frame.width
+    }
+    /// Rows left out at another zoom: about as tall as they were, scaled.
+    func scaleHeights(of ids: [String], by factor: CGFloat) {
+        for id in ids { if let height = heights[id] { heights[id] = height * factor } }
     }
     /// The row at this offset from the content's top, else the nearest one below it.
     func row(at y: CGFloat) -> (id: String, frame: CGRect)? {
@@ -321,9 +326,11 @@ final class ScrollPinner: NSObject {
     enum ContentChange { case none, append, prepend, mixed }
     static func classify(from old: ThreadContent, to new: ThreadContent) -> ContentChange {
         guard old.count > 0, new.count > 0, new != old else { return .none }
-        if old.first == new.first, old.last == new.last { return .none }
+        // Below: the newest message, and where rows left out below begin.
+        let sameBelow = old.last == new.last && old.lastAboveSpace == new.lastAboveSpace
+        if old.first == new.first, sameBelow { return .none }
         if old.first == new.first { return .append }
-        if old.last == new.last { return .prepend }
+        if sameBelow { return .prepend }
         return .mixed
     }
 
@@ -456,6 +463,13 @@ final class ScrollPinner: NSObject {
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: y))
         scrollView.reflectScrolledClipView(clip)
         adjusting = false
+    }
+    /// The reader asked for the newest message: it is followed from now on, so the layout that
+    /// comes with the ask (the newest rows alone, after a long way back) is shown at the newest
+    /// message from its first frame. `scrollToBottom` follows, for when the size does not change.
+    func follow() {
+        isNearBottom = true
+        anchor = nil
     }
     /// Shows the newest message and follows it from now on.
     func scrollToBottom() {
@@ -594,6 +608,7 @@ struct MessageScrollSupport: NSViewRepresentable {
         view.install()
         if scrollToBottomRequest != context.coordinator.request {
             context.coordinator.request = scrollToBottomRequest
+            context.coordinator.pinner.follow()
             DispatchQueue.main.async { [pinner = context.coordinator.pinner] in pinner.scrollToBottom() }
         }
     }

@@ -344,29 +344,40 @@ final class ThreadWindowTests: XCTestCase {
     }
 
     /// A long way back, rows far below the view are left out — a space as tall as they were
-    /// stands in for them — so about the same number of rows are laid out however far back the
-    /// reader goes. Going back down lays them out again, and leaves rows far above out instead.
+    /// stands in for them, the newest rows still laid out below it — so about the same number of
+    /// rows are laid out however far back the reader goes. Going back down lays them out again,
+    /// and leaves rows far above out instead.
     @MainActor func testRowsFarFromTheViewAreLeftOutHoweverFarBackTheReaderGoes() throws {
         let all = rows(600)
         let presentation = ThreadPresentation()
         let registry = ThreadRowRegistry()
         let height: CGFloat = 50, spacing: CGFloat = 10
         let bound = ThreadPresentation.windowSize + ThreadPresentation.step
-        // What ThreadStack does with the rows: each 50 points tall, the space below them last.
-        func layOut(_ window: ArraySlice<MessageRow>, width: CGFloat = 300) {
+        let tailKept = ThreadPresentation.tailKept
+        // What ThreadStack does with the rows: each `rowHeight` tall, then the space standing in
+        // for the rows left out, then the newest rows.
+        func layOut(_ window: ArraySlice<MessageRow>, rowHeight: CGFloat? = nil) {
+            let rowHeight = rowHeight ?? height
             registry.beginPass()
             var y: CGFloat = 0
             for row in window {
-                registry.update(row.id, CGRect(x: 0, y: y, width: width, height: height))
-                y += height + spacing
+                registry.update(row.id, CGRect(x: 0, y: y, width: 300, height: rowHeight))
+                y += rowHeight + spacing
             }
             registry.spaceTop = presentation.spaceBelow > 0 ? y : nil
+            if presentation.spaceBelow > 0 { y += presentation.spaceBelow + spacing }
+            for row in presentation.tail {
+                registry.update(row.id, CGRect(x: 0, y: y, width: 300, height: rowHeight))
+                y += rowHeight + spacing
+            }
         }
         func show(_ following: Bool = false) -> ArraySlice<MessageRow> {
             let window = presentation.window(all, following: following, registry: registry, spacing: spacing)
             layOut(window)
             return window
         }
+        /// How many rows are laid out: the window, and the newest ones below the space.
+        func laidOut(_ window: ArraySlice<MessageRow>) -> Int { window.count + presentation.tail.count }
         /// The view: 400 points tall, `top` points down what is laid out.
         func view(_ top: CGFloat) { registry.visible = top...(top + 400) }
 
@@ -377,12 +388,13 @@ final class ThreadWindowTests: XCTestCase {
             view(0)
             XCTAssertTrue(presentation.expand(all, registry: registry, trim: true))
             window = show()
-            most = max(most, window.count)
+            most = max(most, laidOut(window))
         }
         XCTAssertEqual(window.first?.id, all[600 - 80 - 60 * 8].id, "480 rows further back")
-        XCTAssertLessThanOrEqual(most, bound, "about as many rows laid out as at the start")
+        XCTAssertLessThanOrEqual(most, bound + tailKept, "about as many rows laid out as at the start, and the newest few")
+        XCTAssertEqual(presentation.tail.map(\.id), all.suffix(tailKept).map(\.id), "the newest rows stay laid out")
         let lastIndex = try XCTUnwrap(all.firstIndex { $0.id == window.last?.id })
-        let leftOut = all.count - lastIndex - 1
+        let leftOut = all.count - tailKept - lastIndex - 1
         XCTAssertGreaterThan(leftOut, 400)
         XCTAssertEqual(presentation.spaceBelow, CGFloat(leftOut) * height + CGFloat(leftOut - 1) * spacing, accuracy: 0.01,
                        "the space is as tall as the rows left out were")
@@ -394,33 +406,40 @@ final class ThreadWindowTests: XCTestCase {
             view(try XCTUnwrap(registry.spaceTop) - 600)
             XCTAssertTrue(presentation.nearSpaceBelow(all, registry: registry))
             window = show()
-            most = max(most, window.count)
+            most = max(most, laidOut(window))
         }
         XCTAssertEqual(window.last?.id, "600", "every row below laid out again")
-        XCTAssertLessThanOrEqual(most, bound, "and never many more on the way")
+        XCTAssertTrue(presentation.tail.isEmpty)
+        XCTAssertLessThanOrEqual(most, bound + tailKept, "and never many more on the way")
 
-        // Left out again, then the tile changes width: the space cannot know how tall those rows
-        // are now, so they are laid out again.
+        // Left out again, then the tile changes width or zoom: the rows left out stay left out —
+        // the space as tall as they were, scaled with the zoom — not all laid out at once.
         for _ in 0..<20 {
             view(0)
             _ = presentation.expand(all, registry: registry, trim: true)
             window = show()
         }
-        XCTAssertGreaterThan(presentation.spaceBelow, 0)
-        layOut(window, width: 280)
-        XCTAssertEqual(presentation.window(all, following: false, registry: registry, spacing: spacing).last?.id, "600")
-        XCTAssertEqual(presentation.spaceBelow, 0)
-
-        // Left out again, then a match among them: they are laid out again.
+        let space = presentation.spaceBelow
+        XCTAssertGreaterThan(space, 0)
+        layOut(window, rowHeight: 70) // narrower: the rows laid out are taller
+        XCTAssertEqual(presentation.window(all, following: false, registry: registry, spacing: spacing).map(\.id), window.map(\.id))
+        XCTAssertEqual(presentation.spaceBelow, space, "as tall as they were, until they are laid out again")
+        XCTAssertEqual(presentation.window(all, following: false, registry: registry, spacing: spacing * 2, zoom: 2).map(\.id), window.map(\.id))
+        XCTAssertEqual(presentation.spaceBelow, space * 2, accuracy: 0.01, "twice the zoom: twice as tall")
+        XCTAssertEqual(presentation.window(all, following: false, registry: registry, spacing: spacing, zoom: 1).map(\.id), window.map(\.id))
+        XCTAssertEqual(presentation.spaceBelow, space, accuracy: 0.01)
         window = show()
-        for _ in 0..<20 {
-            view(0)
-            _ = presentation.expand(all, registry: registry, trim: true)
-            window = show()
-        }
+
+        // A match among the rows left out: the window moves to it, with the rows below it still
+        // left out; one among the newest rows is laid out already.
+        let match = try XCTUnwrap(all.firstIndex { $0.id == window.last?.id }) + 60
+        XCTAssertTrue(presentation.include(all[match].id, in: all))
+        window = show()
+        XCTAssertEqual(window.first?.id, all[match - 10].id)
+        XCTAssertEqual(window.last?.id, all[match + ThreadPresentation.belowIncluded].id)
         XCTAssertGreaterThan(presentation.spaceBelow, 0)
-        XCTAssertTrue(presentation.include("590", in: all))
-        XCTAssertEqual(show().last?.id, "600")
+        XCTAssertEqual(presentation.tail.count, tailKept)
+        XCTAssertFalse(presentation.include("590", in: all), "the newest rows are laid out already")
 
         // Scrolling on without stopping: rows are left out only once very many are laid out.
         var scrolling = 0
@@ -428,25 +447,61 @@ final class ThreadWindowTests: XCTestCase {
             view(0)
             _ = presentation.expand(all, registry: registry)
             window = show()
-            scrolling = max(scrolling, window.count)
+            scrolling = max(scrolling, laidOut(window))
         }
         XCTAssertLessThanOrEqual(scrolling, ThreadPresentation.mostLaidOut + ThreadPresentation.step)
-        XCTAssertGreaterThan(scrolling, bound)
+        XCTAssertGreaterThan(scrolling, bound + tailKept)
         // Stopped: those far below are left out.
         view(0)
         XCTAssertTrue(presentation.leaveOutFarBelow(all, registry: registry, zoom: 1))
-        XCTAssertLessThanOrEqual(show().count, bound)
+        XCTAssertLessThanOrEqual(laidOut(show()), bound + tailKept)
+    }
 
-        // Back at the newest message: the newest rows only, nothing left out.
-        for _ in 0..<20 {
-            view(0)
+    /// Back at the newest message after a long way back — Latest, or scrolled there — the newest
+    /// rows shown are those kept laid out all along: nothing between is laid out on the way.
+    @MainActor func testGoingBackToTheNewestLaysOutNothingNew() {
+        let all = rows(600)
+        let presentation = ThreadPresentation()
+        let registry = ThreadRowRegistry()
+        func show(_ following: Bool = false) -> ArraySlice<MessageRow> {
+            let window = presentation.window(all, following: following, registry: registry, spacing: 10)
+            registry.beginPass()
+            var y: CGFloat = 0
+            for row in window + presentation.tail {
+                registry.update(row.id, CGRect(x: 0, y: y, width: 300, height: 50))
+                y += 60 + (row.id == window.last?.id && presentation.spaceBelow > 0 ? presentation.spaceBelow + 10 : 0)
+            }
+            return window
+        }
+        var window = show(true)
+        XCTAssertEqual(window.count, ThreadPresentation.windowSize)
+        for _ in 0..<40 {
+            registry.visible = 0...400
             _ = presentation.expand(all, registry: registry, trim: true)
             window = show()
         }
+        XCTAssertGreaterThan(presentation.spaceBelow, 0)
+        let newest = presentation.tail.map(\.id)
+        XCTAssertEqual(newest, all.suffix(ThreadPresentation.tailKept).map(\.id))
+        // Latest (the reader is still far up when it is pressed).
         XCTAssertTrue(presentation.release())
-        window = show(true)
-        XCTAssertEqual(window.count, ThreadPresentation.windowSize)
-        XCTAssertEqual(window.last?.id, "600")
+        window = show(false)
+        XCTAssertEqual(window.map(\.id), newest, "the newest rows, laid out already, and no others")
         XCTAssertEqual(presentation.spaceBelow, 0)
+        XCTAssertTrue(presentation.tail.isEmpty)
+        XCTAssertEqual(show(true).map(\.id), newest, "and the same once it follows the newest message")
+        XCTAssertFalse(presentation.release(), "nothing more to let go of")
+        // New messages while following: the newest rows, as many as before.
+        let more = all + rows(3, from: 601)
+        XCTAssertEqual(presentation.window(more, following: true).last?.id, "603")
+        XCTAssertEqual(presentation.window(more, following: true).count, ThreadPresentation.tailKept)
+
+        // Up a little — nothing left out — and back: the rows laid out stay, up to `windowSize`.
+        let other = ThreadPresentation()
+        _ = other.window(all, following: true)
+        XCTAssertTrue(other.expand(all))
+        XCTAssertEqual(other.window(all, following: false).count, ThreadPresentation.windowSize + ThreadPresentation.step)
+        XCTAssertTrue(other.release())
+        XCTAssertEqual(other.window(all, following: true).count, ThreadPresentation.windowSize)
     }
 }

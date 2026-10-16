@@ -196,6 +196,37 @@ final class ChromeAndHandleTests: XCTestCase {
         XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "a", last: "d", count: 3)), .none, "a removal in the middle moves no ends")
         XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "d", count: 4), to: C(first: "z", last: "e", count: 9)), .mixed)
         XCTAssertEqual(ScrollPinner.classify(from: C(), to: C(first: "a", last: "d", count: 4)), .none, "the first content is not an append")
+        // Rows left out below what is read, the newest still laid out below the space: as an append.
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "z", lastAboveSpace: "d", count: 30),
+                                             to: C(first: "a", last: "z", lastAboveSpace: "c", count: 29)), .append)
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "z", lastAboveSpace: "d", count: 30),
+                                             to: C(first: "y", last: "z", lastAboveSpace: "d", count: 33)), .prepend)
+        XCTAssertEqual(ScrollPinner.classify(from: C(first: "a", last: "z", lastAboveSpace: "d", count: 30),
+                                             to: C(first: "w", last: "z", count: 24)), .mixed, "Latest from a long way back")
+    }
+
+    /// Latest from a long way back: the newest rows alone come with the ask, and they are shown
+    /// at the newest message as they are laid out, not first where the reader was.
+    @MainActor func testLatestShowsTheNewestRowsAtTheEndAsTheyAreLaidOut() {
+        _ = NSApplication.shared
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let document = FlippedDocument(frame: NSRect(x: 0, y: 0, width: 300, height: 20_000))
+        scroll.documentView = document
+        let pinner = ScrollPinner()
+        pinner.registry = ThreadRowRegistry()
+        pinner.attach(to: scroll)
+        pinner.expect(ThreadContent(first: "m100", last: "m999", lastAboveSpace: "m180", count: 106))
+        document.setFrameSize(NSSize(width: 300, height: 20_000.5)) // consume the first descriptor
+        document.setFrameSize(NSSize(width: 300, height: 20_000))
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: 2_000))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertFalse(pinner.isNearBottom)
+        // Latest: the newest 24 rows alone, 1,500 points of them.
+        pinner.follow()
+        pinner.expect(ThreadContent(first: "m976", last: "m999", count: 24))
+        document.setFrameSize(NSSize(width: 300, height: 1_500))
+        XCTAssertEqual(scroll.contentView.bounds.origin.y, 1_300, accuracy: 0.5, "at the newest message in the same layout")
+        XCTAssertTrue(pinner.isNearBottom)
     }
 
     @MainActor func testMessageRowsPrecomputeDaySeparatorsAndStatusOnce() {

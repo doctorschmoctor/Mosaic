@@ -487,6 +487,20 @@ struct ThreadStack: Layout {
     func explicitAlignment(of guide: HorizontalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) -> CGFloat? { nil }
     func explicitAlignment(of guide: VerticalAlignment, in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Sizes) -> CGFloat? { nil }
 }
+/// What a thread lays out, in order: its rows, and the space standing in for rows left out
+/// between them (`ThreadPresentation.window`). One list, so a row is the same view whether it
+/// is above the space or below it.
+struct ThreadItem: Identifiable {
+    let row: MessageRow?
+    let space: CGFloat
+    var id: String { row?.id ?? "space below" }
+    static func items(_ shown: ArraySlice<MessageRow>, space: CGFloat, tail: ArraySlice<MessageRow>) -> [ThreadItem] {
+        var items = shown.map { ThreadItem(row: $0, space: 0) }
+        if space > 0 { items.append(ThreadItem(row: nil, space: space)) }
+        items += tail.map { ThreadItem(row: $0, space: 0) }
+        return items
+    }
+}
 /// A thread row's message, for the row registry.
 struct ThreadRowID: LayoutValueKey { static let defaultValue: String? = nil }
 /// The space standing in for rows left out below (`ThreadPresentation.window`).
@@ -622,8 +636,9 @@ struct MessageList: View, Equatable {
         let _ = windowRevision
         let spacing = 10 * zoom
         let shown = presentation.window(rows, following: isNearBottom, registry: registry, spacing: spacing, zoom: zoom)
-        // Standing in for the rows left out below, as tall as they were (none while following).
-        let spaceBelow = presentation.spaceBelow
+        // Standing in for the rows left out below, as tall as they were (none while following),
+        // with the newest rows still laid out below it.
+        let items = ThreadItem.items(shown, space: presentation.spaceBelow, tail: presentation.tail)
         // Room above the rows while reading back, for older rows to come into without moving any.
         let roomAbove = presentation.keepsRoomAbove(moreAbove: shown.startIndex > 0 || canLoadMore)
         let showsStart = shown.startIndex == 0
@@ -632,7 +647,8 @@ struct MessageList: View, Equatable {
         let findMatches = presentation.findMatches(findQuery)
         // What the bubbles' names come from, so a bubble that skips redrawing still shows names that changed.
         let nameContext = senderNames.hashValue ^ conversation.name.hashValue ^ (conversation.isGroup ? 1 : 0)
-        let content = ThreadContent(first: shown.first?.id, last: shown.last?.id, count: shown.count)
+        let content = ThreadContent(first: shown.first?.id, last: items.last?.id,
+                                    lastAboveSpace: presentation.tail.isEmpty ? nil : shown.last?.id, count: items.count)
         let ids = prepared.ids
         let reactions = prepared.reactions
         let byGUID = prepared.byGUID
@@ -664,42 +680,43 @@ struct MessageList: View, Equatable {
                     Text(isLive ? "Loading this conversation…" : "Start the conversation.").font(.callout).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity).padding(.top, 24)
                 }
-                ForEach(shown) { row in
-                    VStack(spacing: 10 * zoom) {
-                        // The first row laid out always says its day.
-                        if let day = row.dayLabel ?? (row.id == shown.first?.id ? MessageText.day(row.message.date) : nil) {
-                            Text(day).font(.system(size: 10 * zoom, weight: .medium))
-                                .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
-                                .allowsHitTesting(false)
+                ForEach(items) { item in
+                    if let row = item.row {
+                        VStack(spacing: 10 * zoom) {
+                            // The first row laid out always says its day.
+                            if let day = row.dayLabel ?? (row.id == shown.first?.id ? MessageText.day(row.message.date) : nil) {
+                                Text(day).font(.system(size: 10 * zoom, weight: .medium))
+                                    .foregroundStyle(.tertiary).frame(maxWidth: .infinity).padding(.vertical, 4 * zoom)
+                                    .allowsHitTesting(false)
+                            }
+                            if row.id == firstUnread { UnreadDivider() }
+                            MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
+                                          senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
+                                          live: isLive, service: conversation.service,
+                                          showsStatus: row.showsStatus, showsTime: row.showsTime,
+                                          authorName: author(of: row.message),
+                                          reactions: row.message.guid.flatMap { reactions[$0] } ?? [],
+                                          reply: replyContext(for: row.message, in: byGUID),
+                                          highlighted: highlightedID == row.id || findCurrent == row.id,
+                                          findQuery: findMatches.contains(row.id) ? findQuery : "",
+                                          nameContext: nameContext,
+                                          actorName: { name(of: $0) }, replyAuthor: { author(of: $0) },
+                                          onShowOriginal: { original in jump(to: original.presentationID, proxy: proxy) })
+                                // A bubble whose own values are unchanged is not redrawn (its closures
+                                // are left out of the comparison: what they read is in `nameContext`).
+                                .equatable()
                         }
-                        if row.id == firstUnread { UnreadDivider() }
-                        MessageBubble(message: row.message, threadID: conversation.id, group: conversation.isGroup,
-                                      senderName: row.showsSender ? row.message.sender.map { senderNames[$0] ?? $0 } : nil,
-                                      live: isLive, service: conversation.service,
-                                      showsStatus: row.showsStatus, showsTime: row.showsTime,
-                                      authorName: author(of: row.message),
-                                      reactions: row.message.guid.flatMap { reactions[$0] } ?? [],
-                                      reply: replyContext(for: row.message, in: byGUID),
-                                      highlighted: highlightedID == row.id || findCurrent == row.id,
-                                      findQuery: findMatches.contains(row.id) ? findQuery : "",
-                                      nameContext: nameContext,
-                                      actorName: { name(of: $0) }, replyAuthor: { author(of: $0) },
-                                      onShowOriginal: { original in jump(to: original.presentationID, proxy: proxy) })
-                            // A bubble whose own values are unchanged is not redrawn (its closures
-                            // are left out of the comparison: what they read is in `nameContext`).
-                            .equatable()
+                        .id(row.id)
+                        // Messages in a run from the same person sit close together; a new run gets the full gap.
+                        .padding(.top, row.continuesRun ? -7 * zoom : 0)
+                        // A row that just arrived at the tail settles in once; everything else is still.
+                        .modifier(NewMessageEffect(animated: freshIDs.contains(row.id),
+                                                   incoming: !row.message.isFromMe, reduceMotion: reduceMotion))
+                        // Which row this is, for the registry (ThreadStack reports where it placed it).
+                        .layoutValue(key: ThreadRowID.self, value: row.id)
+                    } else {
+                        Color.clear.frame(height: item.space).accessibilityHidden(true).layoutValue(key: ThreadSpace.self, value: true)
                     }
-                    .id(row.id)
-                    // Messages in a run from the same person sit close together; a new run gets the full gap.
-                    .padding(.top, row.continuesRun ? -7 * zoom : 0)
-                    // A row that just arrived at the tail settles in once; everything else is still.
-                    .modifier(NewMessageEffect(animated: freshIDs.contains(row.id),
-                                               incoming: !row.message.isFromMe, reduceMotion: reduceMotion))
-                    // Which row this is, for the registry (ThreadStack reports where it placed it).
-                    .layoutValue(key: ThreadRowID.self, value: row.id)
-                }
-                if spaceBelow > 0 {
-                    Color.clear.frame(height: spaceBelow).accessibilityHidden(true).layoutValue(key: ThreadSpace.self, value: true)
                 }
             }
             .coordinateSpace(name: "thread")
@@ -725,6 +742,13 @@ struct MessageList: View, Equatable {
                     onLoadMore()
                 }
             }, onNearSpaceBelow: { [presentation, registry] in
+                // Among the newest rows, below the space (the scroller dragged down to them): those
+                // are the rows laid out now, as back at the newest message.
+                if let visible = registry.visible, let spaceTop = registry.spaceTop,
+                   visible.lowerBound >= spaceTop + presentation.spaceBelow {
+                    if presentation.release() { windowRevision += 1 }
+                    return
+                }
                 // Back down towards the rows left out below: some are laid out again.
                 if presentation.nearSpaceBelow(rows, registry: registry) { windowRevision += 1 }
             }, onScrollIdle: { [presentation, registry] distanceFromTop in
@@ -946,10 +970,22 @@ struct MessageRow: Identifiable, Equatable {
     /// The last row laid out, when the rows below it are left out; nil when every row down to the
     /// newest is laid out.
     private var windowLast: String?
-    /// The width and zoom the rows left out below were laid out at: they are as tall as that then.
-    private var leftOutAt: (width: CGFloat, zoom: CGFloat)?
+    /// The zoom the rows left out below were laid out at.
+    private var leftOutZoom: CGFloat?
     /// How tall the space standing in for the rows left out below is (0: there is none).
     private(set) var spaceBelow: CGFloat = 0
+    /// The newest rows stay laid out while the reader reads a long way back, below the space
+    /// standing in for the rows left out: going back to the newest message (Latest) shows them at
+    /// once — their pictures loaded — instead of laying out everything between again.
+    static let tailKept = 24
+    /// The rows laid out below the space while rows are left out (the newest `tailKept`).
+    private(set) var tail: ArraySlice<MessageRow> = []
+    /// How many of the newest rows are laid out while following the newest message: `windowSize`,
+    /// or fewer when that many were not laid out when the reader came back (they are not laid out
+    /// all at once then; more come as the reader goes up again).
+    private var followingCount = windowSize
+    /// How many rows the last window laid out.
+    private var laidOutCount = 0
     /// Older rows were laid out on purpose (scrolled to, a match, a reply's original): following
     /// the newest message does not drop them until the reader is back there.
     private var holdsOlder = false
@@ -979,29 +1015,42 @@ struct MessageRow: Identifiable, Equatable {
     /// The rows to lay out: the newest `windowSize` while following the newest message; else from
     /// where the window began, so nothing in view moves when rows arrive below, and an older page
     /// that loads above waits there until the reader nears it (`expand`). Rows left out below stop
-    /// it short (`spaceBelow` stands in for them) while they are as tall as when they were laid
-    /// out — same width, same zoom.
+    /// it short: `spaceBelow` stands in for them, as tall as they were when last laid out, with the
+    /// newest `tailKept` rows (`tail`; else empty) laid out below it. After a change of width or
+    /// zoom the space is not exact, which moves nothing in view (it is below the view); the rows
+    /// are measured again as the reader gets to them.
     func window(_ rows: [MessageRow], following: Bool, registry: ThreadRowRegistry? = nil, spacing: CGFloat = 0, zoom: CGFloat = 1) -> ArraySlice<MessageRow> {
         spaceBelow = 0
-        guard !rows.isEmpty else { windowFirst = nil; windowLast = nil; return rows[...] }
+        tail = []
+        guard !rows.isEmpty else { windowFirst = nil; windowLast = nil; laidOutCount = 0; return rows[...] }
         let start: Int
         if following && !holdsOlder {
-            start = max(0, rows.count - Self.windowSize)
+            start = max(0, rows.count - followingCount)
             windowLast = nil
         } else if let first = windowFirst, let index = position(of: first, in: rows) {
             start = index
         } else {
-            start = max(0, rows.count - Self.windowSize)
+            // Gone (other rows altogether): the newest rows, as at the start.
+            if windowFirst != nil { followingCount = Self.windowSize }
+            start = max(0, rows.count - followingCount)
         }
         windowFirst = rows[start].id
         var end = rows.count
-        if let last = windowLast, let index = position(of: last, in: rows), index >= start, index + 1 < rows.count,
-           let registry, let leftOutAt, leftOutAt.zoom == zoom, abs(leftOutAt.width - registry.width) < 0.5 {
+        let tailStart = max(start, rows.count - Self.tailKept)
+        if let last = windowLast, let index = position(of: last, in: rows), index >= start, index + 1 < tailStart, let registry {
             end = index + 1
-            spaceBelow = Self.height(of: rows[end...], registry: registry, spacing: spacing)
+            // Left out at another zoom: as tall as they were, scaled to this one.
+            if let leftOutZoom, leftOutZoom != zoom {
+                registry.scaleHeights(of: rows[end..<tailStart].map(\.id), by: zoom / leftOutZoom)
+                self.leftOutZoom = zoom
+            }
+            spaceBelow = Self.height(of: rows[end..<tailStart], registry: registry, spacing: spacing)
+            tail = rows[tailStart...]
         } else {
             windowLast = nil
+            leftOutZoom = nil
         }
+        laidOutCount = end - start + tail.count
         return rows[start..<end]
     }
     /// How tall rows were when last laid out, with the gaps between them. Rows never laid out (new
@@ -1032,6 +1081,11 @@ struct MessageRow: Identifiable, Equatable {
     }
     /// How many rows may be laid out while the reader scrolls before those far below are left out.
     static let mostLaidOut = 160
+    /// How many rows are laid out from `start` to `end`, and below the space (`tail`) when rows
+    /// are left out.
+    private func laidOut(_ rows: [MessageRow], start: Int, end: Int) -> Int {
+        end - start + (end < rows.count ? min(Self.tailKept, rows.count - end) : 0)
+    }
     /// The reader stopped: rows far below the view are left out (false when there were none).
     func leaveOutFarBelow(_ rows: [MessageRow], registry: ThreadRowRegistry, zoom: CGFloat) -> Bool {
         guard holdsOlder, let first = windowFirst, let start = position(of: first, in: rows) else { return false }
@@ -1045,14 +1099,16 @@ struct MessageRow: Identifiable, Equatable {
     private func leaveOutBelow(_ rows: [MessageRow], from start: Int, registry: ThreadRowRegistry, zoom: CGFloat, over: Int) {
         guard let visible = registry.visible else { return }
         let end = windowEnd(rows)
-        guard end - start > over else { return }
+        guard laidOut(rows, start: start, end: end) > over else { return }
         let limit = visible.upperBound + Self.keptBeyondView
-        var newEnd = end
+        // The newest rows stay laid out (`tailKept`).
+        let from = min(end, max(start, rows.count - Self.tailKept))
+        var newEnd = from
         while newEnd - 1 > start, let frame = registry.frames[rows[newEnd - 1].id], frame.minY >= limit { newEnd -= 1 }
-        guard newEnd < end else { return }
+        guard newEnd < from else { return }
         windowLast = rows[newEnd - 1].id
-        leftOutAt = (registry.width, zoom)
-        TileTrace.note("rows left out below: \(end - newEnd)")
+        leftOutZoom = zoom
+        TileTrace.note("rows left out below: \(from - newEnd)")
     }
     /// The reader nears the space standing in for the rows left out below. If many rows are laid
     /// out, those wholly more than `keptBeyondView` above the view are left out first (rows above
@@ -1063,7 +1119,7 @@ struct MessageRow: Identifiable, Equatable {
         guard let last = windowLast, let lastIndex = position(of: last, in: rows),
               let first = windowFirst, let start = position(of: first, in: rows) else { return false }
         let end = lastIndex + 1
-        if end - start > Self.windowSize, let visible = registry.visible {
+        if laidOut(rows, start: start, end: end) > Self.windowSize, let visible = registry.visible {
             let limit = visible.lowerBound - Self.keptBeyondView
             var newStart = start
             while newStart + 1 < end, let frame = registry.frames[rows[newStart].id], frame.maxY <= limit { newStart += 1 }
@@ -1073,9 +1129,10 @@ struct MessageRow: Identifiable, Equatable {
                 return true
             }
         }
-        let newEnd = min(rows.count, end + count)
-        windowLast = newEnd < rows.count ? rows[newEnd - 1].id : nil
-        if windowLast == nil { leftOutAt = nil }
+        let tailStart = max(start, rows.count - Self.tailKept)
+        let newEnd = min(tailStart, end + count)
+        windowLast = newEnd < tailStart ? rows[newEnd - 1].id : nil
+        if windowLast == nil { leftOutZoom = nil }
         TileTrace.note("rows laid out again below: \(newEnd - end)")
         return true
     }
@@ -1083,15 +1140,24 @@ struct MessageRow: Identifiable, Equatable {
     func rowsAbove(_ rows: [MessageRow]) -> Int {
         windowFirst.flatMap { position(of: $0, in: rows) } ?? 0
     }
-    /// Makes sure a row is laid out, with a few above it. True when the window had to grow.
+    /// Makes sure a row is laid out, with a few around it. True when the window changed.
     func include(_ id: String, in rows: [MessageRow]) -> Bool {
         guard let index = position(of: id, in: rows) else { return false }
         holdsOlder = true
-        // Among the rows left out below: they are all laid out again.
-        if windowLast != nil, index >= windowEnd(rows) - 3 {
-            windowLast = nil
-            leftOutAt = nil
-            return true
+        if windowLast != nil {
+            let tailStart = rows.count - Self.tailKept
+            // Among the newest rows, kept laid out: nothing to do.
+            if index >= tailStart { return false }
+            // Among the rows left out below (or at the end of those above them): the window moves
+            // to it — the rows around it laid out, those below them still left out — rather than
+            // every row down to it laid out at once.
+            if index >= windowEnd(rows) - 3 {
+                windowFirst = rows[max(0, index - 10)].id
+                let last = index + Self.belowIncluded
+                windowLast = last + 1 < tailStart ? rows[last].id : nil
+                if windowLast == nil { leftOutZoom = nil }
+                return true
+            }
         }
         let current = windowFirst.flatMap { position(of: $0, in: rows) } ?? max(0, rows.count - Self.windowSize)
         guard index < current + 3, current > 0 else { return false }
@@ -1099,15 +1165,22 @@ struct MessageRow: Identifiable, Equatable {
         windowFirst = rows[start].id
         return true
     }
-    /// Back at the newest message: the window may shrink to the newest rows again, every row
-    /// down to the newest laid out. True when it held older ones or left rows out below.
+    /// Back at the newest message — scrolled there, or Latest — the window shrinks to the newest
+    /// rows again, only those already laid out: after a long way back, the newest `tailKept`, kept
+    /// for this; laying out every row between at once was what made going back slow. True when it
+    /// held older ones or left rows out below.
     func release() -> Bool {
         guard holdsOlder || windowLast != nil else { return false }
+        followingCount = windowLast != nil ? Self.tailKept : min(Self.windowSize, max(Self.tailKept, laidOutCount))
         holdsOlder = false
+        windowFirst = nil
         windowLast = nil
-        leftOutAt = nil
+        leftOutZoom = nil
         return true
     }
+    /// How many rows below a row brought into view from among those left out are laid out with it
+    /// (`include`): enough for it to sit in the middle of a tall tile.
+    static let belowIncluded = 20
 
     /// The rows whose text has the find bar's words, worked out once per query and build.
     func findMatches(_ query: String) -> Set<String> {

@@ -91,6 +91,11 @@ import MosaicCore
         return cache
     }()
     private var failures = LRUCache<Key, Date>(capacity: 500)
+    /// The key each picture was last found under, by size tier and path: what lets a bubble that
+    /// is laid out again (scrolled back to, the newest message after a long way back) show its
+    /// picture from its first frame, before its own lookup — which reads the file's version off
+    /// the main thread — comes back.
+    private var lastKeys: [String: NSString] = [:]
     let requests = SharedRequests<Key, CGImage?>()
     let limiter = AsyncLimiter(limit: 3, order: .newestFirst)
     /// Decodes that ran, whether or not they produced a picture (tests).
@@ -99,6 +104,16 @@ import MosaicCore
     func removeAll() {
         images.removeAllObjects()
         failures.removeAll()
+        lastKeys.removeAll()
+    }
+
+    /// A picture decoded already for this file at this size or larger, without reading the file
+    /// (a newer version of it is the bubble's own lookup's to find).
+    func decoded(path: String, tier: Int) -> NSImage? {
+        for candidate in Self.tiers where candidate >= tier {
+            if let name = lastKeys["\(candidate)|\(path)"], let hit = images.object(forKey: name) { return hit }
+        }
+        return nil
     }
 
     /// The key for a picture, with its file version read off the main thread: a stat can be slow
@@ -115,7 +130,8 @@ import MosaicCore
         if Task.isCancelled { return nil }
         // The asked size, or a larger one already decoded.
         for candidate in Self.tiers where candidate >= tier {
-            if let hit = images.object(forKey: key.with(tier: candidate).name) { return hit }
+            let name = key.with(tier: candidate).name
+            if let hit = images.object(forKey: name) { lastKeys["\(candidate)|\(path)"] = name; return hit }
         }
         if let failed = failures.peek(key), Date().timeIntervalSince(failed) < Self.retryInterval { return nil }
         let kind = attachment.kind
@@ -137,6 +153,7 @@ import MosaicCore
             return nil
         }
         failures.removeValue(for: key)
+        lastKeys["\(tier)|\(path)"] = key.name
         if let hit = images.object(forKey: key.name) { return hit }
         let image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         images.setObject(image, forKey: key.name, cost: cgImage.bytesPerRow * cgImage.height)
@@ -198,6 +215,8 @@ struct AttachmentView: View {
     }
     private var visual: some View {
         let sticker = attachment.isSticker
+        // Decoded already (a bubble laid out again): shown from the first frame, not after a spinner.
+        let image = self.image ?? attachment.path.flatMap { ThumbnailCache.shared.decoded(path: $0, tier: thumbnailTier) }
         return AspectBox(ratio: ratio, maxWidth: (sticker ? 110 : 240) * zoom, maxHeight: (sticker ? 110 : 300) * zoom) {
             Rectangle().fill(sticker ? Color.clear : Palette.incoming)
                 .overlay {

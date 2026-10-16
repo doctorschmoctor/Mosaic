@@ -747,10 +747,65 @@ enum SyntheticMessages {
                 print("      +\(Int((note.time - stretch.start) * 1000)) ms \(note.text)")
             }
         }
+        await pressLatest(window, scroll, content)
         // Back to the newest message for what follows.
         let maximum = max(0, document.frame.height - clip.bounds.height)
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: document.isFlipped ? maximum : 0))
         scroll.reflectScrolledClipView(clip)
         await Check.pause(0.5)
+    }
+
+    /// Back to the newest message from where the scroll got to, with the thread's Latest button
+    /// (pressed where it sits, at the bottom right): how long until the view is there, how the
+    /// frames kept up, and how many rows were laid out for it.
+    static func pressLatest(_ window: NSWindow, _ scroll: NSScrollView, _ content: NSView) async {
+        guard let document = scroll.documentView else { return }
+        let clip = scroll.contentView
+        func fromEnd() -> CGFloat {
+            let maximum = max(0, document.frame.height - clip.bounds.height)
+            return document.isFlipped ? maximum - clip.bounds.origin.y : clip.bounds.origin.y
+        }
+        func ms(_ seconds: Double) -> String { String(format: "%.1f ms", seconds * 1000) }
+        let back = fromEnd()
+        guard back > 2000 else { print("Latest: the view was only \(Int(back)) points from the newest message"); return }
+        var notes: [(time: CFTimeInterval, text: String)] = []
+        TileTrace.sink = { message in notes.append((CACurrentMediaTime(), message)) }
+        let recorder = FrameRecorder()
+        recorder.start(in: content)
+        await Check.pause(0.4)
+        let frame = scroll.convert(scroll.bounds, to: nil)
+        let point = NSPoint(x: frame.maxX - 40, y: frame.minY + 26)
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+        }
+        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return }
+        let pressed = CACurrentMediaTime()
+        // The release is queued first: a button that follows the press with its own event loop finds it.
+        NSApp.postEvent(up, atStart: false)
+        window.sendEvent(down)
+        var arrived: CFTimeInterval?
+        while true {
+            let now = CACurrentMediaTime()
+            if arrived == nil, fromEnd() <= 1 { arrived = now }
+            if let arrived, now - arrived > 0.8 { break }
+            if now - pressed > 10 { break }
+            await Check.pause(0.005)
+        }
+        let ended = CACurrentMediaTime()
+        recorder.stop()
+        TileTrace.sink = nil
+        let frames = recorder.frames(from: pressed - 0.05, to: ended)
+        var most = 0, passes = 0
+        for note in notes where note.time >= pressed && note.text.hasPrefix("thread stack sized ") {
+            let words = note.text.split(separator: " ")
+            if words.count > 3, let rows = Int(words[3]) { most = max(most, rows); passes += 1 }
+        }
+        let laidOutAgain = notes.filter { $0.time >= pressed && $0.text.hasPrefix("rows laid out again") }.count
+        guard let arrived else {
+            print("Latest from \(Int(back)) points back: not at the newest message 10 s after the press (\(Int(fromEnd())) points from it) — the button was not where it was pressed?")
+            return
+        }
+        print("Latest from \(Int(back)) points back: at the newest message after \(ms(arrived - pressed)); frames from the press to 0.8 s after: \(frames.missed) missed, longest gap \(ms(frames.longest)); up to \(most) rows laid out in \(passes) sizing passes\(laidOutAgain > 0 ? ", rows laid out again below \(laidOutAgain) times" : ""); the thread is \(Int(document.frame.height)) points tall")
     }
 }
