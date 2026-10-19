@@ -25,6 +25,45 @@ final class DetailsTests: XCTestCase {
         XCTAssertEqual(content.localMedia.map(\.path), ["/tmp/one.jpg"], "a file not on this Mac is not previewed")
     }
 
+    /// The shared content is worked out once per change of the messages or the whole history —
+    /// not each time the details are drawn — and its lists say when there is something new.
+    @MainActor func testSharedContentIsWorkedOutOncePerChange() {
+        let day = Date(timeIntervalSinceReferenceDate: 700_000_000)
+        var messages = (1...300).map { index in
+            Message(id: "\(index)", text: index % 3 == 0 ? "see https://example.com/\(index)" : "note \(index)", date: day + Double(index) * 60,
+                    isFromMe: index % 2 == 0,
+                    attachments: index % 2 == 0 ? [Attachment(id: "p\(index)", path: "/tmp/p\(index).jpg", name: "p\(index).jpg", mimeType: "image/jpeg")] : [])
+        }
+        let cache = SharedContentCache()
+        let first = cache.content(for: messages, history: nil)
+        XCTAssertEqual(first.media.count, 150)
+        XCTAssertEqual(first.links.count, 100)
+        XCTAssertEqual(first.localMedia.count, 150)
+        let version = cache.version
+        for _ in 0..<5 { _ = cache.content(for: messages, history: nil) }
+        XCTAssertEqual(cache.version, version, "the same messages: nothing worked out again")
+        XCTAssertEqual(cache.content(for: Array(messages), history: nil), first, "an equal copy of them neither")
+        XCTAssertEqual(cache.version, version)
+        messages.append(Message(id: "301", text: "https://example.org", date: day + 400 * 60, isFromMe: false))
+        XCTAssertEqual(cache.content(for: messages, history: nil).links.first?.url.absoluteString, "https://example.org")
+        XCTAssertEqual(cache.version, version + 1, "a new message: worked out again, once")
+        let history = SharedHistory(linksComplete: false)
+        _ = cache.content(for: messages, history: history)
+        XCTAssertEqual(cache.version, version + 2, "the whole history read: once more")
+        _ = cache.content(for: messages, history: history)
+        XCTAssertEqual(cache.version, version + 2)
+        // The lists draw again only for a new version.
+        let grid = SharedMediaGrid(content: first, version: 1, onShowMessage: { _ in })
+        XCTAssertTrue(grid == SharedMediaGrid(content: first, version: 1, onShowMessage: { _ in }), "new closures alone: not drawn again")
+        XCTAssertFalse(grid == SharedMediaGrid(content: first, version: 2, onShowMessage: { _ in }))
+    }
+
+    /// The app a file opens in is asked once for each kind of file.
+    @MainActor func testDefaultAppsAreAskedOncePerKindOfFile() {
+        let first = AttachmentActions.defaultAppName(for: "/tmp/one.jpg")
+        XCTAssertEqual(AttachmentActions.defaultAppName(for: "/somewhere/else/two.JPG"), first, "the same kind of file")
+    }
+
     /// Opening a tile's details shows nothing new about its draft: the draft stays as it was.
     @MainActor func testDetailsAreForTheFocusedConversationAndLeaveItsDraft() throws {
         let name = "MosaicTest-\(UUID())"

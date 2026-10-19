@@ -34,6 +34,8 @@ if [[ -f .build/scroll-sample-deep.txt ]]; then
         | sed -E 's/  \[0x[0-9a-f,.]+\]//; s/\(in ([^)]+)\) \+ [0-9]+/(\1)/; s/ +[a-zA-Z_]+\.swift:[0-9]+//' \
         | awk '{ line = $0; sub(/^[ +!:|]*/, "", line); split(line, parts, " "); if (parts[1] + 0 >= 60) print substr($0, 1, 220) }' | head -300 || true
 fi
+# The details of a conversation that shared 1,000 photos and 600 links, measured.
+.build/MosaicAppCheck --isolated --live --details || true
 # The Workspace menu as it was before MenuState, reading the store: expected to fail.
 for mode in "--demo" "--isolated --live"; do
     # shellcheck disable=SC2086

@@ -2,6 +2,8 @@ import AppKit
 import SwiftUI
 import QuartzCore
 import CSQLite
+import ImageIO
+import UniformTypeIdentifiers
 
 // Mosaic as the app runs it — its window and its menus, which SwiftUI keeps up to date through
 // the app itself (a test's NSHostingView has no menus). Tiles are closed and opened the reader's
@@ -16,6 +18,8 @@ import CSQLite
 //                                               all the while (the store polls and refreshes)
 //        add --store-menus                      the Workspace menu as it was before MenuState,
 //                                               reading the store's tiles directly
+//        MosaicAppCheck --isolated --live --details   the details of a conversation that shared
+//                                               1,000 photos and 600 links, measured
 
 @main enum AppCheckMain {
     @MainActor static func main() {
@@ -29,6 +33,8 @@ import CSQLite
     /// A long way back: the long threads hold more than a tile shows (1,000 messages), of mixed
     /// lengths, and the scroll benchmark goes up through all of it.
     static let deep = CommandLine.arguments.contains("--deep")
+    /// A conversation that shared a great deal — 1,000 photos, 600 links — and its details, measured.
+    static let details = CommandLine.arguments.contains("--details")
     static var mode: String {
         (live ? "live" : "demo") + (CommandLine.arguments.contains("--store-menus") ? ", menus that read the store" : "")
     }
@@ -145,6 +151,10 @@ enum SyntheticMessages {
             statements.append("INSERT INTO handle VALUES ('person\(person)@example.test');")
             statements.append("INSERT INTO chat VALUES ('iMessage;-;person\(person)@example.test', '', 'person\(person)@example.test', 'iMessage');")
             statements.append("INSERT INTO chat_handle_join VALUES (\(person), \(person));")
+            if Harness.details && person == SharedMedia.person {
+                statements += SharedMedia.statements(chat: person, from: &row, before: now - Int64(person) * 86_400_000_000_000, in: directory)
+                continue
+            }
             let count = person <= longThreads ? (Harness.deep ? 1600 : 600) : 3
             for index in 0..<count {
                 row += 1
@@ -227,6 +237,10 @@ enum SyntheticMessages {
         await expectInPlace(store, window, "at launch")
 
         // A fast scroll up a long thread, measured (live only: the demo's threads are short).
+        if Harness.details {
+            await DetailsBenchmark.run(store, window)
+            return finish(nil)
+        }
         if Harness.live && !CommandLine.arguments.contains("--store-menus") {
             await ScrollBenchmark.run(store, window)
             if CommandLine.arguments.contains("--scroll-only") { return finish(nil) }
@@ -814,5 +828,207 @@ enum SyntheticMessages {
             .sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(4) {
             print("  stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - pressed) * 1000)) ms: " + notes.filter { $0.time >= stretch.start && $0.time <= stretch.end }.prefix(6).map { $0.text }.joined(separator: "; "))
         }
+    }
+}
+
+
+/// A conversation that shared a great deal (`--details`): 1,000 photos and 600 links in its older
+/// messages, and photos among its newest. The photos are 40 pictures, each under 25 names.
+enum SharedMedia {
+    static let person = 5
+    static let photos = 1000
+    static let links = 600
+    static let newest = 100
+
+    /// The pictures, written into `directory`; their paths, one per photo.
+    static func pictures(in directory: URL) -> [String] {
+        let folder = directory.appending(path: "Attachments")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        var originals: [URL] = []
+        for picture in 0..<40 {
+            let url = folder.appending(path: "original-\(picture).jpg")
+            let width = 1600, height = 1200
+            guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { continue }
+            // Blocks of colour, different in each picture, so each decodes as a photo does.
+            var seed = UInt32(picture * 7919 + 13)
+            func next() -> CGFloat { seed = seed &* 1_664_525 &+ 1_013_904_223; return CGFloat(seed >> 8) / CGFloat(1 << 24) }
+            for _ in 0..<400 {
+                context.setFillColor(CGColor(red: next(), green: next(), blue: next(), alpha: 1))
+                context.fill(CGRect(x: next() * CGFloat(width), y: next() * CGFloat(height), width: 40 + next() * 300, height: 40 + next() * 300))
+            }
+            guard let image = context.makeImage(),
+                  let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { continue }
+            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.7] as CFDictionary)
+            if CGImageDestinationFinalize(destination) { originals.append(url) }
+        }
+        guard !originals.isEmpty else { return [] }
+        return (0..<(photos + newest)).map { index in
+            let url = folder.appending(path: "IMG_\(index).jpg")
+            let original = originals[index % originals.count]
+            if (try? FileManager.default.linkItem(at: original, to: url)) == nil { try? FileManager.default.copyItem(at: original, to: url) }
+            return url.path
+        }
+    }
+
+    /// The conversation's messages, attachments and joins, its rows numbered on from `row`.
+    static func statements(chat: Int, from row: inout Int, before newestDate: Int64, in directory: URL) -> [String] {
+        let paths = pictures(in: directory)
+        var statements = ["""
+        CREATE TABLE IF NOT EXISTS attachment (guid TEXT, filename TEXT, mime_type TEXT, uti TEXT, transfer_name TEXT,
+          is_sticker INTEGER DEFAULT 0, hide_attachment INTEGER DEFAULT 0, total_bytes INTEGER DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS message_attachment_join (message_id INTEGER, attachment_id INTEGER);
+        """]
+        let count = photos + links + newest
+        var attachment = 0
+        for index in 0..<count {
+            row += 1
+            let date = newestDate - Int64(count - index) * 60_000_000_000
+            let fromMe = index % 3 == 0
+            // The oldest: photos, then links; the newest: words, and a photo now and then.
+            let photo = index < photos || (index >= photos + links && index % 4 == 0)
+            let text = photo ? "" : index < photos + links ? "see https://example.test/page/\(index)" : "Message \(index): a few words"
+            statements.append("INSERT INTO message (guid, text, date, is_from_me, handle_id, cache_has_attachments) VALUES ('S\(row)', '\(text)', \(date), \(fromMe ? 1 : 0), \(fromMe ? 0 : chat), \(photo ? 1 : 0));")
+            statements.append("INSERT INTO chat_message_join VALUES (\(chat), \(row));")
+            if photo, !paths.isEmpty {
+                attachment += 1
+                statements.append("INSERT INTO attachment (guid, filename, mime_type, uti, transfer_name, total_bytes) VALUES ('AT\(attachment)', '\(paths[(attachment - 1) % paths.count])', 'image/jpeg', 'public.jpeg', 'IMG_\(attachment).jpg', 300000);")
+                statements.append("INSERT INTO message_attachment_join VALUES (\(row), \(attachment));")
+            }
+        }
+        return statements
+    }
+}
+
+/// The details of the conversation that shared a great deal (`SharedMedia`), measured: opening
+/// them, the photos, the rest of the workspace changing while they are open (the focus moving
+/// between tiles, messages arriving), scrolling the photos, the links. Prints how the frames kept
+/// up in each, how many times a tile was drawn again, and the main thread's longest stretches.
+@MainActor enum DetailsBenchmark {
+    static func run(_ store: WorkspaceStore, _ window: NSWindow) async {
+        guard let content = window.contentView,
+              let id = store.conversations.first(where: { $0.participants.contains("person\(SharedMedia.person)@example.test") })?.id else {
+            print("Details benchmark: no conversation that shared photos"); return
+        }
+        store.open(id)
+        for _ in 0..<80 where (store.tiles.first { $0.id == id }?.messages.isEmpty ?? true) { await Check.pause(0.05) }
+        // Its newest photos load in the thread first.
+        await Check.pause(1.5)
+        let others = store.openIDs.filter { $0 != id }
+        guard let other = others.first else { print("Details benchmark: no other tile"); return }
+        var notes: [(time: CFTimeInterval, text: String)] = []
+        TileTrace.sink = { message in notes.append((CACurrentMediaTime(), message)) }
+        let recorder = FrameRecorder()
+        recorder.start(in: content)
+        await Check.pause(0.3)
+        func ms(_ seconds: Double) -> String { String(format: "%.1f ms", seconds * 1000) }
+        func report(_ label: String, _ from: CFTimeInterval, _ to: CFTimeInterval) {
+            let frames = recorder.frames(from: from, to: to)
+            let busy = recorder.busy.filter { $0.start >= from && $0.end <= to }.reduce(0) { $0 + ($1.end - $1.start) } / max(0.001, to - from)
+            let bodies = notes.filter { $0.time >= from && $0.time <= to && $0.text.hasPrefix("tile body") }.count
+            print("  \(label): \(frames.missed) of \(frames.count + frames.missed) frames missed, longest gap \(ms(frames.longest)), busy \(Int(busy * 100))%; tiles drawn again \(bodies) times")
+            let interval = frames.interval > 0 ? frames.interval : 1.0 / 60
+            for stretch in recorder.busy.filter({ $0.start >= from && $0.end <= to && $0.end - $0.start > interval * 1.05 })
+                .sorted(by: { $0.end - $0.start > $1.end - $1.start }).prefix(3) {
+                let inside = notes.filter { $0.time >= stretch.start && $0.time <= stretch.end }.map { $0.text }
+                    .filter { !$0.hasPrefix("canvas places") }.prefix(5)
+                print("    stretch of \(ms(stretch.end - stretch.start)) at +\(Int((stretch.start - from) * 1000)) ms: " + inside.joined(separator: "; "))
+            }
+        }
+        print("Details benchmark (\(Harness.mode)): a conversation that shared \(SharedMedia.photos + SharedMedia.newest / 4) photos and \(SharedMedia.links) links, its \(store.tiles.first { $0.id == id }?.messages.count ?? 0) newest messages loaded")
+
+        var start = CACurrentMediaTime()
+        NotificationCenter.default.post(name: .showConversationDetails, object: id)
+        await Check.pause(2.5)
+        report("opening the details (the whole history read)", start, CACurrentMediaTime())
+        guard let picker = segmented(in: content) else {
+            print("  no section picker found"); recorder.stop(); TileTrace.sink = nil; return
+        }
+        print("  sections: " + (0..<picker.segmentCount).map { picker.label(forSegment: $0) ?? "?" }.joined(separator: " · "))
+
+        start = CACurrentMediaTime()
+        select(picker, 1)
+        await Check.pause(2.5)
+        report("Photos & Videos shown (pictures decoding)", start, CACurrentMediaTime())
+
+        start = CACurrentMediaTime()
+        for step in 0..<10 {
+            store.focus(step % 2 == 0 ? other : id)
+            await Check.pause(0.4)
+        }
+        report("the workspace changing around them (the focus moving 10 times, messages arriving)", start, CACurrentMediaTime())
+
+        if let scroll = scrollView(below: picker, in: content) {
+            start = CACurrentMediaTime()
+            let travelled = await wheel(scroll, in: window, seconds: 3)
+            report("scrolling the photos (\(Int(travelled)) points)", start, CACurrentMediaTime())
+        } else {
+            print("  no photo grid found to scroll")
+        }
+
+        start = CACurrentMediaTime()
+        select(picker, 3)
+        await Check.pause(1.5)
+        report("Links shown", start, CACurrentMediaTime())
+        start = CACurrentMediaTime()
+        for step in 0..<6 {
+            store.focus(step % 2 == 0 ? other : id)
+            await Check.pause(0.4)
+        }
+        report("the workspace changing with the links shown", start, CACurrentMediaTime())
+
+        start = CACurrentMediaTime()
+        NotificationCenter.default.post(name: .showConversationDetails, object: id)
+        await Check.pause(1.2)
+        report("back to the conversation", start, CACurrentMediaTime())
+        recorder.stop()
+        TileTrace.sink = nil
+    }
+
+    /// The details' section picker: four segments, the first People.
+    static func segmented(in view: NSView) -> NSSegmentedControl? {
+        if let control = view as? NSSegmentedControl, control.segmentCount == 4,
+           control.label(forSegment: 0).map({ $0.hasPrefix("People") }) ?? true { return control }
+        for subview in view.subviews { if let found = segmented(in: subview) { return found } }
+        return nil
+    }
+    static func select(_ control: NSSegmentedControl, _ index: Int) {
+        control.selectedSegment = index
+        if let action = control.action { NSApp.sendAction(action, to: control.target, from: control) }
+    }
+    /// The scroll view under the picker, in the same tile.
+    static func scrollView(below picker: NSSegmentedControl, in content: NSView) -> NSScrollView? {
+        let anchor = picker.convert(picker.bounds, to: nil)
+        func all(_ view: NSView) -> [NSScrollView] {
+            var found = view.subviews.flatMap(all)
+            if let scroll = view as? NSScrollView { found.append(scroll) }
+            return found
+        }
+        return all(content).filter { scroll in
+            let frame = scroll.convert(scroll.bounds, to: nil)
+            return frame.minX <= anchor.midX && anchor.midX <= frame.maxX && frame.maxY <= anchor.minY + 4 && frame.height > 100
+        }.max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+    }
+    /// Scrolls down the scroll view with trackpad wheel steps, 16 points every 1/120 s; how far it went.
+    static func wheel(_ scroll: NSScrollView, in window: NSWindow, seconds: Double) async -> CGFloat {
+        let clip = scroll.contentView
+        let startY = clip.bounds.origin.y
+        let middle = window.convertPoint(toScreen: scroll.convert(NSPoint(x: scroll.bounds.midX, y: scroll.bounds.midY), to: nil))
+        let point = CGPoint(x: middle.x, y: (NSScreen.screens.first?.frame.height ?? 0) - middle.y)
+        let begin = CACurrentMediaTime()
+        var phase: Int64 = 1
+        while CACurrentMediaTime() - begin < seconds {
+            if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: -16, wheel2: 0, wheel3: 0) {
+                event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+                event.setIntegerValueField(.scrollWheelEventScrollPhase, value: phase)
+                phase = 2
+                event.location = point
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window.windowNumber))
+                event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window.windowNumber))
+                if let wheel = NSEvent(cgEvent: event) { window.sendEvent(wheel) }
+            }
+            await Check.pause(1.0 / 120)
+        }
+        return abs(clip.bounds.origin.y - startY)
     }
 }

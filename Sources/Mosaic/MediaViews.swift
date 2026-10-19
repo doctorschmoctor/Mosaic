@@ -318,9 +318,17 @@ struct AttachmentMenuItems: View {
         guard let path = attachment.path else { return }
         QuickLook.shared.show(URL(fileURLWithPath: path), among: siblings)
     }
+    /// The app a file opens in, by the file's extension: Launch Services is asked once for each
+    /// kind of file, not for each file's menu as it is drawn (a long history's details draw
+    /// hundreds of them).
+    private static var defaultApps: [String: String?] = [:]
     static func defaultAppName(for path: String) -> String? {
-        NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
+        let kind = (path as NSString).pathExtension.lowercased()
+        if let known = defaultApps[kind] { return known }
+        let name = NSWorkspace.shared.urlForApplication(toOpen: URL(fileURLWithPath: path))
             .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") }
+        defaultApps.updateValue(name, forKey: kind)
+        return name
     }
     /// Puts the file on the pasteboard — as a file, and for a picture as image data too, so it
     /// pastes into another Mosaic composer, Messages, Mail or an image editor alike.

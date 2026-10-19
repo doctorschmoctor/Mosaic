@@ -24,6 +24,10 @@ struct SharedContent: Equatable {
     var media: [Item] = []
     var files: [Item] = []
     var links: [Link] = []
+    /// The files that are on this Mac, for Quick Look's next and previous: worked out once, not
+    /// for each picture's menu as it was drawn (hundreds of times over, in a long history).
+    private(set) var localMedia: [URL] = []
+    private(set) var localFiles: [URL] = []
 
     init(messages: [Message], history: SharedHistory? = nil) {
         var seenItems = Set<String>(), seenLinks = Set<String>()
@@ -41,20 +45,41 @@ struct SharedContent: Equatable {
             }
             for match in LinkDetector.links(in: message.text) { add(Link(messageID: message.id, url: match.url, date: message.date)) }
         }
-        guard let history else { return }
-        // The whole history's, after the loaded ones; a loaded message's items are already in.
-        for file in history.files where !file.attachment.isSticker {
-            add(Item(messageID: file.messageID, attachment: file.attachment, date: file.date))
+        if let history {
+            // The whole history's, after the loaded ones; a loaded message's items are already in.
+            for file in history.files where !file.attachment.isSticker {
+                add(Item(messageID: file.messageID, attachment: file.attachment, date: file.date))
+            }
+            for link in history.links { add(Link(messageID: link.messageID, url: link.url, date: link.date)) }
+            // Newest first across both.
+            media.sort { $0.date > $1.date }
+            files.sort { $0.date > $1.date }
+            links.sort { $0.date > $1.date }
         }
-        for link in history.links { add(Link(messageID: link.messageID, url: link.url, date: link.date)) }
-        // Newest first across both.
-        media.sort { $0.date > $1.date }
-        files.sort { $0.date > $1.date }
-        links.sort { $0.date > $1.date }
+        localMedia = media.compactMap { $0.attachment.path.map(URL.init(fileURLWithPath:)) }
+        localFiles = files.compactMap { $0.attachment.path.map(URL.init(fileURLWithPath:)) }
     }
-    /// The files that are on this Mac, for Quick Look's next and previous.
-    var localMedia: [URL] { media.compactMap { $0.attachment.path.map(URL.init(fileURLWithPath:)) } }
-    var localFiles: [URL] { files.compactMap { $0.attachment.path.map(URL.init(fileURLWithPath:)) } }
+}
+
+/// A tile's shared content, worked out again only when its messages or the whole history's files
+/// and links change — not each time the tile is drawn again (a focus change, a refresh, a message
+/// in another conversation), which with a long history's hundreds of pictures and links held up
+/// every change in the workspace while the details were open.
+@MainActor final class SharedContentCache {
+    private var messages: [Message]?
+    private var history: SharedHistory?
+    private(set) var content = SharedContent(messages: [])
+    /// Goes up each time the content is worked out again: the lists compare it to tell whether
+    /// they have anything new to draw.
+    private(set) var version = 0
+    func content(for messages: [Message], history: SharedHistory?) -> SharedContent {
+        if let known = self.messages, known == messages, self.history == history { return content }
+        self.messages = messages
+        self.history = history
+        content = SharedContent(messages: messages, history: history)
+        version += 1
+        return content
+    }
 }
 
 extension Notification.Name {
@@ -76,6 +101,7 @@ struct ConversationDetailsPanel: View {
     /// The whole history's files and links, once read (nil until then, and in the demo workspace).
     @State private var history: SharedHistory?
     @State private var readingHistory = false
+    @State private var shared = SharedContentCache()
 
     enum Section: String, CaseIterable, Identifiable {
         case people, media, files, links
@@ -91,7 +117,8 @@ struct ConversationDetailsPanel: View {
     }
 
     var body: some View {
-        let content = SharedContent(messages: conversation.messages, history: history)
+        let content = shared.content(for: conversation.messages, history: history)
+        let version = shared.version
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Picker("Details", selection: $section) {
@@ -107,11 +134,13 @@ struct ConversationDetailsPanel: View {
             Divider().opacity(0.6)
             ScrollView {
                 Group {
+                    // Each list is drawn again only when what it shows changes, not each time the
+                    // tile is; the long ones lay out only the rows in view (and a few more).
                     switch section {
                     case .people: people
-                    case .media: media(content)
-                    case .files: files(content)
-                    case .links: links(content)
+                    case .media: SharedMediaGrid(content: content, version: version, onShowMessage: onShowMessage).equatable()
+                    case .files: SharedFilesList(content: content, version: version, onShowMessage: onShowMessage).equatable()
+                    case .links: SharedLinksList(content: content, version: version, onShowMessage: onShowMessage).equatable()
                     }
                 }
                 .padding(12)
@@ -157,9 +186,25 @@ struct ConversationDetailsPanel: View {
         }
     }
 
-    @ViewBuilder private func media(_ content: SharedContent) -> some View {
+}
+
+/// Says a list has nothing in it.
+private struct DetailsEmpty: View {
+    let text: String
+    var body: some View { Text(text).font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 80) }
+}
+
+/// The photos and videos: a grid that lays out the pictures in view (and a few more) as it
+/// scrolls, drawn again only when the shared content changes (`version`).
+struct SharedMediaGrid: View, Equatable {
+    let content: SharedContent
+    let version: Int
+    let onShowMessage: (String) -> Void
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.version == rhs.version }
+
+    var body: some View {
         if content.media.isEmpty {
-            empty("No photos or videos in the loaded messages.")
+            DetailsEmpty(text: "No photos or videos in the loaded messages.")
         } else {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 76, maximum: 120), spacing: 6)], spacing: 6) {
                 ForEach(content.media) { item in
@@ -175,12 +220,20 @@ struct ConversationDetailsPanel: View {
             }
         }
     }
+}
 
-    @ViewBuilder private func files(_ content: SharedContent) -> some View {
+/// The files, one row each, laid out as they scroll into view.
+struct SharedFilesList: View, Equatable {
+    let content: SharedContent
+    let version: Int
+    let onShowMessage: (String) -> Void
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.version == rhs.version }
+
+    var body: some View {
         if content.files.isEmpty {
-            empty("No files in the loaded messages.")
+            DetailsEmpty(text: "No files in the loaded messages.")
         } else {
-            VStack(alignment: .leading, spacing: 2) {
+            LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(content.files) { item in
                     HStack(spacing: 9) {
                         Image(nsImage: item.attachment.path.map { NSWorkspace.shared.icon(forFile: $0) } ?? NSWorkspace.shared.icon(for: .data))
@@ -204,12 +257,20 @@ struct ConversationDetailsPanel: View {
             }
         }
     }
+}
 
-    @ViewBuilder private func links(_ content: SharedContent) -> some View {
+/// The links, one row each, laid out as they scroll into view.
+struct SharedLinksList: View, Equatable {
+    let content: SharedContent
+    let version: Int
+    let onShowMessage: (String) -> Void
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.version == rhs.version }
+
+    var body: some View {
         if content.links.isEmpty {
-            empty("No links in the loaded messages.")
+            DetailsEmpty(text: "No links in the loaded messages.")
         } else {
-            VStack(alignment: .leading, spacing: 2) {
+            LazyVStack(alignment: .leading, spacing: 2) {
                 ForEach(content.links) { link in
                     HStack(spacing: 9) {
                         Image(systemName: "link").font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 24)
@@ -238,10 +299,6 @@ struct ConversationDetailsPanel: View {
             }
         }
     }
-
-    private func empty(_ text: String) -> some View {
-        Text(text).font(.callout).foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 80)
-    }
 }
 
 /// A small square picture of a photo or video, decoded at its small size; one that is not on this
@@ -252,11 +309,14 @@ struct MediaThumbnail: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
+        let tier = ThumbnailCache.tier(forPoints: 120, scale: displayScale)
+        // Decoded already (seen before, here or in the thread): shown from the first frame.
+        let shown = image ?? attachment.path.flatMap { ThumbnailCache.shared.decoded(path: $0, tier: tier) }
         Rectangle().fill(Palette.incoming)
             .aspectRatio(1, contentMode: .fit)
             .overlay {
-                if let image {
-                    Image(nsImage: image).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
+                if let shown {
+                    Image(nsImage: shown).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
                 } else if attachment.path == nil {
                     VStack(spacing: 3) {
                         Image(systemName: attachment.kind == .video ? "video.slash" : "icloud.slash").font(.system(size: 14))
@@ -265,7 +325,7 @@ struct MediaThumbnail: View {
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if attachment.kind == .video, image != nil {
+                if attachment.kind == .video, shown != nil {
                     Image(systemName: "play.fill").font(.system(size: 9)).foregroundStyle(.white).padding(5).shadow(radius: 2)
                 }
             }
@@ -276,7 +336,10 @@ struct MediaThumbnail: View {
             .accessibilityAddTraits(.isButton)
             .task(id: attachment.path) {
                 guard attachment.path != nil, image == nil else { return }
-                image = await ThumbnailCache.shared.image(for: attachment, tier: ThumbnailCache.tier(forPoints: 120, scale: displayScale))
+                image = await ThumbnailCache.shared.image(for: attachment, tier: tier)
             }
+            // Out of view, the picture is the cache's to keep or let go of: a long history's
+            // hundreds would otherwise all stay in memory once scrolled past.
+            .onDisappear { image = nil }
     }
 }
