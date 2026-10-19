@@ -29,10 +29,13 @@ final class DetailsTests: XCTestCase {
     /// not each time the details are drawn — and its lists say when there is something new.
     @MainActor func testSharedContentIsWorkedOutOncePerChange() {
         let day = Date(timeIntervalSinceReferenceDate: 700_000_000)
-        var messages = (1...300).map { index in
-            Message(id: "\(index)", text: index % 3 == 0 ? "see https://example.com/\(index)" : "note \(index)", date: day + Double(index) * 60,
-                    isFromMe: index % 2 == 0,
-                    attachments: index % 2 == 0 ? [Attachment(id: "p\(index)", path: "/tmp/p\(index).jpg", name: "p\(index).jpg", mimeType: "image/jpeg")] : [])
+        var messages: [Message] = []
+        for index in 1...300 {
+            let text = index % 3 == 0 ? "see https://example.com/\(index)" : "note \(index)"
+            var attachments: [Attachment] = []
+            if index % 2 == 0 { attachments.append(Attachment(id: "p\(index)", path: "/tmp/p\(index).jpg", name: "p\(index).jpg", mimeType: "image/jpeg")) }
+            let date = day + Double(index) * 60
+            messages.append(Message(id: "\(index)", text: text, date: date, isFromMe: index % 2 == 0, attachments: attachments))
         }
         let cache = SharedContentCache()
         let first = cache.content(for: messages, history: nil)
